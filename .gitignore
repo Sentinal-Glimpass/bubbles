@@ -1,0 +1,6 @@
+# binaries
+/bubbles
+*.test
+# go
+/vendor/
+bin/
