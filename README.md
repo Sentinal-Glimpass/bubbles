@@ -37,26 +37,39 @@ UI           click bubble 0 → see 0.1 → click → see 0.1.2
 
 ## Status
 
-**MVP 1, Plan 1 — the kernel — is built and fully tested.** The entire SMS + spawn
-engine runs end-to-end against a `FakeRunner` with zero `claude`, zero tokens, zero
-network. Next up (Plan 2): the Bubbletea TUI, a `LocalRunner` launching real
-`claude`, and the MCP bridge.
+**MVP 1 is built and fully tested headless.** Both layers are in:
+
+- **Plan 1 — the kernel:** addressing, the message bus, capabilities (SMS contacts +
+  spawn budget), the registry, and the runner abstraction. Driven end-to-end by a
+  `FakeRunner` with zero `claude`, zero tokens, zero network.
+- **Plan 2 — the visible layer:** a Bubbletea zoomable fleet tree (blink pings,
+  dive-in/detach), a `LocalRunner` that launches real `claude` in PTYs, and an MCP
+  bridge (`bubbles mcp-stdio` helper + unix-socket relay) giving each session the
+  `send`/`contacts` tools. The compiled binary's MCP path is proven end-to-end in a
+  test; the **live `claude` run is pending validation on macOS** (see below).
 
 Design and plans live in [`docs/superpowers/`](docs/superpowers/).
 
-## Develop
+## Run & develop
 
 ```bash
-go test ./...     # run the suite
-go vet ./...      # static checks
-make test         # same as above
+make test     # full suite (also: go test ./...)
+make vet      # static checks
+make bin      # build bin/bubbles
+./bin/bubbles # launch the fleet TUI (needs claude on PATH for live bubbles)
 ```
 
-The PTY spike (delivery de-risk) lives in `cmd/spike`; run it against a real `claude`
-on macOS to confirm interrupt-delivery:
+Inside the TUI: `↑/↓` move · `enter` dive into a bubble · `Ctrl-\` detach · `n` new
+bubble · `q` quit.
+
+### macOS validation (needs a real `claude`)
+
+The headless tests cover every layer with fakes; these steps confirm the live
+integration (see `docs/superpowers/plans/2026-06-28-bubbles-mvp1-visible-layer.md`):
 
 ```bash
-go run ./cmd/spike -cmd claude
+go run ./cmd/spike -cmd claude        # confirm Esc interrupts a turn (or -int 0x1b)
+./bin/bubbles                         # spawn a bubble; /mcp should list send, contacts
 ```
 
 ## License
