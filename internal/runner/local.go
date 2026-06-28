@@ -60,6 +60,16 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	return s, nil
 }
 
+// Session returns the live session for a, or nil if none.
+func (r *LocalRunner) Session(a addr.Address) Session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok := r.sessions[a]; ok {
+		return s
+	}
+	return nil
+}
+
 // Kill terminates the session for a.
 func (r *LocalRunner) Kill(a addr.Address) error {
 	r.mu.Lock()
