@@ -3,6 +3,7 @@ package runner
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
 	"github.com/creack/pty"
@@ -35,14 +36,22 @@ func NewLocal() *LocalRunner {
 // Launch starts claude in a PTY in dir, seeded with the persona/goal.
 func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session, error) {
 	var args []string
+	// --mcp-config is variadic in claude (it consumes following values), so it
+	// must NOT sit right before the positional prompt or the prompt gets eaten
+	// as a second config path. We also write the config to a file rather than
+	// passing inline JSON, which avoids quoting ambiguity.
+	if r.MCPConfig != nil {
+		cfgPath := filepath.Join(dir, ".bubbles-mcp.json")
+		if err := os.WriteFile(cfgPath, []byte(r.MCPConfig(a)), 0o600); err != nil {
+			return nil, err
+		}
+		args = append(args, "--mcp-config", cfgPath)
+	}
 	if r.CitizenPrompt != "" {
 		args = append(args, "--append-system-prompt", r.citizen(a))
 	}
 	args = append(args, "--permission-mode", "acceptEdits")
-	if r.MCPConfig != nil {
-		args = append(args, "--mcp-config", r.MCPConfig(a))
-	}
-	args = append(args, initialPrompt(opts))
+	args = append(args, initialPrompt(opts)) // positional prompt stays last
 
 	cmd := exec.Command(r.Bin, args...)
 	cmd.Dir = dir
