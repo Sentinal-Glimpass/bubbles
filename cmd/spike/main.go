@@ -44,4 +44,7 @@ func main() {
 
 	time.Sleep(6 * time.Second)
 	fmt.Println("\n--- spike done ---")
+	// claude enables mouse reporting / bracketed paste in the PTY; disable them
+	// on our real terminal so the shell isn't left echoing mouse-move escapes.
+	fmt.Print("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l")
 }

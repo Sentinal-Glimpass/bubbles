@@ -163,7 +163,9 @@ func diveInto(lr *runner.LocalRunner, a addr.Address) {
 		f.Write(buf[:n])
 	}
 	detached.Store(true)
-	fmt.Print("\r\n")
+	// The inner claude session may have enabled mouse reporting / bracketed
+	// paste; disable them so the fleet view (and the user's terminal) are clean.
+	fmt.Print("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\r\n")
 }
 
 func defaultWorkspace() string {
