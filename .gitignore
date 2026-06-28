@@ -4,3 +4,4 @@
 # go
 /vendor/
 bin/
+/spike
