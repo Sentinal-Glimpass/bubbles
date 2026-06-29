@@ -97,7 +97,7 @@ func runApp() {
 
 	// Quit/relaunch loop: the TUI quits when you dive in; we hand over the
 	// terminal, then relaunch the fleet view.
-	marks := map[int]addr.Address{} // shared number-slots, used in fleet and in-dive
+	marks := restoreFleet(baseDir, k) // rehydrate a saved fleet (empty if none)
 	m := tui.New(k)
 	m.BaseDir = baseDir
 	m.Marks = marks
@@ -110,6 +110,7 @@ func runApp() {
 		if err != nil {
 			fatal(err)
 		}
+		_ = saveFleet(baseDir, k, marks) // persist fleet-view changes (spawn/introduce/marks)
 		sel := final.(tui.Model).Selected
 		if sel == "" {
 			return // user quit
@@ -118,7 +119,8 @@ func runApp() {
 		for sel != "" {
 			sel = diveInto(lr, sel, marks)
 		}
-		m = tui.New(k) // refresh rows, clear selection
+		_ = saveFleet(baseDir, k, marks) // persist anything spawned during the dive
+		m = tui.New(k)                   // refresh rows, clear selection
 		m.BaseDir = baseDir
 		m.Marks = marks
 	}

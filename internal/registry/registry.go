@@ -3,6 +3,7 @@ package registry
 
 import (
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
@@ -67,6 +68,40 @@ func (r *Registry) SetStatus(a addr.Address, s Status) {
 	if b, ok := r.bubbles[a]; ok {
 		b.Status = s
 	}
+}
+
+// All returns every bubble, including root (unordered).
+func (r *Registry) All() []*Bubble {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*Bubble, 0, len(r.bubbles))
+	for _, b := range r.bubbles {
+		out = append(out, b)
+	}
+	return out
+}
+
+// Restore inserts a bubble with an explicit address (used when rehydrating a
+// saved fleet) and advances the parent's child counter so later spawns don't
+// reuse an address.
+func (r *Registry) Restore(b Bubble) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	nb := b
+	r.bubbles[b.Addr] = &nb
+	if i := lastSegInt(b.Addr); i > r.nextSeq[b.Parent] {
+		r.nextSeq[b.Parent] = i
+	}
+}
+
+// lastSegInt returns the integer value of an address's final segment ("0.1.2"->2).
+func lastSegInt(a addr.Address) int {
+	s := string(a)
+	if i := strings.LastIndex(s, "."); i >= 0 {
+		n, _ := strconv.Atoi(s[i+1:])
+		return n
+	}
+	return 0
 }
 
 // Children returns the direct children of a (unordered).

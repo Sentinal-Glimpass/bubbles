@@ -79,6 +79,18 @@ func (k *Kernel) Spawn(by addr.Address, persona, dir string, opts runner.SpawnOp
 	return b.Addr, nil
 }
 
+// Relaunch starts a session for an already-registered (restored) bubble and
+// wires delivery, without assigning a new address. Used when rehydrating a saved
+// fleet; the session resumes its prior conversation.
+func (k *Kernel) Relaunch(a addr.Address, dir, persona string) error {
+	sess, err := k.runner.Launch(a, dir, runner.SpawnOpts{Persona: persona, Resume: true})
+	if err != nil {
+		return err
+	}
+	k.Bus.Subscribe(a, func(m bus.Message) { _, _ = sess.Write([]byte(Format(m))) })
+	return nil
+}
+
 // Format renders a message as injected into a session's input.
 func Format(m bus.Message) string {
 	return fmt.Sprintf("\n[message from %s] %s — %s\n", m.From, m.Subject, m.Body)

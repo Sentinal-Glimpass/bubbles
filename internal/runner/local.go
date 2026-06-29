@@ -54,7 +54,11 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 		args = append(args, "--append-system-prompt", r.citizen(a))
 	}
 	args = append(args, "--permission-mode", "acceptEdits")
-	args = append(args, initialPrompt(opts)) // positional prompt stays last
+	if opts.Resume {
+		args = append(args, "--continue") // resume the bubble's prior conversation in this dir
+	} else {
+		args = append(args, initialPrompt(opts)) // positional prompt stays last
+	}
 
 	cmd := exec.Command(r.Bin, args...)
 	cmd.Dir = dir

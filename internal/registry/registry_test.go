@@ -27,6 +27,18 @@ func TestAddAssignsAddresses(t *testing.T) {
 	}
 }
 
+func TestRestoreContinuesNumbering(t *testing.T) {
+	r := New()
+	r.Restore(Bubble{Addr: "0.1", Persona: "a", Parent: "0", Status: Idle})
+	r.Restore(Bubble{Addr: "0.2", Persona: "b", Parent: "0", Status: Idle})
+	if b, ok := r.Get("0.1"); !ok || b.Persona != "a" {
+		t.Fatalf("0.1 not restored: %+v ok=%v", b, ok)
+	}
+	if nb := r.Add(addr.Root, "c", ""); nb.Addr != "0.3" {
+		t.Fatalf("next Add after restore = %q want 0.3", nb.Addr)
+	}
+}
+
 func TestStatusAndChildren(t *testing.T) {
 	r := New()
 	a1 := r.Add(addr.Root, "scout", "")

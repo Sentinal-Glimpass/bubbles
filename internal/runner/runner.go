@@ -8,6 +8,7 @@ import "github.com/Sentinal-Glimpass/bubbles/internal/addr"
 type SpawnOpts struct {
 	Persona string
 	Goal    string
+	Resume  bool // restored bubble: continue its prior conversation, no initial prompt
 }
 
 // Session is a running agent we can inject input into (message delivery).
