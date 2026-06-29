@@ -79,7 +79,14 @@ func (m Model) View() string {
 	case m.spawnStage == 1:
 		b.WriteString("new bubble — persona: " + m.input + "▏\n")
 	case m.spawnStage == 2:
-		b.WriteString("bubble '" + m.pendingPersona + "' — folder (blank = ./" + m.pendingPersona + "): " + m.input + "▏\n")
+		b.WriteString("bubble '" + m.pendingPersona + "' — pick a folder (↑/↓, enter):\n")
+		for i, c := range m.folderChoices {
+			cur := "  "
+			if i == m.folderCursor {
+				cur = "> "
+			}
+			b.WriteString("  " + cur + c.label + "\n")
+		}
 	case m.introStage == 1:
 		b.WriteString("introduce — ↑/↓ + enter to add bubbles (✓); enter again on a ✓ bubble to finalize; esc cancels\n")
 	default:

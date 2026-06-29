@@ -35,9 +35,11 @@ type Model struct {
 	pings   map[addr.Address]string
 	blinkOn bool
 
-	spawnStage     int // 0 = none, 1 = entering persona, 2 = entering folder
+	spawnStage     int // 0 = none, 1 = entering persona, 2 = picking folder
 	pendingPersona string
 	input          string
+	folderChoices  []folderChoice
+	folderCursor   int
 
 	introStage int                   // 0 = none, 1 = selecting members
 	introSet   map[addr.Address]bool // bubbles chosen for a group introduction
@@ -195,26 +197,36 @@ func (m Model) finalizeIntroduce() {
 	}
 }
 
+// folderChoice is one option in the folder picker. folder is passed to
+// resolveFolder (""=new ./persona subdir, "."=launch dir, "name"=base/name).
+type folderChoice struct {
+	label  string
+	folder string
+}
+
+func (m Model) clearSpawn() Model {
+	m.spawnStage, m.input, m.pendingPersona = 0, "", ""
+	m.folderChoices, m.folderCursor = nil, 0
+	return m
+}
+
 func (m Model) updateSpawning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" {
+		return m.clearSpawn(), nil
+	}
+	if m.spawnStage == 2 {
+		return m.updateFolderPick(msg)
+	}
+	// stage 1: type the persona
 	switch msg.String() {
-	case "esc":
-		m.spawnStage, m.input, m.pendingPersona = 0, "", ""
 	case "enter":
-		switch m.spawnStage {
-		case 1: // persona entered → ask for folder
-			persona := strings.TrimSpace(m.input)
-			if persona == "" {
-				m.spawnStage = 0
-			} else {
-				m.pendingPersona, m.input, m.spawnStage = persona, "", 2
-			}
-		case 2: // folder entered → spawn
-			dir := resolveFolder(m.BaseDir, strings.TrimSpace(m.input), m.pendingPersona)
-			_ = os.MkdirAll(dir, 0o755)
-			_, _ = m.k.Spawn(addr.Root, m.pendingPersona, dir, runner.SpawnOpts{Persona: m.pendingPersona})
-			m.rows = buildRows(m.k.Reg)
-			m.spawnStage, m.input, m.pendingPersona = 0, "", ""
+		persona := strings.TrimSpace(m.input)
+		if persona == "" {
+			return m.clearSpawn(), nil
 		}
+		m.pendingPersona, m.input = persona, ""
+		m.folderChoices, m.folderCursor = listFolders(m.BaseDir, persona), 0
+		m.spawnStage = 2
 	case "backspace":
 		if len(m.input) > 0 {
 			m.input = m.input[:len(m.input)-1]
@@ -225,6 +237,44 @@ func (m Model) updateSpawning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m Model) updateFolderPick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.folderCursor > 0 {
+			m.folderCursor--
+		}
+	case "down", "j":
+		if m.folderCursor < len(m.folderChoices)-1 {
+			m.folderCursor++
+		}
+	case "enter":
+		if len(m.folderChoices) > 0 {
+			c := m.folderChoices[m.folderCursor]
+			dir := resolveFolder(m.BaseDir, c.folder, m.pendingPersona)
+			_ = os.MkdirAll(dir, 0o755)
+			_, _ = m.k.Spawn(addr.Root, m.pendingPersona, dir, runner.SpawnOpts{Persona: m.pendingPersona})
+			m.rows = buildRows(m.k.Reg)
+		}
+		return m.clearSpawn(), nil
+	}
+	return m, nil
+}
+
+// listFolders builds the folder picker: "here", each immediate subdir of base
+// (hidden ones skipped), then a "new ./persona" option.
+func listFolders(base, persona string) []folderChoice {
+	out := []folderChoice{{label: ". (here — whole project)", folder: "."}}
+	if entries, err := os.ReadDir(base); err == nil {
+		for _, e := range entries {
+			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+				out = append(out, folderChoice{label: e.Name() + "/", folder: e.Name()})
+			}
+		}
+	}
+	out = append(out, folderChoice{label: "+ new folder: ./" + persona, folder: ""})
+	return out
 }
 
 // resolveFolder maps a (possibly blank/relative) folder to an absolute path

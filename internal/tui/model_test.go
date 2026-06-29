@@ -2,6 +2,8 @@ package tui
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -82,6 +84,37 @@ func TestIntroduceGroup(t *testing.T) {
 			!k.Caps.CanSend(addr.Address(p[1]), addr.Address(p[0])) {
 			t.Fatalf("after group introduce, %s and %s should be mutual contacts", p[0], p[1])
 		}
+	}
+}
+
+func TestFolderPickerSelectsSubdir(t *testing.T) {
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	k := newKernelWith(t)
+	m := New(k)
+	m.BaseDir = base
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	tm.Type("worker")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // persona -> folder list [".", "api/", "+ new"]
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> "api/"
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // select api
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(b, []byte("worker"))
+	}, teatest.WithDuration(3*time.Second))
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	b, ok := k.Reg.Get(addr.Address("0.1"))
+	if !ok {
+		t.Fatal("bubble 0.1 not spawned")
+	}
+	if want := filepath.Join(base, "api"); b.Dir != want {
+		t.Fatalf("bubble dir = %q want %q", b.Dir, want)
 	}
 }
 
