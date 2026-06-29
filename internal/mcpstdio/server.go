@@ -76,21 +76,41 @@ func (s *Server) handle(msg rpcMessage) rpcResponse {
 
 func (s *Server) call(msg rpcMessage) rpcResponse {
 	var p struct {
-		Name      string            `json:"name"`
-		Arguments map[string]string `json:"arguments"`
+		Name      string         `json:"name"`
+		Arguments map[string]any `json:"arguments"`
 	}
 	if err := json.Unmarshal(msg.Params, &p); err != nil {
 		return errResp(msg.ID, -32602, "invalid params")
 	}
-	arg := func(k string) string { return p.Arguments[k] }
+	arg := func(k string) string {
+		if v, ok := p.Arguments[k].(string); ok {
+			return v
+		}
+		return ""
+	}
+	argBool := func(k string) bool {
+		switch v := p.Arguments[k].(type) {
+		case bool:
+			return v
+		case string:
+			return v == "true"
+		}
+		return false
+	}
 	switch p.Name {
 	case "send":
-		if err := s.B.Send(s.Self, arg("to"), arg("subject"), arg("body")); err != nil {
+		if err := s.B.Send(s.Self, arg("to"), arg("subject"), arg("body"), argBool("urgent")); err != nil {
 			return toolErr(msg.ID, err.Error())
 		}
-		return toolOK(msg.ID, "sent to "+arg("to"))
+		return toolOK(msg.ID, "delivered to "+arg("to")+"'s inbox")
 	case "contacts":
 		return toolOK(msg.ID, strings.Join(s.B.Contacts(s.Self), ", "))
+	case "inbox":
+		msgs := s.B.Inbox(s.Self)
+		if len(msgs) == 0 {
+			return toolOK(msg.ID, "(inbox empty)")
+		}
+		return toolOK(msg.ID, strings.Join(msgs, "\n"))
 	case "spawn":
 		if !s.Spawnable {
 			return errResp(msg.ID, -32601, "tool not available: spawn")

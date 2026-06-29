@@ -6,8 +6,9 @@ package mcpstdio
 // Backend executes tool calls. The identity (from/by) is fixed by the Server to
 // this bubble's own address, so a session cannot spoof another bubble.
 type Backend interface {
-	Send(from, to, subject, body string) error
+	Send(from, to, subject, body string, urgent bool) error
 	Contacts(owner string) []string
+	Inbox(owner string) []string
 	Spawn(by, persona, dir string) (string, error)
 }
 
@@ -28,19 +29,29 @@ func strProp(props ...string) map[string]any {
 
 // tools returns the tool list for this Server; spawn appears only when granted.
 func (s *Server) tools() []Tool {
+	sendProps := strProp("to", "subject", "body")
+	sendProps["urgent"] = map[string]any{
+		"type":        "boolean",
+		"description": "If true, also queue it into the recipient's session for pickup on its next turn.",
+	}
 	ts := []Tool{
 		{
 			Name:        "send",
-			Description: "Send a short message to a contact address (root is \"0\").",
+			Description: "Send a message to a contact's inbox (root is \"0\"). They read it via inbox() on their own schedule.",
 			InputSchema: map[string]any{
 				"type":       "object",
-				"properties": strProp("to", "subject", "body"),
+				"properties": sendProps,
 				"required":   []string{"to", "subject"},
 			},
 		},
 		{
 			Name:        "contacts",
-			Description: "List the addresses you are allowed to send to.",
+			Description: "List who you can message, each as \"address (role)\".",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "inbox",
+			Description: "Read and clear your unread messages (each shows the sender's address and role).",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 	}

@@ -31,8 +31,8 @@ func TestFleetEndToEnd(t *testing.T) {
 		t.Fatalf("spawn refactor: %v", err)
 	}
 
-	// Worker pings root.
-	if err := k.Send(scout, addr.Root, "found 3 bugs", "details"); err != nil {
+	// Worker -> root: blinks the dashboard (bus) and lands in root's inbox.
+	if err := k.Send(scout, addr.Root, "found 3 bugs", "details", false); err != nil {
 		t.Fatalf("scout->root: %v", err)
 	}
 	if len(pings) != 1 || pings[0].From != scout {
@@ -40,26 +40,36 @@ func TestFleetEndToEnd(t *testing.T) {
 	}
 
 	// Workers can't talk before introduction.
-	if err := k.Send(scout, refactor, "hi", ""); !errors.Is(err, ErrNotContact) {
+	if err := k.Send(scout, refactor, "hi", "", false); !errors.Is(err, ErrNotContact) {
 		t.Fatalf("got %v want ErrNotContact", err)
 	}
-
-	// Root introduces them, then they text each other (delivery is injected).
 	if err := k.Introduce(addr.Root, scout, refactor); err != nil {
 		t.Fatalf("introduce: %v", err)
 	}
-	if err := k.Send(scout, refactor, "take the API layer", "thanks"); err != nil {
+
+	// Non-urgent: goes to the inbox, does NOT interrupt/inject.
+	if err := k.Send(scout, refactor, "take the API layer", "thanks", false); err != nil {
 		t.Fatalf("scout->refactor: %v", err)
 	}
-	if got := fr.Session(refactor).Written(); !strings.Contains(got, "from "+scout.String()) ||
-		!strings.Contains(got, "take the API layer") {
-		t.Fatalf("refactor session got %q", got)
+	if w := fr.Session(refactor).Written(); w != "" {
+		t.Fatalf("non-urgent should not inject, got %q", w)
 	}
-	if err := k.Send(refactor, scout, "on it", ""); err != nil {
-		t.Fatalf("refactor->scout: %v", err)
+	in := k.Inbox(refactor)
+	if len(in) != 1 || !strings.Contains(in[0], "from "+scout.String()+" (scout)") ||
+		!strings.Contains(in[0], "take the API layer") {
+		t.Fatalf("refactor inbox = %v", in)
 	}
-	if got := fr.Session(scout).Written(); !strings.Contains(got, "from "+refactor.String()) {
-		t.Fatalf("scout session got %q", got)
+	if len(k.Inbox(refactor)) != 0 {
+		t.Fatal("inbox should be empty after reading")
+	}
+
+	// Urgent: queued into the session for next-turn pickup.
+	if err := k.Send(scout, refactor, "urgent!", "now", true); err != nil {
+		t.Fatalf("urgent scout->refactor: %v", err)
+	}
+	if w := fr.Session(refactor).Written(); !strings.Contains(w, "urgent!") ||
+		!strings.Contains(w, "from "+scout.String()+" (scout)") {
+		t.Fatalf("urgent should inject, got %q", w)
 	}
 }
 

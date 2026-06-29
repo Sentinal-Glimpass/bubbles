@@ -23,16 +23,17 @@ type LocalRunner struct {
 	Bin           string                    // default "claude"
 	CitizenPrompt string                    // appended via --append-system-prompt
 	MCPConfig     func(addr.Address) string // inline JSON for --mcp-config (nil = none)
-	InterruptByte byte                      // sent before a delivered message (0 = none)
+	InterruptByte byte                      // optional byte before a delivered message (0 = none; default 0 so urgent messages are queued, not interrupting)
 	AllowAll      *bool                     // shared toggle: true => --dangerously-skip-permissions
 
 	mu       sync.Mutex
 	sessions map[addr.Address]*ptySession
 }
 
-// NewLocal returns a LocalRunner with claude defaults (Esc as interrupt byte).
+// NewLocal returns a LocalRunner with claude defaults. InterruptByte is 0:
+// urgent messages are typed in (queued for the next turn), never interrupting.
 func NewLocal() *LocalRunner {
-	return &LocalRunner{Bin: "claude", InterruptByte: 0x1b, sessions: map[addr.Address]*ptySession{}}
+	return &LocalRunner{Bin: "claude", sessions: map[addr.Address]*ptySession{}}
 }
 
 // Launch starts claude in a PTY in dir, seeded with the persona/goal.

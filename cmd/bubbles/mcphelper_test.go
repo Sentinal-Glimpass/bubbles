@@ -71,7 +71,7 @@ func TestMCPHelperBinaryEndToEnd(t *testing.T) {
 	if len(got) != 1 || got[0].Op != "send" || got[0].From != "0.1" || got[0].To != "0" {
 		t.Fatalf("relayed requests = %+v, want one send from 0.1 to 0", got)
 	}
-	if !strings.Contains(out.String(), "sent to 0") {
+	if !strings.Contains(out.String(), "delivered to 0") {
 		t.Fatalf("helper stdout missing tool result:\n%s", out.String())
 	}
 }

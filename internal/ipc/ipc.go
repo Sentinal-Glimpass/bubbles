@@ -11,11 +11,12 @@ import (
 
 // Request is a tool action relayed from a bubble's MCP helper.
 type Request struct {
-	Op      string `json:"op"` // "send" | "contacts" | "spawn"
+	Op      string `json:"op"` // "send" | "contacts" | "spawn" | "inbox"
 	From    string `json:"from,omitempty"`
 	To      string `json:"to,omitempty"`
 	Subject string `json:"subject,omitempty"`
 	Body    string `json:"body,omitempty"`
+	Urgent  bool   `json:"urgent,omitempty"`
 	Persona string `json:"persona,omitempty"`
 	Dir     string `json:"dir,omitempty"`
 }
@@ -25,6 +26,7 @@ type Reply struct {
 	OK       bool     `json:"ok"`
 	Err      string   `json:"err,omitempty"`
 	Contacts []string `json:"contacts,omitempty"`
+	Messages []string `json:"messages,omitempty"`
 	Addr     string   `json:"addr,omitempty"`
 }
 

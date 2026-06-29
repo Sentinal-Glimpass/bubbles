@@ -6,10 +6,12 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/bus"
 	"github.com/Sentinal-Glimpass/bubbles/internal/caps"
+	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 )
@@ -22,28 +24,79 @@ var ErrNotAllowed = errors.New("kernel: action not permitted")
 
 // Kernel is the fleet engine.
 type Kernel struct {
-	Bus    *bus.Bus
-	Caps   *caps.Store
-	Reg    *registry.Registry
-	runner runner.Runner
+	Bus   *bus.Bus
+	Caps  *caps.Store
+	Reg   *registry.Registry
+	Store *inbox.Store
+
+	runner   runner.Runner
+	smu      sync.Mutex
+	sessions map[addr.Address]runner.Session
 }
 
 // New builds a Kernel over the given runner, with root seeded.
 func New(r runner.Runner) *Kernel {
 	return &Kernel{
-		Bus:    bus.New(),
-		Caps:   caps.New(),
-		Reg:    registry.New(),
-		runner: r,
+		Bus:      bus.New(),
+		Caps:     caps.New(),
+		Reg:      registry.New(),
+		Store:    inbox.New(),
+		runner:   r,
+		sessions: map[addr.Address]runner.Session{},
 	}
 }
 
-// Send delivers a message between bubbles, enforcing contacts.
-func (k *Kernel) Send(from, to addr.Address, subject, body string) error {
+func (k *Kernel) setSession(a addr.Address, s runner.Session) {
+	k.smu.Lock()
+	k.sessions[a] = s
+	k.smu.Unlock()
+}
+
+func (k *Kernel) session(a addr.Address) runner.Session {
+	k.smu.Lock()
+	defer k.smu.Unlock()
+	return k.sessions[a]
+}
+
+// Send files a message in the recipient's inbox (no interruption). If the
+// recipient is root it also notifies the dashboard (blink); if urgent, it is
+// additionally queued into the recipient's session for pickup on its next turn.
+func (k *Kernel) Send(from, to addr.Address, subject, body string, urgent bool) error {
 	if !k.Caps.CanSend(from, to) {
 		return ErrNotContact
 	}
-	return k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body})
+	fromName := ""
+	if b, ok := k.Reg.Get(from); ok {
+		fromName = b.Persona
+	}
+	k.Store.Append(inbox.Message{From: from, FromName: fromName, To: to, Subject: subject, Body: body, Urgent: urgent})
+	switch {
+	case to == addr.Root:
+		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body})
+	case urgent:
+		if s := k.session(to); s != nil {
+			_, _ = s.Write([]byte(formatInject(from, fromName, subject, body)))
+		}
+	}
+	return nil
+}
+
+// Inbox returns owner's unread messages (marking them read), each labeled with
+// the sender's address and role.
+func (k *Kernel) Inbox(owner addr.Address) []string {
+	var out []string
+	for _, m := range k.Store.Take(owner) {
+		from := m.From.String()
+		if m.FromName != "" {
+			from += " (" + m.FromName + ")"
+		}
+		tag := ""
+		if m.Urgent {
+			tag = " [urgent]"
+		}
+		out = append(out, fmt.Sprintf("[%d] from %s%s — %s: %s", m.ID, from, tag, m.Subject, m.Body))
+	}
+	return out
 }
 
 // Contacts returns who owner may message.
@@ -78,7 +131,7 @@ func (k *Kernel) Spawn(by addr.Address, persona, dir string, opts runner.SpawnOp
 	if err != nil {
 		return "", err
 	}
-	k.Bus.Subscribe(b.Addr, func(m bus.Message) { _, _ = sess.Write([]byte(Format(m))) })
+	k.setSession(b.Addr, sess)
 	return b.Addr, nil
 }
 
@@ -99,11 +152,16 @@ func (k *Kernel) Relaunch(a addr.Address, dir, persona, sessionID string) error 
 	if err != nil {
 		return err
 	}
-	k.Bus.Subscribe(a, func(m bus.Message) { _, _ = sess.Write([]byte(Format(m))) })
+	k.setSession(a, sess)
 	return nil
 }
 
-// Format renders a message as injected into a session's input.
-func Format(m bus.Message) string {
-	return fmt.Sprintf("\n[message from %s] %s — %s\n", m.From, m.Subject, m.Body)
+// formatInject renders an urgent message typed into a session's input (no Esc,
+// so claude queues it for the next turn rather than being interrupted).
+func formatInject(from addr.Address, name, subject, body string) string {
+	f := from.String()
+	if name != "" {
+		f += " (" + name + ")"
+	}
+	return fmt.Sprintf("\n[message from %s] %s — %s\n", f, subject, body)
 }

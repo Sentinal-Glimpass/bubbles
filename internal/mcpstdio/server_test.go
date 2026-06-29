@@ -11,11 +11,12 @@ type fakeBackend struct {
 	sends [][4]string
 }
 
-func (f *fakeBackend) Send(from, to, subject, body string) error {
+func (f *fakeBackend) Send(from, to, subject, body string, urgent bool) error {
 	f.sends = append(f.sends, [4]string{from, to, subject, body})
 	return nil
 }
-func (f *fakeBackend) Contacts(owner string) []string      { return []string{"0", "0.2"} }
+func (f *fakeBackend) Contacts(owner string) []string       { return []string{"0", "0.2"} }
+func (f *fakeBackend) Inbox(owner string) []string          { return nil }
 func (f *fakeBackend) Spawn(by, p, d string) (string, error) { return "0.1.1", nil }
 
 func TestServeFlow(t *testing.T) {
@@ -72,8 +73,8 @@ func TestServeFlow(t *testing.T) {
 	for _, tdef := range listR.Tools {
 		names = append(names, tdef.Name)
 	}
-	if strings.Join(names, ",") != "send,contacts" {
-		t.Fatalf("tools = %v want [send contacts]", names)
+	if strings.Join(names, ",") != "send,contacts,inbox" {
+		t.Fatalf("tools = %v want [send contacts inbox]", names)
 	}
 
 	// id3: send succeeded and recorded identity = Self.
@@ -96,7 +97,7 @@ func TestServeFlow(t *testing.T) {
 
 func TestSpawnGated(t *testing.T) {
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 3 {
-		t.Fatalf("spawnable server should advertise 3 tools, got %d", len(s.tools()))
+	if len(s.tools()) != 4 {
+		t.Fatalf("spawnable server should advertise 4 tools (send, contacts, inbox, spawn), got %d", len(s.tools()))
 	}
 }

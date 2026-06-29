@@ -66,6 +66,11 @@ func (m Model) View() string {
 		if slot, ok := slotOf[a]; ok {
 			line += fmt.Sprintf(" [%d]", slot)
 		}
+		if !a.IsRoot() {
+			if n := m.k.Store.UnreadCount(a); n > 0 {
+				line += pingStyle.Render(fmt.Sprintf(" ✉%d", n))
+			}
+		}
 		if subj, ok := m.pings[a]; ok {
 			label := " ✉ " + subj + " "
 			if m.blinkOn {
