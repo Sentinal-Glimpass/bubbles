@@ -5,3 +5,6 @@
 /vendor/
 bin/
 /spike
+
+# runtime fleet state (per-project)
+.bubbles/
