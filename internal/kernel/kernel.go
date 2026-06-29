@@ -195,5 +195,6 @@ func formatNotify(from addr.Address, name, subject string, unread int) string {
 	if name != "" {
 		f += " (" + name + ")"
 	}
-	return fmt.Sprintf("\n📬 New message from %s: %q — you have %d unread. Call the inbox() tool to read.\n", f, subject, unread)
+	// single line (no newlines) so it isn't treated as a multi-line paste
+	return fmt.Sprintf("📬 New message from %s: %q — you have %d unread. Call the inbox() tool to read.", f, subject, unread)
 }

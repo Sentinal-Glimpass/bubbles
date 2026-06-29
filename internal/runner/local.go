@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
@@ -128,11 +129,16 @@ type ptySession struct {
 	cmd       *exec.Cmd
 	ptmx      *os.File
 	interrupt byte
+	wmu       sync.Mutex // serialize deliveries so text and Enter don't interleave
 }
 
-// Write delivers a message: optional interrupt byte, the payload, then CR
-// (interrupt-style delivery; see Plan 2 §delivery).
+// Write types a message into the session, then submits it with Enter. The Enter
+// is sent as a SEPARATE keypress after a short pause — otherwise claude treats
+// the text+CR as one paste and the CR becomes a newline in the box instead of a
+// submit (the message would just sit there unsent).
 func (s *ptySession) Write(p []byte) (int, error) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	if s.interrupt != 0 {
 		_, _ = s.ptmx.Write([]byte{s.interrupt})
 	}
@@ -140,6 +146,7 @@ func (s *ptySession) Write(p []byte) (int, error) {
 	if err != nil {
 		return n, err
 	}
+	time.Sleep(150 * time.Millisecond) // let claude register the typed text first
 	_, err = s.ptmx.Write([]byte{'\r'})
 	return n, err
 }
