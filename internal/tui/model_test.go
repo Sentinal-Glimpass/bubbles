@@ -196,6 +196,39 @@ func TestDescendantCount(t *testing.T) {
 	}
 }
 
+func TestCreateGroup(t *testing.T) {
+	k := newKernelWith(t, "a", "b") // 0.1, 0.2
+	m := New(k)
+	m.BaseDir = t.TempDir()
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}) // group mode
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // add 0.1 ✓
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.2
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // add 0.2 ✓
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // again on 0.2 -> name
+	tm.Type("team")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // -> options
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}}) // introduce-all ON
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}) // attach session ON
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // create
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	g, ok := k.Groups.Get("team")
+	if !ok || len(g.Members) != 2 || g.Session == "" {
+		t.Fatalf("group not created with session: %+v ok=%v", g, ok)
+	}
+	if !k.Caps.CanSend(addr.Address("0.1"), addr.Address("0.2")) {
+		t.Fatal("introduce-all should connect the members")
+	}
+	if !k.Caps.CanSend(g.Session, addr.Address("0.1")) {
+		t.Fatal("group session should reach members")
+	}
+}
+
 func TestReassignMark(t *testing.T) {
 	k := newKernelWith(t, "a", "b") // 0.1, 0.2
 	marks := map[int]addr.Address{}

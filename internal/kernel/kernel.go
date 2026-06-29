@@ -11,6 +11,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/bus"
 	"github.com/Sentinal-Glimpass/bubbles/internal/caps"
+	"github.com/Sentinal-Glimpass/bubbles/internal/groups"
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
@@ -24,10 +25,11 @@ var ErrNotAllowed = errors.New("kernel: action not permitted")
 
 // Kernel is the fleet engine.
 type Kernel struct {
-	Bus   *bus.Bus
-	Caps  *caps.Store
-	Reg   *registry.Registry
-	Store *inbox.Store
+	Bus    *bus.Bus
+	Caps   *caps.Store
+	Reg    *registry.Registry
+	Store  *inbox.Store
+	Groups *groups.Store
 
 	runner   runner.Runner
 	smu      sync.Mutex
@@ -41,6 +43,7 @@ func New(r runner.Runner) *Kernel {
 		Caps:     caps.New(),
 		Reg:      registry.New(),
 		Store:    inbox.New(),
+		Groups:   groups.New(),
 		runner:   r,
 		sessions: map[addr.Address]runner.Session{},
 	}
@@ -169,6 +172,51 @@ func newSessionID() string {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// CreateGroup records a named grouping. If introduceAll, every member becomes a
+// mutual contact of every other (otherwise grouping shares no contacts).
+func (k *Kernel) CreateGroup(name string, members []addr.Address, introduceAll bool) {
+	k.Groups.Create(name, members)
+	if introduceAll {
+		for i := 0; i < len(members); i++ {
+			for j := i + 1; j < len(members); j++ {
+				k.Caps.Introduce(members[i], members[j])
+			}
+		}
+	}
+}
+
+// AttachGroupSession spawns a coordinator bubble for the group (a normal
+// root-child bubble) and gives it every member as a contact, so the group
+// session can message all members. Returns its address.
+func (k *Kernel) AttachGroupSession(name, dir string, opts runner.SpawnOpts) (addr.Address, error) {
+	g, ok := k.Groups.Get(name)
+	if !ok {
+		return "", ErrNotAllowed
+	}
+	a, err := k.SpawnUnder(addr.Root, addr.Root, "#"+name, dir, opts)
+	if err != nil {
+		return "", err
+	}
+	for _, m := range g.Members {
+		k.Caps.AddContact(a, m) // the group session can reach each member
+	}
+	k.Groups.SetSession(name, a)
+	return a, nil
+}
+
+// DeleteGroup removes a group. If it had a session, that coordinator bubble is
+// killed and removed. Everyone's contacts are left intact.
+func (k *Kernel) DeleteGroup(name string) {
+	if g, ok := k.Groups.Get(name); ok && g.Session != "" {
+		_ = k.runner.Kill(g.Session)
+		k.Reg.Remove(g.Session)
+		k.smu.Lock()
+		delete(k.sessions, g.Session)
+		k.smu.Unlock()
+	}
+	k.Groups.Delete(name)
 }
 
 // StartRoot launches root's own claude session in dir if it isn't already

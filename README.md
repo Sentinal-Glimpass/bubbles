@@ -80,6 +80,8 @@ reopen from the same place and your bubbles resume.
 | `Enter` | dive into the bubble (or start root) |
 | `n` | new bubble under the highlighted one |
 | `i` | introduce: add bubbles (`Enter`), `Enter` again on a ✓ to finalize |
+| `g` | create a **group**: select bubbles → name it → options (introduce-all / attach a coordinator session) |
+| `G` | delete a group (contacts are left intact) |
 | `0`–`9` | jump to a bound slot, or bind the highlighted bubble to a free one |
 | `m` then `0`–`9` | (re)assign the highlighted bubble to a slot |
 | `Ctrl+P` | toggle permission mode for new bubbles (allow-all ⇄ ask) |
@@ -116,6 +118,12 @@ can message its children. Only you (root) can grant the spawn capability.
   an agent can decide whether to follow up instead of nagging.
 - `contacts()` — who you can message. New bubbles know only root; use **`i`** to
   introduce others. A reply grant lets you always reply to whoever messaged you.
+
+**Groups.** Press `g` to bundle any bubbles into a named **group** — pure
+arrangement, independent of the folder tree, shown as a `{tag}` on members.
+Optionally attach a coordinator `claude` session that can message every member, and
+optionally introduce all members to each other on create. Groups are deletable
+anytime (`G`) and deleting one never removes anyone's contacts.
 
 **Persistence.** The fleet (addresses, personas, folders, contacts, number slots,
 `claude` session ids) is saved to `<project>/.bubbles/fleet.json` and resumed with

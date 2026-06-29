@@ -114,6 +114,52 @@ func TestReplyGrant(t *testing.T) {
 	}
 }
 
+func TestGroups(t *testing.T) {
+	k := New(runner.NewFake())
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Persona: "a"})
+	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Persona: "b"})
+
+	// grouping alone shares no contacts
+	k.CreateGroup("team", []addr.Address{a, b}, false)
+	if k.Caps.CanSend(a, b) {
+		t.Fatal("plain group should not introduce members")
+	}
+
+	// session reaches all members
+	sess, err := k.AttachGroupSession("team", "/tmp/team", runner.SpawnOpts{Persona: "#team"})
+	if err != nil {
+		t.Fatalf("attach session: %v", err)
+	}
+	if !k.Caps.CanSend(sess, a) || !k.Caps.CanSend(sess, b) {
+		t.Fatal("group session should reach every member")
+	}
+	if _, ok := k.Reg.Get(sess); !ok {
+		t.Fatal("group session bubble should be in the registry")
+	}
+
+	// delete removes the group + session, but contacts remain
+	k.DeleteGroup("team")
+	if _, ok := k.Groups.Get("team"); ok {
+		t.Fatal("group should be gone")
+	}
+	if _, ok := k.Reg.Get(sess); ok {
+		t.Fatal("group session bubble should be removed")
+	}
+	if !k.Caps.CanSend(sess, a) {
+		t.Fatal("deleting a group must NOT remove contacts")
+	}
+}
+
+func TestGroupIntroduceAll(t *testing.T) {
+	k := New(runner.NewFake())
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Persona: "a"})
+	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Persona: "b"})
+	k.CreateGroup("team", []addr.Address{a, b}, true) // introduce all
+	if !k.Caps.CanSend(a, b) || !k.Caps.CanSend(b, a) {
+		t.Fatal("introduce-all should make members mutual contacts")
+	}
+}
+
 func TestStartRoot(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)

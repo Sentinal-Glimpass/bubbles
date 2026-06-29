@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // PingMsg is delivered (via tea.Program.Send) when a worker sends root a message.
@@ -38,7 +38,7 @@ type Model struct {
 	expanded map[addr.Address]bool // which nodes show their children (root open by default)
 	markSet  bool                  // armed by `m`: next digit (re)assigns the cursor bubble to that slot
 
-	spawnStage     int // 0 = none, 1 = entering persona, 2 = picking folder
+	spawnStage     int          // 0 = none, 1 = entering persona, 2 = picking folder
 	pendingParent  addr.Address // bubble the new one is created under
 	pendingPersona string
 	input          string
@@ -47,6 +47,14 @@ type Model struct {
 
 	introStage int                   // 0 = none, 1 = selecting members
 	introSet   map[addr.Address]bool // bubbles chosen for a group introduction
+
+	groupStage   int                   // 0 = none, 1 = select members, 2 = name, 3 = options
+	groupSet     map[addr.Address]bool // members chosen for a new group
+	groupName    string
+	groupIntro   bool // option: introduce all members on create
+	groupSession bool // option: attach a coordinator session
+	groupDel     bool // delete-a-group picker is open
+	groupDelCur  int
 
 	// Selected is set to the address the user dived into, then the program
 	// quits so the caller (cmd/bubbles) can hand over the terminal.
@@ -107,6 +115,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.introStage > 0 {
 		return m.updateIntroducing(msg)
+	}
+	if m.groupStage > 0 {
+		return m.updateGrouping(msg)
+	}
+	if m.groupDel {
+		return m.updateGroupDelete(msg)
 	}
 	// digits: jump to a bound slot / bind a free one, or (re)assign when armed with `m`
 	if len(msg.Runes) == 1 && msg.Runes[0] >= '0' && msg.Runes[0] <= '9' {
@@ -182,8 +196,115 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.introStage = 1
 			m.introSet = map[addr.Address]bool{}
 		}
+	case "g":
+		if len(m.rows) > 1 { // at least one non-root bubble
+			m.groupStage, m.groupSet, m.groupName = 1, map[addr.Address]bool{}, ""
+			m.groupIntro, m.groupSession = false, false
+		}
+	case "G":
+		if len(m.k.Groups.All()) > 0 {
+			m.groupDel, m.groupDelCur = true, 0
+		}
 	}
 	return m, nil
+}
+
+// updateGrouping runs the 3-step group creator: pick members (✓), name it, then
+// toggle options and create.
+func (m Model) updateGrouping(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.groupStage {
+	case 1: // select members
+		switch msg.String() {
+		case "esc":
+			return m.clearGroup(), nil
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor < len(m.rows)-1 {
+				m.cursor++
+			}
+		case "enter":
+			sel := m.rows[m.cursor]
+			if sel.IsRoot() {
+				return m, nil
+			}
+			if m.groupSet[sel] { // second enter on a ✓ -> go to naming
+				m.groupStage = 2
+			} else {
+				m.groupSet[sel] = true
+			}
+		}
+	case 2: // name
+		switch msg.String() {
+		case "esc":
+			return m.clearGroup(), nil
+		case "enter":
+			if strings.TrimSpace(m.groupName) != "" {
+				m.groupStage = 3
+			}
+		case "backspace":
+			if len(m.groupName) > 0 {
+				m.groupName = m.groupName[:len(m.groupName)-1]
+			}
+		default:
+			if len(msg.Runes) > 0 {
+				m.groupName += string(msg.Runes)
+			}
+		}
+	case 3: // options + create
+		switch msg.String() {
+		case "esc":
+			return m.clearGroup(), nil
+		case "i":
+			m.groupIntro = !m.groupIntro
+		case "s":
+			m.groupSession = !m.groupSession
+		case "enter":
+			name := strings.TrimSpace(m.groupName)
+			var members []addr.Address
+			for a := range m.groupSet {
+				members = append(members, a)
+			}
+			m.k.CreateGroup(name, members, m.groupIntro)
+			if m.groupSession {
+				_, _ = m.k.AttachGroupSession(name, m.BaseDir, runner.SpawnOpts{Persona: "#" + name})
+				m.rows = buildRows(m.k.Reg, m.expanded)
+			}
+			return m.clearGroup(), nil
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updateGroupDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	gs := m.k.Groups.All()
+	switch msg.String() {
+	case "esc":
+		m.groupDel = false
+	case "up", "k":
+		if m.groupDelCur > 0 {
+			m.groupDelCur--
+		}
+	case "down", "j":
+		if m.groupDelCur < len(gs)-1 {
+			m.groupDelCur++
+		}
+	case "enter", "d", "x":
+		if m.groupDelCur < len(gs) {
+			m.k.DeleteGroup(gs[m.groupDelCur].Name)
+			m.rows = buildRows(m.k.Reg, m.expanded) // a session bubble may have been removed
+		}
+		m.groupDel = false
+	}
+	return m, nil
+}
+
+func (m Model) clearGroup() Model {
+	m.groupStage, m.groupSet, m.groupName = 0, nil, ""
+	m.groupIntro, m.groupSession = false, false
+	return m
 }
 
 func (m Model) handleDigit(slot int) (tea.Model, tea.Cmd) {

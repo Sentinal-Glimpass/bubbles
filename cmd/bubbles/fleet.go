@@ -21,10 +21,18 @@ type bubbleRec struct {
 	Contacts  []string `json:"contacts"`
 }
 
+// groupRec is a persisted group.
+type groupRec struct {
+	Name    string   `json:"name"`
+	Members []string `json:"members"`
+	Session string   `json:"session,omitempty"`
+}
+
 // manifest is the on-disk fleet for one workspace.
 type manifest struct {
 	Bubbles []bubbleRec       `json:"bubbles"`
 	Marks   map[string]string `json:"marks"` // slot -> address
+	Groups  []groupRec        `json:"groups,omitempty"`
 }
 
 func fleetPath(baseDir string) string {
@@ -54,7 +62,15 @@ func saveFleet(baseDir string, k *kernel.Kernel, marks map[int]addr.Address) err
 	for slot, a := range marks {
 		mk[strconv.Itoa(slot)] = a.String()
 	}
-	data, err := json.MarshalIndent(manifest{Bubbles: recs, Marks: mk}, "", "  ")
+	var grs []groupRec
+	for _, g := range k.Groups.All() {
+		ms := make([]string, 0, len(g.Members))
+		for _, m := range g.Members {
+			ms = append(ms, m.String())
+		}
+		grs = append(grs, groupRec{Name: g.Name, Members: ms, Session: g.Session.String()})
+	}
+	data, err := json.MarshalIndent(manifest{Bubbles: recs, Marks: mk, Groups: grs}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -117,6 +133,16 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 	for slot, a := range m.Marks {
 		if n, err := strconv.Atoi(slot); err == nil {
 			marks[n] = addr.Address(a)
+		}
+	}
+	for _, gr := range m.Groups { // groups (session bubble itself restored via Bubbles)
+		var ms []addr.Address
+		for _, s := range gr.Members {
+			ms = append(ms, addr.Address(s))
+		}
+		k.Groups.Create(gr.Name, ms)
+		if gr.Session != "" {
+			k.Groups.SetSession(gr.Name, addr.Address(gr.Session))
 		}
 	}
 	return marks

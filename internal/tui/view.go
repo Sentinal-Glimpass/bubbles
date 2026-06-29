@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
+	"github.com/charmbracelet/lipgloss"
 )
 
 var (
@@ -15,6 +15,13 @@ var (
 	pingStyle  = lipgloss.NewStyle().Bold(true)
 	pingBlink  = lipgloss.NewStyle().Reverse(true).Bold(true)
 )
+
+func onOff(b bool) string {
+	if b {
+		return "ON"
+	}
+	return "OFF"
+}
 
 // descendantCount returns the total number of bubbles nested under a.
 func descendantCount(reg *registry.Registry, a addr.Address) int {
@@ -91,9 +98,9 @@ func (m Model) View() string {
 			persona, status = bub.Persona, dot(bub.Status)
 		}
 		mark := ""
-		if m.introStage > 0 {
+		if m.introStage > 0 || m.groupStage == 1 {
 			mark = " "
-			if m.introSet[a] {
+			if m.introSet[a] || m.groupSet[a] {
 				mark = "✓"
 			}
 		}
@@ -109,6 +116,9 @@ func (m Model) View() string {
 		line := fmt.Sprintf("%s%s%s%s %s %s %s%s", cursor, mark, strings.Repeat("  ", depth), toggle, status, a, persona, count)
 		if slot, ok := slotOf[a]; ok {
 			line += fmt.Sprintf(" [%d]", slot)
+		}
+		for _, gname := range m.k.Groups.Tags(a) {
+			line += " {" + gname + "}"
 		}
 		if !a.IsRoot() {
 			if n := m.k.Store.UnreadCount(a); n > 0 {
@@ -144,8 +154,24 @@ func (m Model) View() string {
 		b.WriteString("introduce — ↑/↓ + enter to add bubbles (✓); enter again on a ✓ bubble to finalize; esc cancels\n")
 	case m.markSet:
 		b.WriteString("set slot — press a digit (0-9) to assign " + cursorLabel(m) + " to it (esc cancels)\n")
+	case m.groupStage == 1:
+		b.WriteString("group — ↑/↓ + enter to add bubbles (✓); enter again on a ✓ to name it; esc cancels\n")
+	case m.groupStage == 2:
+		b.WriteString("group name: " + m.groupName + "▏ (enter to continue)\n")
+	case m.groupStage == 3:
+		b.WriteString(fmt.Sprintf("group '%s' — [i] introduce all: %s   [s] attach session: %s   [enter] create   [esc] cancel\n",
+			m.groupName, onOff(m.groupIntro), onOff(m.groupSession)))
+	case m.groupDel:
+		b.WriteString("delete group — ↑/↓ select, enter to delete, esc cancel:\n")
+		for i, g := range m.k.Groups.All() {
+			cur := "  "
+			if i == m.groupDelCur {
+				cur = "> "
+			}
+			b.WriteString("  " + cur + g.Name + fmt.Sprintf(" (%d members)\n", len(g.Members)))
+		}
 	default:
-		b.WriteString(helpStyle.Render("↑/↓ move · →/← expand/collapse · enter dive · 0-9 jump · m+0-9 set slot · n new · i introduce · q quit") + "\n")
+		b.WriteString(helpStyle.Render("↑/↓ move · →/← expand/collapse · enter dive · 0-9 jump · n new · i introduce · g group · G del-group · q quit") + "\n")
 	}
 	return b.String()
 }

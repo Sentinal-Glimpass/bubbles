@@ -56,6 +56,13 @@ func (r *Registry) Add(parent addr.Address, persona, dir string) *Bubble {
 	return b
 }
 
+// Remove deletes a bubble from the registry (used when deleting a group session).
+func (r *Registry) Remove(a addr.Address) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.bubbles, a)
+}
+
 func (r *Registry) Get(a addr.Address) (*Bubble, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

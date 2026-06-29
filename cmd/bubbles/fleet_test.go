@@ -83,6 +83,23 @@ func TestRestoreAppliesParentContacts(t *testing.T) {
 	}
 }
 
+func TestFleetGroupsRoundTrip(t *testing.T) {
+	base := t.TempDir()
+	k1 := kernel.New(runner.NewFake())
+	a, _ := k1.Spawn(addr.Root, "a", filepath.Join(base, "a"), runner.SpawnOpts{Persona: "a"})
+	b, _ := k1.Spawn(addr.Root, "b", filepath.Join(base, "b"), runner.SpawnOpts{Persona: "b"})
+	k1.CreateGroup("team", []addr.Address{a, b}, false)
+	if err := saveFleet(base, k1, map[int]addr.Address{}); err != nil {
+		t.Fatal(err)
+	}
+
+	k2 := kernel.New(runner.NewFake())
+	restoreFleet(base, k2)
+	if g, ok := k2.Groups.Get("team"); !ok || len(g.Members) != 2 {
+		t.Fatalf("group not restored: %+v ok=%v", g, ok)
+	}
+}
+
 func TestRestoreNoFile(t *testing.T) {
 	// No saved fleet -> empty marks, no panic.
 	k := kernel.New(runner.NewFake())
