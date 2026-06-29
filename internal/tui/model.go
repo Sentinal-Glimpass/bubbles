@@ -38,6 +38,9 @@ type Model struct {
 	pendingPersona string
 	input          string
 
+	introStage int          // 0 = none, 1 = pick first, 2 = pick second
+	introFirst addr.Address // first bubble chosen for an introduction
+
 	// Selected is set to the address the user dived into, then the program
 	// quits so the caller (cmd/bubbles) can hand over the terminal.
 	Selected addr.Address
@@ -89,6 +92,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.introStage > 0 {
+		return m.updateIntroducing(msg)
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.quitting = true
@@ -113,6 +119,43 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		m.spawnStage = 1
 		m.input = ""
+	case "i":
+		if len(m.rows) > 2 { // need at least two non-root bubbles
+			m.introStage = 1
+		}
+	}
+	return m, nil
+}
+
+// updateIntroducing handles the two-step "introduce A ↔ B" picker. The cursor
+// still moves; enter picks the highlighted bubble (root is skipped).
+func (m Model) updateIntroducing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.introStage, m.introFirst = 0, ""
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case "down", "j":
+		if m.cursor < len(m.rows)-1 {
+			m.cursor++
+		}
+	case "enter":
+		sel := m.rows[m.cursor]
+		if sel.IsRoot() {
+			return m, nil // can't introduce root; it already knows everyone
+		}
+		switch m.introStage {
+		case 1:
+			m.introFirst = sel
+			m.introStage = 2
+		case 2:
+			if sel != m.introFirst {
+				_ = m.k.Introduce(addr.Root, m.introFirst, sel)
+			}
+			m.introStage, m.introFirst = 0, ""
+		}
 	}
 	return m, nil
 }

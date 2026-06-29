@@ -59,13 +59,17 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	switch m.spawnStage {
-	case 1:
+	switch {
+	case m.spawnStage == 1:
 		b.WriteString("new bubble — persona: " + m.input + "▏\n")
-	case 2:
+	case m.spawnStage == 2:
 		b.WriteString("bubble '" + m.pendingPersona + "' — folder (blank = ./" + m.pendingPersona + "): " + m.input + "▏\n")
+	case m.introStage == 1:
+		b.WriteString("introduce — move to the FIRST bubble and press enter (esc cancels)\n")
+	case m.introStage == 2:
+		b.WriteString("introduce " + m.introFirst.String() + " ↔ pick the SECOND bubble, enter\n")
 	default:
-		b.WriteString(helpStyle.Render("↑/↓ move · enter dive · n new · q quit") + "\n")
+		b.WriteString(helpStyle.Render("↑/↓ move · enter dive · n new · i introduce · q quit") + "\n")
 	}
 	return b.String()
 }
