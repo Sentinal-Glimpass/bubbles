@@ -32,10 +32,10 @@ func TestHandleIPC(t *testing.T) {
 		t.Fatalf("send to non-contact unexpectedly ok")
 	}
 
-	// contacts of 0.1 = [root]
+	// contacts of 0.1 = [root], labeled with its persona
 	rep = handleIPC(k, ipc.Request{Op: "contacts", From: "0.1"})
-	if !rep.OK || len(rep.Contacts) != 1 || rep.Contacts[0] != "0" {
-		t.Fatalf("contacts = %+v want [0]", rep)
+	if !rep.OK || len(rep.Contacts) != 1 || rep.Contacts[0] != "0 (root)" {
+		t.Fatalf("contacts = %+v want [\"0 (root)\"]", rep)
 	}
 
 	// unknown op

@@ -138,7 +138,11 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 		cs := k.Contacts(from)
 		out := make([]string, len(cs))
 		for i, c := range cs {
-			out[i] = c.String()
+			label := c.String()
+			if bub, ok := k.Reg.Get(c); ok && bub.Persona != "" {
+				label += " (" + bub.Persona + ")" // attach the persona so peers have names/roles
+			}
+			out[i] = label
 		}
 		return ipc.Reply{OK: true, Contacts: out}
 	case "spawn":
