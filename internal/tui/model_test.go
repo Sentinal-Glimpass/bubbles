@@ -229,6 +229,40 @@ func TestCreateGroup(t *testing.T) {
 	}
 }
 
+func TestFleetRowsGroupNodes(t *testing.T) {
+	k := newKernelWith(t, "a", "b") // 0.1, 0.2
+	k.CreateGroup("team", []addr.Address{"0.1", "0.2"}, false)
+	m := New(k)
+
+	hdr, members := false, 0
+	for _, r := range m.rows {
+		if r.header && r.group == "team" {
+			hdr = true
+		}
+		if !r.header && r.group == "team" {
+			members++
+		}
+	}
+	if !hdr {
+		t.Fatal("group should appear as a header row (sibling of root)")
+	}
+	if members != 0 {
+		t.Fatal("members should be hidden while the group is collapsed")
+	}
+
+	m.groupExpanded["team"] = true
+	m.rows = m.fleetRows()
+	members = 0
+	for _, r := range m.rows {
+		if !r.header && r.group == "team" {
+			members++
+		}
+	}
+	if members != 2 {
+		t.Fatalf("expanded group should list 2 members, got %d", members)
+	}
+}
+
 func TestReassignMark(t *testing.T) {
 	k := newKernelWith(t, "a", "b") // 0.1, 0.2
 	marks := map[int]addr.Address{}

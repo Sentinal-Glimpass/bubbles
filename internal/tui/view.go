@@ -48,10 +48,10 @@ func dot(s registry.Status) string {
 
 // cursorLabel describes the highlighted bubble: "addr (role)".
 func cursorLabel(m Model) string {
-	if len(m.rows) == 0 {
+	a := m.curAddr()
+	if a == "" {
 		return "—"
 	}
-	a := m.rows[m.cursor]
 	label := a.String()
 	if b, ok := m.k.Reg.Get(a); ok && b.Persona != "" {
 		label += " (" + b.Persona + ")"
@@ -87,12 +87,28 @@ func (m Model) View() string {
 		slotOf[a] = slot
 	}
 
-	for i, a := range m.rows {
-		depth := strings.Count(string(a), ".")
+	for i, r := range m.rows {
 		cursor := "  "
 		if i == m.cursor {
 			cursor = "> "
 		}
+
+		// Group header row: an expandable node outside the main root.
+		if r.header {
+			g, _ := m.k.Groups.Get(r.group)
+			toggle := "▸"
+			if m.groupExpanded[r.group] {
+				toggle = "▾"
+			}
+			sess := ""
+			if g.Session != "" {
+				sess = " ⟢ session"
+			}
+			b.WriteString(fmt.Sprintf("%s%s {%s} (%d)%s\n", cursor, toggle, r.group, len(g.Members), sess))
+			continue
+		}
+
+		a := r.addr
 		persona, status := "", "○"
 		if bub, ok := m.k.Reg.Get(a); ok {
 			persona, status = bub.Persona, dot(bub.Status)
@@ -105,20 +121,24 @@ func (m Model) View() string {
 			}
 		}
 		toggle, count := " ", ""
-		if nd := descendantCount(m.k.Reg, a); nd > 0 {
-			if m.expanded[a] {
-				toggle = "▾"
-			} else {
-				toggle = "▸"
+		if r.group == "" { // tree bubbles can expand their children; group members don't
+			if nd := descendantCount(m.k.Reg, a); nd > 0 {
+				if m.expanded[a] {
+					toggle = "▾"
+				} else {
+					toggle = "▸"
+				}
+				count = fmt.Sprintf(" (%d)", nd)
 			}
-			count = fmt.Sprintf(" (%d)", nd)
 		}
-		line := fmt.Sprintf("%s%s%s%s %s %s %s%s", cursor, mark, strings.Repeat("  ", depth), toggle, status, a, persona, count)
+		line := fmt.Sprintf("%s%s%s%s %s %s %s%s", cursor, mark, strings.Repeat("  ", r.depth), toggle, status, a, persona, count)
 		if slot, ok := slotOf[a]; ok {
 			line += fmt.Sprintf(" [%d]", slot)
 		}
-		for _, gname := range m.k.Groups.Tags(a) {
-			line += " {" + gname + "}"
+		if r.group == "" { // show group tags only in the tree, not under a group node
+			for _, gname := range m.k.Groups.Tags(a) {
+				line += " {" + gname + "}"
+			}
 		}
 		if !a.IsRoot() {
 			if n := m.k.Store.UnreadCount(a); n > 0 {
