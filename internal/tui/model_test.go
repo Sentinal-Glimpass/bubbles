@@ -26,7 +26,7 @@ func newKernelWith(t *testing.T, personas ...string) *kernel.Kernel {
 func TestRenderAndPing(t *testing.T) {
 	k := newKernelWith(t, "scout", "docs")
 	m := New(k)
-	m.Workspace = t.TempDir()
+	m.BaseDir = t.TempDir()
 
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
 
@@ -46,7 +46,7 @@ func TestRenderAndPing(t *testing.T) {
 func TestDiveSelectsAndQuits(t *testing.T) {
 	k := newKernelWith(t, "scout", "docs")
 	m := New(k)
-	m.Workspace = t.TempDir()
+	m.BaseDir = t.TempDir()
 
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // root -> 0.1
@@ -61,12 +61,13 @@ func TestDiveSelectsAndQuits(t *testing.T) {
 func TestSpawnKeyAddsBubble(t *testing.T) {
 	k := newKernelWith(t) // start with just root
 	m := New(k)
-	m.Workspace = t.TempDir()
+	m.BaseDir = t.TempDir()
 
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	tm.Type("tester")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // persona -> folder stage
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // blank folder -> spawn in BaseDir/tester
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return bytes.Contains(b, []byte("tester"))

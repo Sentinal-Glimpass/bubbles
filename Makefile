@@ -1,4 +1,4 @@
-.PHONY: test vet spike build bin
+.PHONY: test vet spike build bin install
 
 test:
 	go test ./...
@@ -17,3 +17,8 @@ build:
 bin:
 	go build -o bin/bubbles ./cmd/bubbles
 	@echo "built bin/bubbles"
+
+# Install the bubbles command to ~/.local/bin (must be on your PATH).
+install:
+	go build -o $(HOME)/.local/bin/bubbles ./cmd/bubbles
+	@echo "installed -> $(HOME)/.local/bin/bubbles  (run 'bubbles' from any project dir)"

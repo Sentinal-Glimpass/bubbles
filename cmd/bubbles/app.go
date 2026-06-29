@@ -21,8 +21,7 @@ import (
 const detachByte = 0x1c // Ctrl-\ detaches from a dived-in bubble
 
 func runApp() {
-	workspace := defaultWorkspace()
-	_ = os.MkdirAll(workspace, 0o755)
+	baseDir := defaultWorkspace() // dir where `bubbles` was launched
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-%d.sock", os.Getpid()))
 	self, _ := os.Executable()
 
@@ -43,7 +42,7 @@ func runApp() {
 	// Quit/relaunch loop: the TUI quits when you dive in; we hand over the
 	// terminal, then relaunch the fleet view.
 	m := tui.New(k)
-	m.Workspace = workspace
+	m.BaseDir = baseDir
 	for {
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		k.Bus.Subscribe(addr.Root, func(msg bus.Message) {
@@ -59,7 +58,7 @@ func runApp() {
 		}
 		diveInto(lr, sel)
 		m = tui.New(k) // refresh rows, clear selection
-		m.Workspace = workspace
+		m.BaseDir = baseDir
 	}
 }
 
@@ -83,7 +82,7 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 	case "spawn":
 		dir := r.Dir
 		if dir == "" {
-			dir = filepath.Join(defaultWorkspace(), r.Persona)
+			dir = filepath.Join(defaultWorkspace(), r.Persona) // downstream of launch dir
 			_ = os.MkdirAll(dir, 0o755)
 		}
 		a, err := k.Spawn(from, r.Persona, dir, runner.SpawnOpts{Persona: r.Persona})
@@ -168,12 +167,14 @@ func diveInto(lr *runner.LocalRunner, a addr.Address) {
 	fmt.Print("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\r\n")
 }
 
+// defaultWorkspace is the directory where `bubbles` was launched; bubble folders
+// are created downstream of it.
 func defaultWorkspace() string {
 	cwd, err := os.Getwd()
 	if err != nil {
-		cwd = "."
+		return "."
 	}
-	return filepath.Join(cwd, ".bubbles")
+	return cwd
 }
 
 func fatal(err error) {

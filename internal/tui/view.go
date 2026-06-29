@@ -59,9 +59,12 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	if m.spawning {
-		b.WriteString("new bubble persona: " + m.input + "▏\n")
-	} else {
+	switch m.spawnStage {
+	case 1:
+		b.WriteString("new bubble — persona: " + m.input + "▏\n")
+	case 2:
+		b.WriteString("bubble '" + m.pendingPersona + "' — folder (blank = ./" + m.pendingPersona + "): " + m.input + "▏\n")
+	default:
 		b.WriteString(helpStyle.Render("↑/↓ move · enter dive · n new · q quit") + "\n")
 	}
 	return b.String()

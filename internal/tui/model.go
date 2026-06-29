@@ -26,15 +26,17 @@ type blinkTickMsg struct{}
 
 // Model is the fleet tree.
 type Model struct {
-	k         *kernel.Kernel
-	Workspace string // base dir for new bubbles' folders
+	k       *kernel.Kernel
+	BaseDir string // dir where `bubbles` was launched; bubble folders are downstream of it
 
-	rows     []addr.Address
-	cursor   int
-	pings    map[addr.Address]string
-	blinkOn  bool
-	spawning bool
-	input    string
+	rows    []addr.Address
+	cursor  int
+	pings   map[addr.Address]string
+	blinkOn bool
+
+	spawnStage     int // 0 = none, 1 = entering persona, 2 = entering folder
+	pendingPersona string
+	input          string
 
 	// Selected is set to the address the user dived into, then the program
 	// quits so the caller (cmd/bubbles) can hand over the terminal.
@@ -78,7 +80,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pings[msg.From] = msg.Subject
 		return m, nil
 	case tea.KeyMsg:
-		if m.spawning {
+		if m.spawnStage > 0 {
 			return m.updateSpawning(msg)
 		}
 		return m.updateNormal(msg)
@@ -109,7 +111,7 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "n":
-		m.spawning = true
+		m.spawnStage = 1
 		m.input = ""
 	}
 	return m, nil
@@ -118,18 +120,23 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateSpawning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.spawning = false
-		m.input = ""
+		m.spawnStage, m.input, m.pendingPersona = 0, "", ""
 	case "enter":
-		persona := strings.TrimSpace(m.input)
-		if persona != "" {
-			dir := filepath.Join(m.Workspace, persona)
+		switch m.spawnStage {
+		case 1: // persona entered → ask for folder
+			persona := strings.TrimSpace(m.input)
+			if persona == "" {
+				m.spawnStage = 0
+			} else {
+				m.pendingPersona, m.input, m.spawnStage = persona, "", 2
+			}
+		case 2: // folder entered → spawn
+			dir := resolveFolder(m.BaseDir, strings.TrimSpace(m.input), m.pendingPersona)
 			_ = os.MkdirAll(dir, 0o755)
-			_, _ = m.k.Spawn(addr.Root, persona, dir, runner.SpawnOpts{Persona: persona})
+			_, _ = m.k.Spawn(addr.Root, m.pendingPersona, dir, runner.SpawnOpts{Persona: m.pendingPersona})
 			m.rows = buildRows(m.k.Reg)
+			m.spawnStage, m.input, m.pendingPersona = 0, "", ""
 		}
-		m.spawning = false
-		m.input = ""
 	case "backspace":
 		if len(m.input) > 0 {
 			m.input = m.input[:len(m.input)-1]
@@ -140,4 +147,16 @@ func (m Model) updateSpawning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// resolveFolder maps a (possibly blank/relative) folder to an absolute path
+// downstream of base. Blank defaults to base/<persona>.
+func resolveFolder(base, folder, persona string) string {
+	if folder == "" {
+		folder = persona
+	}
+	if filepath.IsAbs(folder) {
+		return folder
+	}
+	return filepath.Join(base, folder)
 }

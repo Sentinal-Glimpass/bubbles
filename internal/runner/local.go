@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,7 +42,9 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	// as a second config path. We also write the config to a file rather than
 	// passing inline JSON, which avoids quoting ambiguity.
 	if r.MCPConfig != nil {
-		cfgPath := filepath.Join(dir, ".bubbles-mcp.json")
+		// Write the config to a temp file (not the bubble's working dir, which
+		// may be a real project folder we don't want to litter).
+		cfgPath := filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-mcp-%d-%s.json", os.Getpid(), a))
 		if err := os.WriteFile(cfgPath, []byte(r.MCPConfig(a)), 0o600); err != nil {
 			return nil, err
 		}
