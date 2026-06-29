@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/creack/pty"
 	"golang.org/x/term"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
@@ -129,9 +132,22 @@ func diveInto(lr *runner.LocalRunner, a addr.Address) {
 	}
 	f := ps.PTY()
 
+	// Size the bubble's PTY to fill the real terminal, and keep it synced on
+	// window resize, so claude renders full-screen instead of in an 80x24 box.
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	go func() {
+		for range winch {
+			_ = pty.InheritSize(os.Stdin, f)
+		}
+	}()
+	winch <- syscall.SIGWINCH // trigger the initial resize now
+	defer signal.Stop(winch)
+
 	if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 		defer term.Restore(int(os.Stdin.Fd()), old)
 	}
+	fmt.Print("\x1b[2J\x1b[H") // clear, so claude's full-screen redraw is clean
 
 	var detached atomic.Bool
 	go func() {
