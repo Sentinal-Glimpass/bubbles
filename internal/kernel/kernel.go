@@ -71,11 +71,11 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string) error {
 		fromName = b.Persona
 	}
 	k.Store.Append(inbox.Message{From: from, FromName: fromName, To: to, Subject: subject, Body: body})
+	k.Caps.AddContact(to, from) // reply grant: the recipient can always reply to whoever messaged it
 	if to == addr.Root {
-		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body})
-		return nil
+		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard
 	}
-	if s := k.session(to); s != nil {
+	if s := k.session(to); s != nil { // inject the notice into the recipient's session (incl. root, if running)
 		unread := k.Store.UnreadCount(to)
 		_, _ = s.Write([]byte(formatNotify(from, fromName, subject, unread)))
 	}

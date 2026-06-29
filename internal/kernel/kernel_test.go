@@ -89,6 +89,25 @@ func TestNestedSpawnParentReachesChildren(t *testing.T) {
 	}
 }
 
+func TestReplyGrant(t *testing.T) {
+	k := New(runner.NewFake())
+	p, _ := k.Spawn(addr.Root, "p", "/tmp/p", runner.SpawnOpts{Persona: "p"})
+	c, _ := k.SpawnUnder(addr.Root, p, "c", "/tmp/c", runner.SpawnOpts{Persona: "c"})
+
+	if k.Caps.CanSend(c, p) {
+		t.Fatal("child should not reach parent before being messaged")
+	}
+	if err := k.Send(p, c, "do X", ""); err != nil { // parent messages child
+		t.Fatalf("parent->child: %v", err)
+	}
+	if !k.Caps.CanSend(c, p) {
+		t.Fatal("child should be able to reply after the parent messaged it")
+	}
+	if err := k.Send(c, p, "done", ""); err != nil { // child replies
+		t.Fatalf("child reply: %v", err)
+	}
+}
+
 func TestStartRoot(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
