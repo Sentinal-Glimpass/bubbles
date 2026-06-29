@@ -1,76 +1,144 @@
 # Bubbles
 
-> An agent-native terminal IDE. Mission control for a fleet of Claude Code agents.
+> An agent-native terminal IDE — mission control for a fleet of Claude Code agents.
 
 Traditional IDEs are built around *one human typing into files*. **Bubbles** is built
-around *many agents working in parallel*. Each agent is a real Claude Code session
-rendered as a **bubble** in a sleek, zoomable terminal tree. Your job shifts from
-*writing code* to *supervising a fleet*: spawn agents, watch them ping you when they
-need you, dive into any one to collaborate, pop back out.
-
-It lives entirely in the terminal. No Electron, no browser engine — a single native
-binary that's a thin control plane over the agents it manages.
-
-## The idea in one breath
-
-One atom and one verb:
-
-- **A Bubble** = an address + a session (a real `claude`) + the ability to **`send`**.
-- Everything is `send` recomposed: a ping is `send(root, …)`, diving in is `send`
-  back and forth, spawning is a `send` to the spawner.
-
-And one tree seen three ways:
+around *many agents working in parallel*. Each agent is a real [Claude Code](https://claude.com/claude-code)
+session rendered as a **bubble** in a zoomable terminal tree. Your job shifts from
+*writing code* to *running a fleet*: spawn agents, watch them ping you when they need
+you, dive into any one to collaborate, and let them message each other — all from the
+terminal, no Electron, a single native binary.
 
 ```
-address      0.1.2
-folder       <workspace>/0.1/0.1.2/
-UI           click bubble 0 → see 0.1 → click → see 0.1.2
+BUBBLES — fleet   permissions: ALLOW-ALL (skip permissions) (ctrl+p)
+
+> ▾ ● 0 root (4)
+    ▸ ● 0.1 api (2) [1] ✉2  ✉ "auth bug — need a decision"
+      ○ 0.2 docs
+    ▾ ● 0.3 tests (1)
+        ◐ 0.3.1 e2e
+  ↑/↓ move · →/← expand/collapse · enter dive · 0-9 jump · m+0-9 set slot · n new · i introduce · q quit
 ```
 
-## Inter-agent comms: SMS, not Discord
+## Requirements
 
-- Every bubble has an address (its phone number) and an inbox.
-- A bubble may only text addresses in its **contacts**. A fresh bubble knows **only
-  you** (root).
-- You (**root**) `introduce(A, B)` to make two bubbles peers. Peer comms exists only
-  where you made an introduction. (Channels / broadcast are a v2 bow on top.)
+- **[Claude Code](https://claude.com/claude-code)** — the `claude` CLI must be
+  installed and authenticated (run `claude` once and sign in). Bubbles launches real
+  `claude` sessions, so this is required.
+- **Go 1.24+** — to install/build the binary (`go version` to check).
 
-## Status
-
-**MVP 1 is built and fully tested headless.** Both layers are in:
-
-- **Plan 1 — the kernel:** addressing, the message bus, capabilities (SMS contacts +
-  spawn budget), the registry, and the runner abstraction. Driven end-to-end by a
-  `FakeRunner` with zero `claude`, zero tokens, zero network.
-- **Plan 2 — the visible layer:** a Bubbletea zoomable fleet tree (blink pings,
-  dive-in/detach), a `LocalRunner` that launches real `claude` in PTYs, and an MCP
-  bridge (`bubbles mcp-stdio` helper + unix-socket relay) giving each session the
-  `send`/`contacts` tools. The compiled binary's MCP path is proven end-to-end in a
-  test; the **live `claude` run is pending validation on macOS** (see below).
-
-Design and plans live in [`docs/superpowers/`](docs/superpowers/).
-
-## Run & develop
+## Install
 
 ```bash
-make test     # full suite (also: go test ./...)
-make vet      # static checks
-make bin      # build bin/bubbles
-./bin/bubbles # launch the fleet TUI (needs claude on PATH for live bubbles)
+go install github.com/Sentinal-Glimpass/bubbles/cmd/bubbles@latest
 ```
 
-Inside the TUI: `↑/↓` move · `enter` dive into a bubble · `Ctrl-\` detach · `n` new
-bubble · `q` quit.
-
-### macOS validation (needs a real `claude`)
-
-The headless tests cover every layer with fakes; these steps confirm the live
-integration (see `docs/superpowers/plans/2026-06-28-bubbles-mvp1-visible-layer.md`):
+This puts `bubbles` in `$(go env GOPATH)/bin` (usually `~/go/bin`). Make sure that's
+on your `PATH`:
 
 ```bash
-go run ./cmd/spike -cmd claude        # confirm Esc interrupts a turn (or -int 0x1b)
-./bin/bubbles                         # spawn a bubble; /mcp should list send, contacts
+export PATH="$(go env GOPATH)/bin:$PATH"   # add to ~/.zshrc or ~/.bashrc to persist
 ```
+
+<details>
+<summary>Or build from source</summary>
+
+```bash
+git clone https://github.com/Sentinal-Glimpass/bubbles.git
+cd bubbles
+make install        # builds to ~/.local/bin/bubbles
+# or: make bin      # builds ./bin/bubbles
+```
+</details>
+
+## Quick start
+
+From any project directory:
+
+```bash
+cd ~/my-project
+bubbles
+```
+
+- Press **`n`** to spawn a bubble: type a persona (e.g. `api`), pick a folder, done.
+- Press **`Enter`** on a bubble to **dive in** — it's a live `claude` session.
+- Press **`Ctrl+\` `Ctrl+\`** to pop back to the fleet.
+- Press **`q`** to quit.
+
+Each bubble runs `claude` in its own folder (so it inherits that folder's
+`CLAUDE.md` and `.claude/` setup), and the fleet is saved per-directory — quit and
+reopen from the same place and your bubbles resume.
+
+## Keys
+
+**Fleet view**
+
+| Key | Action |
+|---|---|
+| `↑`/`↓` | move cursor |
+| `→`/`←` | expand / collapse a node |
+| `Enter` | dive into the bubble (or start root) |
+| `n` | new bubble under the highlighted one |
+| `i` | introduce: add bubbles (`Enter`), `Enter` again on a ✓ to finalize |
+| `0`–`9` | jump to a bound slot, or bind the highlighted bubble to a free one |
+| `m` then `0`–`9` | (re)assign the highlighted bubble to a slot |
+| `Ctrl+P` | toggle permission mode for new bubbles (allow-all ⇄ ask) |
+| `q` | quit |
+
+**Inside a bubble** (`Ctrl+\` is the leader)
+
+| Key | Action |
+|---|---|
+| `Ctrl+\` `Ctrl+\` | back to the fleet |
+| `Ctrl+\` then `0`–`9` | jump to that slot (or bind the current bubble if free) |
+| everything else | goes straight to `claude` (`Esc`, arrows, etc.) |
+
+## How it works
+
+The whole system bottoms out in one atom and one verb:
+
+- **A Bubble** = an **address** (`0`, `0.1`, `0.1.2` — root is `0`) + a real `claude`
+  session + the ability to **`send`**. Address = folder path = position in the tree.
+- The IDE is a thin **control plane**: a Bubbletea TUI + a tiny kernel (addressing,
+  capabilities, a message store) + a per-bubble **MCP bridge** that gives each
+  `claude` session fleet-aware tools.
+
+**Spawning & hierarchy.** You spawn bubbles under any node (`0.1` → `0.1.1`). A parent
+can message its children. Only you (root) can grant the spawn capability.
+
+**Messaging (no interruption).** Bubbles talk through inboxes, never by interrupting:
+
+- `send(to, subject, body, reply_to?)` — files a message in a contact's inbox and
+  returns an id; the recipient gets a non-interrupting "📬 you have mail" notice it
+  picks up on its next turn.
+- `inbox()` — read & clear unread (each shows sender `address (role)` and an id).
+- `status()` — for messages you sent: `delivered` / `read, no reply` / `replied`, so
+  an agent can decide whether to follow up instead of nagging.
+- `contacts()` — who you can message. New bubbles know only root; use **`i`** to
+  introduce others. A reply grant lets you always reply to whoever messaged you.
+
+**Persistence.** The fleet (addresses, personas, folders, contacts, number slots,
+`claude` session ids) is saved to `<project>/.bubbles/fleet.json` and resumed with
+`claude --resume` on reopen.
+
+## Development
+
+```bash
+make test     # go test ./...   (kernel/TUI/MCP all covered, no claude needed)
+make vet
+make bin      # build ./bin/bubbles
+```
+
+The kernel never depends on real `claude` — a `FakeRunner` drives the whole
+spawn/message/persist flow in tests, so the suite runs with zero tokens and no
+network.
+
+## Status & roadmap
+
+MVP is working end-to-end: zoomable fleet, real `claude` bubbles, dive-in, nested
+hierarchy, inbox messaging with read/reply status, persistence, and permission
+toggle. On the roadmap: remote bubbles over SSH (run the fleet on a beefy VM),
+channels/broadcast, in-dive message banners, and escalation policies.
 
 ## License
 
