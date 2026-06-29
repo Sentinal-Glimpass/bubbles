@@ -40,7 +40,12 @@ func markAction(marks map[int]addr.Address, slot int, current addr.Address) addr
 		}
 		return dest
 	}
-	if marks != nil {
+	if marks != nil { // bind: one slot per bubble (clear it from any other slot)
+		for s, x := range marks {
+			if x == current && s != slot {
+				delete(marks, s)
+			}
+		}
 		marks[slot] = current
 	}
 	return ""

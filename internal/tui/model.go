@@ -104,15 +104,23 @@ func (m Model) fleetRows() []fleetRow {
 	for _, g := range m.k.Groups.All() {
 		out = append(out, fleetRow{group: g.Name, header: true})
 		if m.groupExpanded[g.Name] {
-			for _, mem := range g.Members {
+			for _, mem := range g.Members { // the coordinator session is reached via Enter on the group node
 				out = append(out, fleetRow{addr: mem, group: g.Name, depth: 1})
-			}
-			if g.Session != "" {
-				out = append(out, fleetRow{addr: g.Session, group: g.Name, depth: 1})
 			}
 		}
 	}
 	return out
+}
+
+// bindSlot binds a to a number slot, ensuring it has at most one slot (clears it
+// from any other slot first, so the displayed [N] can't flicker).
+func bindSlot(marks map[int]addr.Address, slot int, a addr.Address) {
+	for s, x := range marks {
+		if x == a && s != slot {
+			delete(marks, s)
+		}
+	}
+	marks[slot] = a
 }
 
 func (m Model) curRow() fleetRow {
@@ -381,7 +389,7 @@ func (m Model) handleDigit(slot int) (tea.Model, tea.Cmd) {
 			if m.Marks == nil {
 				m.Marks = map[int]addr.Address{}
 			}
-			m.Marks[slot] = cur
+			bindSlot(m.Marks, slot, cur)
 		}
 		return m, nil
 	}
@@ -401,7 +409,7 @@ func (m Model) handleMark(slot int) (tea.Model, tea.Cmd) {
 		if m.Marks == nil {
 			m.Marks = map[int]addr.Address{}
 		}
-		m.Marks[slot] = cur // bind the highlighted bubble
+		bindSlot(m.Marks, slot, cur) // bind the highlighted bubble (one slot per bubble)
 	}
 	return m, nil
 }

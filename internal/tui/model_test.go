@@ -263,6 +263,18 @@ func TestFleetRowsGroupNodes(t *testing.T) {
 	}
 }
 
+func TestBindSlotSingle(t *testing.T) {
+	marks := map[int]addr.Address{}
+	bindSlot(marks, 1, "0.5")
+	bindSlot(marks, 2, "0.5") // same bubble, new slot -> must move, not duplicate
+	if _, ok := marks[1]; ok {
+		t.Fatalf("0.5 should no longer be in slot 1: %v", marks)
+	}
+	if marks[2] != "0.5" {
+		t.Fatalf("0.5 should be in slot 2: %v", marks)
+	}
+}
+
 func TestReassignMark(t *testing.T) {
 	k := newKernelWith(t, "a", "b") // 0.1, 0.2
 	marks := map[int]addr.Address{}

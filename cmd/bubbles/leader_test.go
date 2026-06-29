@@ -25,4 +25,12 @@ func TestMarkAction(t *testing.T) {
 	if dest := markAction(marks, 3, cur); dest != "" {
 		t.Fatalf("own slot should be no-op, got %q", dest)
 	}
+	// binding to a new slot MOVES it (one slot per bubble) — no flicker
+	markAction(marks, 5, cur)
+	if marks[5] != cur {
+		t.Fatalf("slot 5 should hold %s", cur)
+	}
+	if _, ok := marks[3]; ok {
+		t.Fatalf("slot 3 should be cleared when %s moved to slot 5: %v", cur, marks)
+	}
 }
