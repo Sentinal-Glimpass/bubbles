@@ -66,28 +66,26 @@ func TestFleetEndToEnd(t *testing.T) {
 	}
 }
 
-func TestNestedSpawnSharesContacts(t *testing.T) {
+func TestNestedSpawnParentReachesChildren(t *testing.T) {
 	k := New(runner.NewFake())
 	p, _ := k.Spawn(addr.Root, "p", "/tmp/p", runner.SpawnOpts{Persona: "p"}) // 0.1 under root
 	c1, _ := k.SpawnUnder(addr.Root, p, "c1", "/tmp/c1", runner.SpawnOpts{Persona: "c1"})
 	c2, _ := k.SpawnUnder(addr.Root, p, "c2", "/tmp/c2", runner.SpawnOpts{Persona: "c2"})
 
-	// child <-> parent are mutual contacts
-	if !k.Caps.CanSend(c1, p) || !k.Caps.CanSend(p, c1) {
-		t.Fatal("child and parent should be mutual contacts")
+	// parent can reach each child...
+	if !k.Caps.CanSend(p, c1) || !k.Caps.CanSend(p, c2) {
+		t.Fatal("parent should reach its children")
 	}
-	// siblings share contacts through the parent's circle
-	if !k.Caps.CanSend(c1, c2) || !k.Caps.CanSend(c2, c1) {
-		t.Fatal("siblings under the same parent should be connected")
+	// ...but not vice versa, and no siblings or ancestors
+	if k.Caps.CanSend(c1, p) {
+		t.Fatal("child should NOT auto-reach its parent")
 	}
-	// top-level bubbles stay isolated from each other
-	q, _ := k.Spawn(addr.Root, "q", "/tmp/q", runner.SpawnOpts{Persona: "q"}) // 0.2 under root
-	if k.Caps.CanSend(p, q) {
-		t.Fatal("two top-level bubbles should not be auto-connected")
+	if k.Caps.CanSend(c1, c2) || k.Caps.CanSend(c2, c1) {
+		t.Fatal("siblings should NOT be connected")
 	}
-	// everyone can still reach root
-	if !k.Caps.CanSend(c1, addr.Root) || !k.Caps.CanSend(q, addr.Root) {
-		t.Fatal("every bubble should reach root")
+	// children still reach root
+	if !k.Caps.CanSend(c1, addr.Root) || !k.Caps.CanSend(c2, addr.Root) {
+		t.Fatal("children should reach root")
 	}
 }
 
