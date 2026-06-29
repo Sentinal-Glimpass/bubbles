@@ -176,6 +176,28 @@ func TestDescendantCount(t *testing.T) {
 	}
 }
 
+func TestReassignMark(t *testing.T) {
+	k := newKernelWith(t, "a", "b") // 0.1, 0.2
+	marks := map[int]addr.Address{}
+	m := New(k)
+	m.BaseDir = t.TempDir()
+	m.Marks = marks
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}}) // slot 1 free -> bind 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.2
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}}) // arm set
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}}) // reassign slot 1 -> 0.2
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	if marks[1] != addr.Address("0.2") {
+		t.Fatalf("slot 1 = %q want 0.2 after reassign", marks[1])
+	}
+}
+
 func TestSpawnUnderSelectedBubble(t *testing.T) {
 	k := newKernelWith(t, "parent") // 0.1
 	m := New(k)

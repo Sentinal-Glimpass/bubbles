@@ -36,6 +36,7 @@ type Model struct {
 	pings    map[addr.Address]string
 	blinkOn  bool
 	expanded map[addr.Address]bool // which nodes show their children (root open by default)
+	markSet  bool                  // armed by `m`: next digit (re)assigns the cursor bubble to that slot
 
 	spawnStage     int // 0 = none, 1 = entering persona, 2 = picking folder
 	pendingParent  addr.Address // bubble the new one is created under
@@ -107,6 +108,13 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.introStage > 0 {
 		return m.updateIntroducing(msg)
 	}
+	// digits: jump to a bound slot / bind a free one, or (re)assign when armed with `m`
+	if len(msg.Runes) == 1 && msg.Runes[0] >= '0' && msg.Runes[0] <= '9' {
+		return m.handleDigit(int(msg.Runes[0] - '0'))
+	}
+	if msg.String() != "m" {
+		m.markSet = false // any other key cancels a pending set
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.quitting = true
@@ -165,18 +173,29 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.rows) > 0 {
 			m.pendingParent = m.rows[m.cursor] // spawn under the highlighted bubble
 		}
+	case "m":
+		m.markSet = true // arm: next digit (re)assigns the highlighted bubble
 	case "i":
 		if len(m.rows) > 2 { // need at least two non-root bubbles
 			m.introStage = 1
 			m.introSet = map[addr.Address]bool{}
 		}
-	default:
-		// digit: jump to the bound bubble, or bind the highlighted one if free
-		if len(msg.Runes) == 1 && msg.Runes[0] >= '0' && msg.Runes[0] <= '9' {
-			return m.handleMark(int(msg.Runes[0] - '0'))
-		}
 	}
 	return m, nil
+}
+
+func (m Model) handleDigit(slot int) (tea.Model, tea.Cmd) {
+	if m.markSet { // `m` then digit: (re)assign, overwriting any existing binding
+		m.markSet = false
+		if cur := m.rows[m.cursor]; !cur.IsRoot() {
+			if m.Marks == nil {
+				m.Marks = map[int]addr.Address{}
+			}
+			m.Marks[slot] = cur
+		}
+		return m, nil
+	}
+	return m.handleMark(slot)
 }
 
 func (m Model) handleMark(slot int) (tea.Model, tea.Cmd) {

@@ -39,6 +39,19 @@ func dot(s registry.Status) string {
 	}
 }
 
+// cursorLabel describes the highlighted bubble: "addr (role)".
+func cursorLabel(m Model) string {
+	if len(m.rows) == 0 {
+		return "—"
+	}
+	a := m.rows[m.cursor]
+	label := a.String()
+	if b, ok := m.k.Reg.Get(a); ok && b.Persona != "" {
+		label += " (" + b.Persona + ")"
+	}
+	return label
+}
+
 // parentLabel describes the spawn parent for the prompt: "root" or "addr (role)".
 func (m Model) parentLabel() string {
 	if m.pendingParent.IsRoot() {
@@ -129,8 +142,10 @@ func (m Model) View() string {
 		}
 	case m.introStage == 1:
 		b.WriteString("introduce — ↑/↓ + enter to add bubbles (✓); enter again on a ✓ bubble to finalize; esc cancels\n")
+	case m.markSet:
+		b.WriteString("set slot — press a digit (0-9) to assign " + cursorLabel(m) + " to it (esc cancels)\n")
 	default:
-		b.WriteString(helpStyle.Render("↑/↓ move · →/← expand/collapse · enter dive · 0-9 bind/jump · n new · i introduce · q quit") + "\n")
+		b.WriteString(helpStyle.Render("↑/↓ move · →/← expand/collapse · enter dive · 0-9 jump · m+0-9 set slot · n new · i introduce · q quit") + "\n")
 	}
 	return b.String()
 }
