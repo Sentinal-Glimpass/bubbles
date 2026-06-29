@@ -35,18 +35,11 @@ func TestLeaderFeed(t *testing.T) {
 		t.Fatalf("ctrl-\\ should go to fleet: %+v", r)
 	}
 
-	// Ctrl-Q then q -> fleet
+	// leader leader -> fleet
 	s = leaderState{}
 	s.feed(leaderByte, cur, nil)
-	if r := s.feed('q', cur, nil); !r.fleet {
-		t.Fatalf("Ctrl-Q q should go to fleet: %+v", r)
-	}
-
-	// Ctrl-Q Ctrl-Q -> literal Ctrl-Q forwarded
-	s = leaderState{}
-	s.feed(leaderByte, cur, nil)
-	if r := s.feed(leaderByte, cur, nil); len(r.forward) != 1 || r.forward[0] != leaderByte {
-		t.Fatalf("Ctrl-Q Ctrl-Q should forward literal: %+v", r)
+	if r := s.feed(leaderByte, cur, nil); !r.fleet {
+		t.Fatalf("leader leader should go to fleet: %+v", r)
 	}
 
 	// Ctrl-Q <unbound digit> -> binds current to that slot, no nav

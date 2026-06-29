@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/creack/pty"
@@ -58,10 +59,9 @@ type diveResult struct {
 
 // leaderState implements the leader prefix (default Ctrl-A, see leaderByte):
 //
-//	<leader> q       -> fleet
-//	<leader> <digit> -> if that slot is bound, switch to it; else bind the current bubble to it
-//	<leader> <leader> -> send a literal leader byte to claude
-//	Ctrl-\           -> instant fleet (no leader)
+//	<leader> <leader> -> fleet
+//	<leader> <digit>  -> if that slot is bound, switch to it; else bind the current bubble to it
+//	Ctrl-\            -> instant fleet (no leader)
 //
 // everything else is forwarded to claude untouched (Esc included).
 type leaderState struct{ armed bool }
@@ -80,10 +80,8 @@ func (s *leaderState) feed(b byte, current addr.Address, marks map[int]addr.Addr
 	}
 	s.armed = false
 	switch {
-	case b == 'q':
+	case b == leaderByte: // leader leader -> fleet
 		return diveResult{fleet: true}
-	case b == leaderByte:
-		return diveResult{forward: []byte{leaderByte}} // literal Ctrl-Q
 	case b >= '0' && b <= '9':
 		slot := int(b - '0')
 		if dest, ok := marks[slot]; ok && dest != "" {
@@ -237,17 +235,6 @@ func diveInto(lr *runner.LocalRunner, a addr.Address, marks map[int]addr.Address
 			_ = pty.InheritSize(os.Stdin, f)
 		}
 	}()
-	// Force claude (an Ink TUI) to repaint on (re)attach: it only redraws on a
-	// size change, so re-entering an idle bubble would otherwise look blank.
-	// Toggle the size (shrink one row, then restore) to trigger a fresh render.
-	if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
-		smaller := *ws
-		if smaller.Rows > 1 {
-			smaller.Rows--
-		}
-		_ = pty.Setsize(f, &smaller)
-		_ = pty.Setsize(f, ws)
-	}
 	defer signal.Stop(winch)
 
 	if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
@@ -274,6 +261,21 @@ func diveInto(lr *runner.LocalRunner, a addr.Address, marks map[int]addr.Address
 			}
 		}
 	}()
+
+	// Now that we're copying the bubble's output, force claude (an Ink TUI) to
+	// repaint — it only redraws on a size change, so re-entering an idle bubble
+	// would otherwise look blank. Shrink a row, pause so Ink renders, then restore.
+	if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
+		smaller := *ws
+		if smaller.Rows > 1 {
+			smaller.Rows--
+		}
+		_ = pty.Setsize(f, &smaller)
+		time.Sleep(60 * time.Millisecond)
+		_ = pty.Setsize(f, ws)
+	} else {
+		_ = pty.InheritSize(os.Stdin, f)
+	}
 
 	// Input loop. Esc and everything else go straight to claude; the Ctrl-Q
 	// leader (and Ctrl-\) are intercepted by the state machine.
