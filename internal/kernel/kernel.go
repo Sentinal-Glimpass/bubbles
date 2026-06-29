@@ -62,15 +62,15 @@ func (k *Kernel) session(a addr.Address) runner.Session {
 // without interruption: a short "you have mail" line is queued into its session
 // (picked up on its next turn), prompting it to call inbox(). Messages to root
 // blink the dashboard instead.
-func (k *Kernel) Send(from, to addr.Address, subject, body string) error {
+func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int) (int, error) {
 	if !k.Caps.CanSend(from, to) {
-		return ErrNotContact
+		return 0, ErrNotContact
 	}
 	fromName := ""
 	if b, ok := k.Reg.Get(from); ok {
 		fromName = b.Persona
 	}
-	k.Store.Append(inbox.Message{From: from, FromName: fromName, To: to, Subject: subject, Body: body})
+	id := k.Store.Append(inbox.Message{From: from, FromName: fromName, To: to, Subject: subject, Body: body, ReplyTo: replyTo})
 	k.Caps.AddContact(to, from) // reply grant: the recipient can always reply to whoever messaged it
 	if to == addr.Root {
 		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard
@@ -79,7 +79,28 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string) error {
 		unread := k.Store.UnreadCount(to)
 		_, _ = s.Write([]byte(formatNotify(from, fromName, subject, unread)))
 	}
-	return nil
+	return id, nil
+}
+
+// Status reports the delivery state of messages from sent: delivered / read /
+// replied, each labeled with the recipient's address and role.
+func (k *Kernel) Status(from addr.Address) []string {
+	var out []string
+	for _, m := range k.Store.Sent(from) {
+		state := "delivered"
+		if m.Read {
+			state = "read, no reply"
+		}
+		if m.Replied {
+			state = "replied"
+		}
+		to := m.To.String()
+		if b, ok := k.Reg.Get(m.To); ok && b.Persona != "" {
+			to += " (" + b.Persona + ")"
+		}
+		out = append(out, fmt.Sprintf("[%d] to %s — %q: %s", m.ID, to, m.Subject, state))
+	}
+	return out
 }
 
 // Inbox returns owner's unread messages (marking them read), each labeled with

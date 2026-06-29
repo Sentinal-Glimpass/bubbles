@@ -2,7 +2,9 @@ package mcpstdio
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -88,12 +90,23 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 		}
 		return ""
 	}
+	argInt := func(k string) int {
+		switch v := p.Arguments[k].(type) {
+		case float64:
+			return int(v)
+		case string:
+			n, _ := strconv.Atoi(v)
+			return n
+		}
+		return 0
+	}
 	switch p.Name {
 	case "send":
-		if err := s.B.Send(s.Self, arg("to"), arg("subject"), arg("body")); err != nil {
+		id, err := s.B.Send(s.Self, arg("to"), arg("subject"), arg("body"), argInt("reply_to"))
+		if err != nil {
 			return toolErr(msg.ID, err.Error())
 		}
-		return toolOK(msg.ID, "delivered to "+arg("to")+"'s inbox")
+		return toolOK(msg.ID, fmt.Sprintf("delivered to %s's inbox (msg #%d)", arg("to"), id))
 	case "contacts":
 		return toolOK(msg.ID, strings.Join(s.B.Contacts(s.Self), ", "))
 	case "inbox":
@@ -102,6 +115,12 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolOK(msg.ID, "(inbox empty)")
 		}
 		return toolOK(msg.ID, strings.Join(msgs, "\n"))
+	case "status":
+		st := s.B.Status(s.Self)
+		if len(st) == 0 {
+			return toolOK(msg.ID, "(no sent messages)")
+		}
+		return toolOK(msg.ID, strings.Join(st, "\n"))
 	case "spawn":
 		if !s.Spawnable {
 			return errResp(msg.ID, -32601, "tool not available: spawn")

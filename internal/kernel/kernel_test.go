@@ -32,7 +32,7 @@ func TestFleetEndToEnd(t *testing.T) {
 	}
 
 	// Worker -> root: blinks the dashboard (bus) and lands in root's inbox.
-	if err := k.Send(scout, addr.Root, "found 3 bugs", "details"); err != nil {
+	if _, err := k.Send(scout, addr.Root, "found 3 bugs", "details", 0); err != nil {
 		t.Fatalf("scout->root: %v", err)
 	}
 	if len(pings) != 1 || pings[0].From != scout {
@@ -40,7 +40,7 @@ func TestFleetEndToEnd(t *testing.T) {
 	}
 
 	// Workers can't talk before introduction.
-	if err := k.Send(scout, refactor, "hi", ""); !errors.Is(err, ErrNotContact) {
+	if _, err := k.Send(scout, refactor, "hi", "", 0); !errors.Is(err, ErrNotContact) {
 		t.Fatalf("got %v want ErrNotContact", err)
 	}
 	if err := k.Introduce(addr.Root, scout, refactor); err != nil {
@@ -48,7 +48,7 @@ func TestFleetEndToEnd(t *testing.T) {
 	}
 
 	// Worker -> worker: lands in the inbox AND queues a non-interrupting notice.
-	if err := k.Send(scout, refactor, "take the API layer", "thanks"); err != nil {
+	if _, err := k.Send(scout, refactor, "take the API layer", "thanks", 0); err != nil {
 		t.Fatalf("scout->refactor: %v", err)
 	}
 	if w := fr.Session(refactor).Written(); !strings.Contains(w, "📬 New message") ||
@@ -97,14 +97,20 @@ func TestReplyGrant(t *testing.T) {
 	if k.Caps.CanSend(c, p) {
 		t.Fatal("child should not reach parent before being messaged")
 	}
-	if err := k.Send(p, c, "do X", ""); err != nil { // parent messages child
+	id, err := k.Send(p, c, "do X", "", 0) // parent messages child
+	if err != nil {
 		t.Fatalf("parent->child: %v", err)
 	}
 	if !k.Caps.CanSend(c, p) {
 		t.Fatal("child should be able to reply after the parent messaged it")
 	}
-	if err := k.Send(c, p, "done", ""); err != nil { // child replies
+	if _, err := k.Send(c, p, "done", "", id); err != nil { // child replies (threaded)
 		t.Fatalf("child reply: %v", err)
+	}
+	// parent's status for that message shows "replied"
+	st := k.Status(p)
+	if len(st) != 1 || !strings.Contains(st[0], "replied") {
+		t.Fatalf("status = %v want one 'replied'", st)
 	}
 }
 

@@ -46,15 +46,15 @@ func runMCPStdio() {
 // ipcBackend implements mcpstdio.Backend by relaying over the IPC socket.
 type ipcBackend struct{ c *ipc.Client }
 
-func (b *ipcBackend) Send(from, to, subject, body string) error {
-	rep, err := b.c.Do(ipc.Request{Op: "send", From: from, To: to, Subject: subject, Body: body})
+func (b *ipcBackend) Send(from, to, subject, body string, replyTo int) (int, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "send", From: from, To: to, Subject: subject, Body: body, ReplyTo: replyTo})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if !rep.OK {
-		return errors.New(rep.Err)
+		return 0, errors.New(rep.Err)
 	}
-	return nil
+	return rep.ID, nil
 }
 
 func (b *ipcBackend) Contacts(owner string) []string {
@@ -64,6 +64,11 @@ func (b *ipcBackend) Contacts(owner string) []string {
 
 func (b *ipcBackend) Inbox(owner string) []string {
 	rep, _ := b.c.Do(ipc.Request{Op: "inbox", From: owner})
+	return rep.Messages
+}
+
+func (b *ipcBackend) Status(owner string) []string {
+	rep, _ := b.c.Do(ipc.Request{Op: "status", From: owner})
 	return rep.Messages
 }
 

@@ -16,6 +16,7 @@ type Request struct {
 	To      string `json:"to,omitempty"`
 	Subject string `json:"subject,omitempty"`
 	Body    string `json:"body,omitempty"`
+	ReplyTo int    `json:"replyTo,omitempty"`
 	Persona string `json:"persona,omitempty"`
 	Dir     string `json:"dir,omitempty"`
 }
@@ -26,6 +27,7 @@ type Reply struct {
 	Err      string   `json:"err,omitempty"`
 	Contacts []string `json:"contacts,omitempty"`
 	Messages []string `json:"messages,omitempty"`
+	ID       int      `json:"id,omitempty"`
 	Addr     string   `json:"addr,omitempty"`
 }
 

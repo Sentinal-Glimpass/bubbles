@@ -6,9 +6,10 @@ package mcpstdio
 // Backend executes tool calls. The identity (from/by) is fixed by the Server to
 // this bubble's own address, so a session cannot spoof another bubble.
 type Backend interface {
-	Send(from, to, subject, body string) error
+	Send(from, to, subject, body string, replyTo int) (int, error)
 	Contacts(owner string) []string
 	Inbox(owner string) []string
+	Status(owner string) []string
 	Spawn(by, persona, dir string) (string, error)
 }
 
@@ -29,13 +30,18 @@ func strProp(props ...string) map[string]any {
 
 // tools returns the tool list for this Server; spawn appears only when granted.
 func (s *Server) tools() []Tool {
+	sendProps := strProp("to", "subject", "body")
+	sendProps["reply_to"] = map[string]any{
+		"type":        "integer",
+		"description": "Optional id of the inbox message you are replying to (marks it answered for the sender).",
+	}
 	ts := []Tool{
 		{
 			Name:        "send",
-			Description: "Send a message to a contact's inbox (root is \"0\"). They are notified and read it via inbox().",
+			Description: "Send a message to a contact's inbox (root is \"0\"). Returns the message id. They are notified and read it via inbox().",
 			InputSchema: map[string]any{
 				"type":       "object",
-				"properties": strProp("to", "subject", "body"),
+				"properties": sendProps,
 				"required":   []string{"to", "subject"},
 			},
 		},
@@ -46,7 +52,12 @@ func (s *Server) tools() []Tool {
 		},
 		{
 			Name:        "inbox",
-			Description: "Read and clear your unread messages (each shows the sender's address and role).",
+			Description: "Read and clear your unread messages. Each shows its id and the sender's address and role; reply with send(..., reply_to=<id>).",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "status",
+			Description: "Check the messages you've SENT: delivered / read, no reply / replied. Use before re-sending so you don't nag someone who already saw it.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 	}

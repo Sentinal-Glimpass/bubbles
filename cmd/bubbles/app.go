@@ -109,12 +109,15 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 	from := addr.Address(r.From)
 	switch r.Op {
 	case "send":
-		if err := k.Send(from, addr.Address(r.To), r.Subject, r.Body); err != nil {
+		id, err := k.Send(from, addr.Address(r.To), r.Subject, r.Body, r.ReplyTo)
+		if err != nil {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}
-		return ipc.Reply{OK: true}
+		return ipc.Reply{OK: true, ID: id}
 	case "inbox":
 		return ipc.Reply{OK: true, Messages: k.Inbox(from)}
+	case "status":
+		return ipc.Reply{OK: true, Messages: k.Status(from)}
 	case "contacts":
 		cs := k.Contacts(from)
 		out := make([]string, len(cs))
