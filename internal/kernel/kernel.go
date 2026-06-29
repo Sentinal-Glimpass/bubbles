@@ -3,6 +3,7 @@
 package kernel
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 
@@ -70,7 +71,9 @@ func (k *Kernel) Spawn(by addr.Address, persona, dir string, opts runner.SpawnOp
 		return "", err
 	}
 	b := k.Reg.Add(by, persona, dir)
+	b.SessionID = newSessionID()
 	k.Caps.AddContact(b.Addr, addr.Root)
+	opts.SessionID = b.SessionID
 	sess, err := k.runner.Launch(b.Addr, dir, opts)
 	if err != nil {
 		return "", err
@@ -79,11 +82,20 @@ func (k *Kernel) Spawn(by addr.Address, persona, dir string, opts runner.SpawnOp
 	return b.Addr, nil
 }
 
+// newSessionID returns a random UUIDv4 string for tagging a claude session.
+func newSessionID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 // Relaunch starts a session for an already-registered (restored) bubble and
 // wires delivery, without assigning a new address. Used when rehydrating a saved
 // fleet; the session resumes its prior conversation.
-func (k *Kernel) Relaunch(a addr.Address, dir, persona string) error {
-	sess, err := k.runner.Launch(a, dir, runner.SpawnOpts{Persona: persona, Resume: true})
+func (k *Kernel) Relaunch(a addr.Address, dir, persona, sessionID string) error {
+	sess, err := k.runner.Launch(a, dir, runner.SpawnOpts{Persona: persona, SessionID: sessionID, Resume: true})
 	if err != nil {
 		return err
 	}

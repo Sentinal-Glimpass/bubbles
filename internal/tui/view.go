@@ -34,7 +34,11 @@ func (m Model) View() string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("BUBBLES — fleet") + "\n\n")
+	mode := "ask (acceptEdits)"
+	if m.AllowAll != nil && *m.AllowAll {
+		mode = "ALLOW-ALL (skip permissions)"
+	}
+	b.WriteString(titleStyle.Render("BUBBLES — fleet") + helpStyle.Render("   permissions: "+mode+" (ctrl+p)") + "\n\n")
 
 	slotOf := map[addr.Address]int{}
 	for slot, a := range m.Marks {

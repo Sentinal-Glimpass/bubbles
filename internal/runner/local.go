@@ -24,6 +24,7 @@ type LocalRunner struct {
 	CitizenPrompt string                    // appended via --append-system-prompt
 	MCPConfig     func(addr.Address) string // inline JSON for --mcp-config (nil = none)
 	InterruptByte byte                      // sent before a delivered message (0 = none)
+	AllowAll      *bool                     // shared toggle: true => --dangerously-skip-permissions
 
 	mu       sync.Mutex
 	sessions map[addr.Address]*ptySession
@@ -53,10 +54,21 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	if r.CitizenPrompt != "" {
 		args = append(args, "--append-system-prompt", r.citizen(a))
 	}
-	args = append(args, "--permission-mode", "acceptEdits")
-	if opts.Resume {
-		args = append(args, "--continue") // resume the bubble's prior conversation in this dir
+	if r.AllowAll != nil && *r.AllowAll {
+		args = append(args, "--dangerously-skip-permissions")
 	} else {
+		args = append(args, "--permission-mode", "acceptEdits")
+	}
+	if opts.Resume {
+		if opts.SessionID != "" {
+			args = append(args, "--resume", opts.SessionID) // resume THIS bubble's session
+		} else {
+			args = append(args, "--continue") // fallback: most recent conversation in dir
+		}
+	} else {
+		if opts.SessionID != "" {
+			args = append(args, "--session-id", opts.SessionID) // tag the new session
+		}
 		args = append(args, initialPrompt(opts)) // positional prompt stays last
 	}
 

@@ -26,9 +26,10 @@ type blinkTickMsg struct{}
 
 // Model is the fleet tree.
 type Model struct {
-	k       *kernel.Kernel
-	BaseDir string               // dir where `bubbles` was launched; bubble folders are downstream of it
-	Marks   map[int]addr.Address // shared number-slots: digit binds (if free) or jumps (if bound)
+	k        *kernel.Kernel
+	BaseDir  string               // dir where `bubbles` was launched; bubble folders are downstream of it
+	Marks    map[int]addr.Address // shared number-slots: digit binds (if free) or jumps (if bound)
+	AllowAll *bool                // shared permission toggle (Ctrl+P): true => --dangerously-skip-permissions
 
 	rows    []addr.Address
 	cursor  int
@@ -118,6 +119,10 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.Selected = sel
 				return m, tea.Quit
 			}
+		}
+	case "ctrl+p":
+		if m.AllowAll != nil {
+			*m.AllowAll = !*m.AllowAll // toggle permission mode for future spawns
 		}
 	case "n":
 		m.spawnStage = 1

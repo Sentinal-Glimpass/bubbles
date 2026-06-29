@@ -13,11 +13,12 @@ import (
 
 // bubbleRec is a persisted bubble (one entry in the fleet manifest).
 type bubbleRec struct {
-	Addr     string   `json:"addr"`
-	Persona  string   `json:"persona"`
-	Dir      string   `json:"dir"`
-	Parent   string   `json:"parent"`
-	Contacts []string `json:"contacts"`
+	Addr      string   `json:"addr"`
+	Persona   string   `json:"persona"`
+	Dir       string   `json:"dir"`
+	Parent    string   `json:"parent"`
+	SessionID string   `json:"sessionId"`
+	Contacts  []string `json:"contacts"`
 }
 
 // manifest is the on-disk fleet for one workspace.
@@ -43,7 +44,7 @@ func saveFleet(baseDir string, k *kernel.Kernel, marks map[int]addr.Address) err
 		}
 		recs = append(recs, bubbleRec{
 			Addr: b.Addr.String(), Persona: b.Persona, Dir: b.Dir,
-			Parent: b.Parent.String(), Contacts: cs,
+			Parent: b.Parent.String(), SessionID: b.SessionID, Contacts: cs,
 		})
 	}
 	mk := map[string]string{}
@@ -87,7 +88,7 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 	for _, r := range m.Bubbles { // registry first, so addresses exist
 		k.Reg.Restore(registry.Bubble{
 			Addr: addr.Address(r.Addr), Persona: r.Persona, Dir: r.Dir,
-			Parent: addr.Address(r.Parent), Status: registry.Idle,
+			Parent: addr.Address(r.Parent), Status: registry.Idle, SessionID: r.SessionID,
 		})
 	}
 	for _, r := range m.Bubbles { // contacts
@@ -96,7 +97,7 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 		}
 	}
 	for _, r := range m.Bubbles { // relaunch sessions (resume conversations)
-		_ = k.Relaunch(addr.Address(r.Addr), r.Dir, r.Persona)
+		_ = k.Relaunch(addr.Address(r.Addr), r.Dir, r.Persona, r.SessionID)
 	}
 	for slot, a := range m.Marks {
 		if n, err := strconv.Atoi(slot); err == nil {

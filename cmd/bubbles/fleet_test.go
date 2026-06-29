@@ -6,6 +6,7 @@ import (
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
+	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 )
 
@@ -25,8 +26,12 @@ func TestFleetSaveRestore(t *testing.T) {
 	k2 := kernel.New(runner.NewFake())
 	marks := restoreFleet(base, k2)
 
-	if b, ok := k2.Reg.Get(a1); !ok || b.Persona != "alice" {
-		t.Fatalf("%s not restored: %+v ok=%v", a1, b, ok)
+	sid := mustGet(t, k1, a1).SessionID
+	if sid == "" {
+		t.Fatal("spawn did not assign a session id")
+	}
+	if b, ok := k2.Reg.Get(a1); !ok || b.Persona != "alice" || b.SessionID != sid {
+		t.Fatalf("%s not restored with session id: %+v ok=%v", a1, b, ok)
 	}
 	if b, ok := k2.Reg.Get(a2); !ok || b.Persona != "bob" {
 		t.Fatalf("%s not restored", a2)
@@ -41,6 +46,15 @@ func TestFleetSaveRestore(t *testing.T) {
 	if a3, _ := k2.Spawn(addr.Root, "carol", filepath.Join(base, "carol"), runner.SpawnOpts{Persona: "carol"}); a3 != addr.Address("0.3") {
 		t.Fatalf("post-restore spawn = %q want 0.3", a3)
 	}
+}
+
+func mustGet(t *testing.T, k *kernel.Kernel, a addr.Address) *registry.Bubble {
+	t.Helper()
+	b, ok := k.Reg.Get(a)
+	if !ok {
+		t.Fatalf("bubble %s not found", a)
+	}
+	return b
 }
 
 func TestRestoreNoFile(t *testing.T) {

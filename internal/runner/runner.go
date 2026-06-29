@@ -6,9 +6,10 @@ import "github.com/Sentinal-Glimpass/bubbles/internal/addr"
 
 // SpawnOpts configures a launched session.
 type SpawnOpts struct {
-	Persona string
-	Goal    string
-	Resume  bool // restored bubble: continue its prior conversation, no initial prompt
+	Persona   string
+	Goal      string
+	SessionID string // claude --session-id (new) / --resume target (restore)
+	Resume    bool   // restored bubble: resume its conversation, no initial prompt
 }
 
 // Session is a running agent we can inject input into (message delivery).

@@ -118,6 +118,23 @@ func TestFolderPickerSelectsSubdir(t *testing.T) {
 	}
 }
 
+func TestTogglePermission(t *testing.T) {
+	k := newKernelWith(t)
+	allow := true
+	m := New(k)
+	m.BaseDir = t.TempDir()
+	m.AllowAll = &allow
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlP})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	if allow {
+		t.Fatal("ctrl+p should have toggled AllowAll to false")
+	}
+}
+
 func TestMarkBindAndJump(t *testing.T) {
 	k := newKernelWith(t, "alice", "bob") // 0.1, 0.2
 	m := New(k)

@@ -20,11 +20,12 @@ const (
 
 // Bubble is the live state of one agent in the fleet.
 type Bubble struct {
-	Addr    addr.Address
-	Persona string
-	Status  Status
-	Parent  addr.Address
-	Dir     string
+	Addr      addr.Address
+	Persona   string
+	Status    Status
+	Parent    addr.Address
+	Dir       string
+	SessionID string // claude session id, so same-folder bubbles resume distinctly
 }
 
 // Registry is the in-memory fleet state.

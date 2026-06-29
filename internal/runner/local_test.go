@@ -39,6 +39,38 @@ func readUntil(f *os.File, needle string) string {
 	}
 }
 
+func TestLocalRunnerFlags(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "stub.sh")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho \"ARGS:$@\"\ncat\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	allow := true
+	r := NewLocal()
+	r.Bin = stub
+	r.InterruptByte = 0
+	r.AllowAll = &allow
+
+	sess, err := r.Launch("0.1", dir, SpawnOpts{Persona: "x", SessionID: "sid-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Kill("0.1")
+	ps := sess.(PTYSession)
+	time.Sleep(150 * time.Millisecond)
+	sess.Write([]byte("go"))
+
+	out := readUntil(ps.PTY(), "go")
+	for _, want := range []string{"--dangerously-skip-permissions", "--session-id", "sid-123"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "--permission-mode") {
+		t.Fatalf("allow-all should not set --permission-mode:\n%s", out)
+	}
+}
+
 func TestLocalRunnerLaunchAndDeliver(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "stub.sh")

@@ -83,6 +83,8 @@ func runApp() {
 
 	lr := runner.NewLocal()
 	lr.CitizenPrompt = citizenPrompt
+	allowAll := true // default: launch bubbles with --dangerously-skip-permissions
+	lr.AllowAll = &allowAll
 	k := kernel.New(lr)
 	lr.MCPConfig = func(a addr.Address) string {
 		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a))
@@ -101,6 +103,7 @@ func runApp() {
 	m := tui.New(k)
 	m.BaseDir = baseDir
 	m.Marks = marks
+	m.AllowAll = &allowAll
 	for {
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		k.Bus.Subscribe(addr.Root, func(msg bus.Message) {
@@ -123,6 +126,7 @@ func runApp() {
 		m = tui.New(k)                   // refresh rows, clear selection
 		m.BaseDir = baseDir
 		m.Marks = marks
+		m.AllowAll = &allowAll
 	}
 }
 
@@ -207,7 +211,17 @@ func diveInto(lr *runner.LocalRunner, a addr.Address, marks map[int]addr.Address
 			_ = pty.InheritSize(os.Stdin, f)
 		}
 	}()
-	winch <- syscall.SIGWINCH // trigger the initial resize now
+	// Force claude (an Ink TUI) to repaint on (re)attach: it only redraws on a
+	// size change, so re-entering an idle bubble would otherwise look blank.
+	// Toggle the size (shrink one row, then restore) to trigger a fresh render.
+	if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
+		smaller := *ws
+		if smaller.Rows > 1 {
+			smaller.Rows--
+		}
+		_ = pty.Setsize(f, &smaller)
+		_ = pty.Setsize(f, ws)
+	}
 	defer signal.Stop(winch)
 
 	if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
