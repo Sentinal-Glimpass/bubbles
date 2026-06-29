@@ -33,6 +33,19 @@ func descendantCount(reg *registry.Registry, a addr.Address) int {
 	return n
 }
 
+// descendantCountExcl is like descendantCount but skips hidden bubbles (group
+// coordinator sessions), so a node's count matches what's shown in the tree.
+func descendantCountExcl(reg *registry.Registry, a addr.Address, skip map[addr.Address]bool) int {
+	n := 0
+	for _, c := range reg.Children(a) {
+		if skip[c.Addr] {
+			continue
+		}
+		n += 1 + descendantCountExcl(reg, c.Addr, skip)
+	}
+	return n
+}
+
 func dot(s registry.Status) string {
 	switch s {
 	case registry.Working:
@@ -86,6 +99,12 @@ func (m Model) View() string {
 	for slot, a := range m.Marks {
 		slotOf[a] = slot
 	}
+	sessions := map[addr.Address]bool{} // hidden group sessions, excluded from tree counts
+	for _, g := range m.k.Groups.All() {
+		if g.Session != "" {
+			sessions[g.Session] = true
+		}
+	}
 
 	for i, r := range m.rows {
 		cursor := "  "
@@ -122,7 +141,7 @@ func (m Model) View() string {
 		}
 		toggle, count := " ", ""
 		if r.group == "" { // tree bubbles can expand their children; group members don't
-			if nd := descendantCount(m.k.Reg, a); nd > 0 {
+			if nd := descendantCountExcl(m.k.Reg, a, sessions); nd > 0 {
 				if m.expanded[a] {
 					toggle = "▾"
 				} else {

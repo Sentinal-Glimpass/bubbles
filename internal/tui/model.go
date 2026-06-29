@@ -88,8 +88,17 @@ func New(k *kernel.Kernel) Model {
 // fleetRows builds the full row list: the location tree, then each group as an
 // expandable node (outside the main root) revealing its members + session.
 func (m Model) fleetRows() []fleetRow {
+	sessions := map[addr.Address]bool{} // group coordinator sessions live under their group, not the tree
+	for _, g := range m.k.Groups.All() {
+		if g.Session != "" {
+			sessions[g.Session] = true
+		}
+	}
 	var out []fleetRow
 	for _, a := range buildRows(m.k.Reg, m.expanded) {
+		if sessions[a] {
+			continue
+		}
 		out = append(out, fleetRow{addr: a, depth: strings.Count(string(a), ".")})
 	}
 	for _, g := range m.k.Groups.All() {
@@ -325,7 +334,9 @@ func (m Model) updateGrouping(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.k.CreateGroup(name, members, m.groupIntro)
 			if m.groupSession {
-				_, _ = m.k.AttachGroupSession(name, m.BaseDir, runner.SpawnOpts{Persona: "#" + name})
+				dir := filepath.Join(m.BaseDir, ".bubbles", "groups", name) // its own (gitignored) folder
+				_ = os.MkdirAll(dir, 0o755)
+				_, _ = m.k.AttachGroupSession(name, dir, runner.SpawnOpts{Persona: "#" + name})
 			}
 			m.rows = m.fleetRows()
 			return m.clearGroup(), nil
