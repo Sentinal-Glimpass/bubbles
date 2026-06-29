@@ -29,6 +29,18 @@ func dot(s registry.Status) string {
 	}
 }
 
+// parentLabel describes the spawn parent for the prompt: "root" or "addr (role)".
+func (m Model) parentLabel() string {
+	if m.pendingParent.IsRoot() {
+		return "root"
+	}
+	label := m.pendingParent.String()
+	if b, ok := m.k.Reg.Get(m.pendingParent); ok && b.Persona != "" {
+		label += " (" + b.Persona + ")"
+	}
+	return label
+}
+
 func (m Model) View() string {
 	if m.quitting {
 		return ""
@@ -86,9 +98,9 @@ func (m Model) View() string {
 	b.WriteString("\n")
 	switch {
 	case m.spawnStage == 1:
-		b.WriteString("new bubble — persona: " + m.input + "▏\n")
+		b.WriteString("new bubble under " + m.parentLabel() + " — persona: " + m.input + "▏\n")
 	case m.spawnStage == 2:
-		b.WriteString("bubble '" + m.pendingPersona + "' — pick a folder (↑/↓, enter):\n")
+		b.WriteString("bubble '" + m.pendingPersona + "' under " + m.parentLabel() + " — pick a folder (↑/↓, enter):\n")
 		for i, c := range m.folderChoices {
 			cur := "  "
 			if i == m.folderCursor {

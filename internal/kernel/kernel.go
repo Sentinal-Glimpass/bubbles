@@ -114,13 +114,21 @@ func (k *Kernel) Introduce(by, a, b addr.Address) error {
 // delivery so messages to it are injected into the session. Fresh bubbles
 // know only root.
 func (k *Kernel) Spawn(by addr.Address, persona, dir string, opts runner.SpawnOpts) (addr.Address, error) {
+	return k.SpawnUnder(by, by, persona, dir, opts)
+}
+
+// SpawnUnder is like Spawn but places the child under an explicit parent in the
+// tree. `by` is the authority (its spawn capability is checked/consumed); parent
+// is where the child is attached. The human dashboard spawns with by=root and
+// parent=the selected bubble, so root can create a child anywhere.
+func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts runner.SpawnOpts) (addr.Address, error) {
 	if !k.Caps.CanSpawn(by) {
 		return "", ErrNotAllowed
 	}
 	if err := k.Caps.ConsumeSpawn(by); err != nil {
 		return "", err
 	}
-	b := k.Reg.Add(by, persona, dir)
+	b := k.Reg.Add(parent, persona, dir)
 	b.SessionID = newSessionID()
 	k.Caps.AddContact(b.Addr, addr.Root)
 	opts.SessionID = b.SessionID

@@ -135,6 +135,33 @@ func TestTogglePermission(t *testing.T) {
 	}
 }
 
+func TestSpawnUnderSelectedBubble(t *testing.T) {
+	k := newKernelWith(t, "parent") // 0.1
+	m := New(k)
+	m.BaseDir = t.TempDir()
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // root -> 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}) // spawn under 0.1
+	tm.Type("child")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // persona -> folder picker (rooted at 0.1's dir)
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick "." -> spawn
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(b, []byte("child"))
+	}, teatest.WithDuration(3*time.Second))
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	b, ok := k.Reg.Get(addr.Address("0.1.1"))
+	if !ok {
+		t.Fatal("nested bubble 0.1.1 not created")
+	}
+	if b.Parent != addr.Address("0.1") || b.Persona != "child" {
+		t.Fatalf("0.1.1 = %+v want parent 0.1, persona child", b)
+	}
+}
+
 func TestMarkBindAndJump(t *testing.T) {
 	k := newKernelWith(t, "alice", "bob") // 0.1, 0.2
 	m := New(k)

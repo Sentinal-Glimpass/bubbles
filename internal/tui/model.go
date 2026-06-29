@@ -37,6 +37,7 @@ type Model struct {
 	blinkOn bool
 
 	spawnStage     int // 0 = none, 1 = entering persona, 2 = picking folder
+	pendingParent  addr.Address // bubble the new one is created under
 	pendingPersona string
 	input          string
 	folderChoices  []folderChoice
@@ -127,6 +128,10 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		m.spawnStage = 1
 		m.input = ""
+		m.pendingParent = addr.Root
+		if len(m.rows) > 0 {
+			m.pendingParent = m.rows[m.cursor] // spawn under the highlighted bubble
+		}
 	case "i":
 		if len(m.rows) > 2 { // need at least two non-root bubbles
 			m.introStage = 1
@@ -210,7 +215,7 @@ type folderChoice struct {
 }
 
 func (m Model) clearSpawn() Model {
-	m.spawnStage, m.input, m.pendingPersona = 0, "", ""
+	m.spawnStage, m.input, m.pendingPersona, m.pendingParent = 0, "", "", ""
 	m.folderChoices, m.folderCursor = nil, 0
 	return m
 }
@@ -230,7 +235,7 @@ func (m Model) updateSpawning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.clearSpawn(), nil
 		}
 		m.pendingPersona, m.input = persona, ""
-		m.folderChoices, m.folderCursor = listFolders(m.BaseDir, persona), 0
+		m.folderChoices, m.folderCursor = listFolders(m.baseDirFor(m.pendingParent), persona), 0
 		m.spawnStage = 2
 	case "backspace":
 		if len(m.input) > 0 {
@@ -257,14 +262,26 @@ func (m Model) updateFolderPick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if len(m.folderChoices) > 0 {
 			c := m.folderChoices[m.folderCursor]
-			dir := resolveFolder(m.BaseDir, c.folder, m.pendingPersona)
+			dir := resolveFolder(m.baseDirFor(m.pendingParent), c.folder, m.pendingPersona)
 			_ = os.MkdirAll(dir, 0o755)
-			_, _ = m.k.Spawn(addr.Root, m.pendingPersona, dir, runner.SpawnOpts{Persona: m.pendingPersona})
+			// root authorizes; the new bubble is attached under the selected parent
+			_, _ = m.k.SpawnUnder(addr.Root, m.pendingParent, m.pendingPersona, dir, runner.SpawnOpts{Persona: m.pendingPersona})
 			m.rows = buildRows(m.k.Reg)
 		}
 		return m.clearSpawn(), nil
 	}
 	return m, nil
+}
+
+// baseDirFor returns the folder the picker is rooted at: a bubble's own folder
+// (so children nest downstream of it), or the launch dir for root.
+func (m Model) baseDirFor(parent addr.Address) string {
+	if !parent.IsRoot() {
+		if b, ok := m.k.Reg.Get(parent); ok && b.Dir != "" {
+			return b.Dir
+		}
+	}
+	return m.BaseDir
 }
 
 // listFolders builds the folder picker: "here", each immediate subdir of base
