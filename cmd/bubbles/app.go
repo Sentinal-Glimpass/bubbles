@@ -13,6 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
@@ -288,6 +289,15 @@ func diveInto(lr *runner.LocalRunner, a addr.Address, marks map[int]addr.Address
 		if err != nil || n == 0 {
 			return ""
 		}
+		if buf[0] == 0x1b { // escape sequence (arrows etc.) or a lone Esc
+			seq := append([]byte{0x1b}, readEscapeRest()...)
+			if isCtrlLeft(seq) {
+				return "" // Ctrl-Left -> back to fleet
+			}
+			ls = leaderState{} // drop any half-typed leader
+			f.Write(seq)       // forward arrows / lone Esc to claude
+			continue
+		}
 		res := ls.feed(buf[0], a, marks)
 		switch {
 		case res.fleet:
@@ -298,6 +308,42 @@ func diveInto(lr *runner.LocalRunner, a addr.Address, marks map[int]addr.Address
 			f.Write(res.forward)
 		}
 	}
+}
+
+// readEscapeRest grabs the rest of an escape sequence after an initial Esc, using
+// a short poll so a lone Esc (interrupt) isn't held up. Returns the bytes that
+// followed Esc (empty for a lone Esc).
+func readEscapeRest() []byte {
+	var out []byte
+	timeout := 25 // ms to wait for a sequence to materialize after Esc
+	for {
+		fds := []unix.PollFd{{Fd: int32(os.Stdin.Fd()), Events: unix.POLLIN}}
+		n, err := unix.Poll(fds, timeout)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil || n == 0 {
+			return out
+		}
+		var b [32]byte
+		rn, rerr := os.Stdin.Read(b[:])
+		if rn > 0 {
+			out = append(out, b[:rn]...)
+		}
+		if rerr != nil {
+			return out
+		}
+		timeout = 5 // collect the rest of the burst, then stop
+	}
+}
+
+// isCtrlLeft reports whether seq is a Ctrl-Left arrow (terminal-dependent forms).
+func isCtrlLeft(seq []byte) bool {
+	switch string(seq) {
+	case "\x1b[1;5D", "\x1b[5D", "\x1bO5D":
+		return true
+	}
+	return false
 }
 
 // defaultWorkspace is the directory where `bubbles` was launched; bubble folders
