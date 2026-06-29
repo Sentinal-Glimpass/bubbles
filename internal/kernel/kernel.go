@@ -130,7 +130,19 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 	}
 	b := k.Reg.Add(parent, persona, dir)
 	b.SessionID = newSessionID()
-	k.Caps.AddContact(b.Addr, addr.Root)
+	k.Caps.AddContact(b.Addr, addr.Root) // every bubble can always reach root
+	if !parent.IsRoot() {
+		// Hierarchical contacts: the child joins its parent's circle — mutual with
+		// the parent and with everyone the parent can already reach (so siblings
+		// and ancestors are connected). Top-level bubbles (parent == root) stay
+		// isolated from each other by default.
+		k.Caps.Introduce(b.Addr, parent)
+		for _, c := range k.Caps.Contacts(parent) {
+			if !c.IsRoot() {
+				k.Caps.Introduce(b.Addr, c)
+			}
+		}
+	}
 	opts.SessionID = b.SessionID
 	sess, err := k.runner.Launch(b.Addr, dir, opts)
 	if err != nil {
