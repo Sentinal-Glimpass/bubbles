@@ -6,6 +6,20 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 )
 
+func TestParseLeader(t *testing.T) {
+	cases := map[string]byte{
+		"ctrl-a": 0x01, "ctrl+a": 0x01, "c-a": 0x01, "^a": 0x01,
+		"ctrl-g": 0x07, "ctrl-b": 0x02, "ctrl-\\": 0x1c,
+		"":      0x01, // default
+		"bogus": 0x01, // default
+	}
+	for in, want := range cases {
+		if got := parseLeader(in); got != want {
+			t.Errorf("parseLeader(%q) = 0x%02x want 0x%02x", in, got, want)
+		}
+	}
+}
+
 func TestLeaderFeed(t *testing.T) {
 	cur := addr.Address("0.1")
 

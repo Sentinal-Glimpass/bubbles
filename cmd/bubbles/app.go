@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 
@@ -21,10 +22,32 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/tui"
 )
 
-const (
-	leaderByte = 0x11 // Ctrl-Q: leader/prefix key inside a bubble
-	detachByte = 0x1c // Ctrl-\: instant detach fallback
-)
+const detachByte = 0x1c // Ctrl-\: instant detach fallback
+
+// leaderByte is the in-bubble prefix key. Default Ctrl-A (like GNU screen) —
+// it passes through VS Code/iTerm/Terminal over SSH, unlike Ctrl-Q which is
+// intercepted as XON flow-control or a host-app shortcut. Override with the
+// BUBBLES_LEADER env var, e.g. "ctrl-g" or "ctrl-b".
+var leaderByte byte = 0x01
+
+// parseLeader maps a name like "ctrl-a"/"c-g"/"ctrl-\" to its control byte.
+func parseLeader(s string) byte {
+	s = strings.ToLower(strings.TrimSpace(s))
+	for _, p := range []string{"ctrl-", "ctrl+", "c-", "^"} {
+		s = strings.TrimPrefix(s, p)
+	}
+	if len(s) == 1 {
+		switch c := s[0]; {
+		case c >= 'a' && c <= 'z':
+			return c - 'a' + 1 // ctrl-a=0x01 .. ctrl-z=0x1a
+		case c == '\\':
+			return 0x1c
+		case c == ']':
+			return 0x1d
+		}
+	}
+	return 0x01 // default Ctrl-A
+}
 
 // diveResult is the decision the leader state machine makes for one input byte.
 type diveResult struct {
@@ -33,12 +56,12 @@ type diveResult struct {
 	fleet    bool         // true => return to the fleet view
 }
 
-// leaderState implements the Ctrl-Q leader:
+// leaderState implements the leader prefix (default Ctrl-A, see leaderByte):
 //
-//	Ctrl-Q q       -> fleet
-//	Ctrl-Q <digit> -> if that slot is bound, switch to it; else bind the current bubble to it
-//	Ctrl-Q Ctrl-Q  -> send a literal Ctrl-Q to claude
-//	Ctrl-\         -> instant fleet (no leader)
+//	<leader> q       -> fleet
+//	<leader> <digit> -> if that slot is bound, switch to it; else bind the current bubble to it
+//	<leader> <leader> -> send a literal leader byte to claude
+//	Ctrl-\           -> instant fleet (no leader)
 //
 // everything else is forwarded to claude untouched (Esc included).
 type leaderState struct{ armed bool }
@@ -77,6 +100,9 @@ func (s *leaderState) feed(b byte, current addr.Address, marks map[int]addr.Addr
 }
 
 func runApp() {
+	if v := os.Getenv("BUBBLES_LEADER"); v != "" {
+		leaderByte = parseLeader(v)
+	}
 	baseDir := defaultWorkspace() // dir where `bubbles` was launched
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-%d.sock", os.Getpid()))
 	self, _ := os.Executable()
