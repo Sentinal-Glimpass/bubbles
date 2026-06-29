@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -55,6 +57,30 @@ func mustGet(t *testing.T, k *kernel.Kernel, a addr.Address) *registry.Bubble {
 		t.Fatalf("bubble %s not found", a)
 	}
 	return b
+}
+
+func TestRestoreAppliesParentContacts(t *testing.T) {
+	base := t.TempDir()
+	// An OLD manifest: parent 0.1 with child 0.1.1, but the parent's saved
+	// contacts do NOT include the child (the rule didn't exist at save time).
+	m := manifest{Bubbles: []bubbleRec{
+		{Addr: "0.1", Persona: "p", Dir: filepath.Join(base, "p"), Parent: "0"},
+		{Addr: "0.1.1", Persona: "c", Dir: filepath.Join(base, "c"), Parent: "0.1"},
+	}}
+	data, _ := json.MarshalIndent(m, "", "  ")
+	_ = os.MkdirAll(filepath.Dir(fleetPath(base)), 0o755)
+	if err := os.WriteFile(fleetPath(base), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	k := kernel.New(runner.NewFake())
+	restoreFleet(base, k)
+	if !k.Caps.CanSend(addr.Address("0.1"), addr.Address("0.1.1")) {
+		t.Fatal("restore should re-apply parent 0.1 -> child 0.1.1 contact")
+	}
+	if k.Caps.CanSend(addr.Address("0.1.1"), addr.Address("0.1")) {
+		t.Fatal("child should still NOT reach parent")
+	}
 }
 
 func TestRestoreNoFile(t *testing.T) {

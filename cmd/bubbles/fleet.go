@@ -105,6 +105,12 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 			k.Caps.AddContact(addr.Address(r.Addr), addr.Address(c))
 		}
 	}
+	for _, r := range m.Bubbles { // re-apply parent->child contact (covers fleets saved before this rule)
+		a := addr.Address(r.Addr)
+		if p := addr.Address(r.Parent); p != "" && !a.IsRoot() {
+			k.Caps.AddContact(p, a)
+		}
+	}
 	for _, r := range m.Bubbles { // relaunch sessions (resume conversations)
 		_ = k.Relaunch(addr.Address(r.Addr), r.Dir, r.Persona, r.SessionID)
 	}
