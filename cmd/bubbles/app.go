@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -24,84 +23,33 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/tui"
 )
 
-const detachByte = 0x1c // Ctrl-\: instant detach fallback
-
-// leaderByte is the in-bubble prefix key. Default Ctrl-A (like GNU screen) —
-// it passes through VS Code/iTerm/Terminal over SSH, unlike Ctrl-Q which is
-// intercepted as XON flow-control or a host-app shortcut. Override with the
-// BUBBLES_LEADER env var, e.g. "ctrl-g" or "ctrl-b".
-var leaderByte byte = 0x01
-
-// parseLeader maps a name like "ctrl-a"/"c-g"/"ctrl-\" to its control byte.
-func parseLeader(s string) byte {
-	s = strings.ToLower(strings.TrimSpace(s))
-	for _, p := range []string{"ctrl-", "ctrl+", "c-", "^"} {
-		s = strings.TrimPrefix(s, p)
-	}
-	if len(s) == 1 {
-		switch c := s[0]; {
-		case c >= 'a' && c <= 'z':
-			return c - 'a' + 1 // ctrl-a=0x01 .. ctrl-z=0x1a
-		case c == '\\':
-			return 0x1c
-		case c == ']':
-			return 0x1d
-		}
-	}
-	return 0x01 // default Ctrl-A
-}
-
-// diveResult is the decision the leader state machine makes for one input byte.
-type diveResult struct {
-	forward  []byte       // bytes to write to claude
-	switchTo addr.Address // non-empty => switch into this bubble
-	fleet    bool         // true => return to the fleet view
-}
-
-// leaderState implements the leader prefix (default Ctrl-A, see leaderByte):
+// Ctrl-Left is the in-bubble leader (a terminal escape sequence). It's used as a
+// prefix:
 //
-//	<leader> <leader> -> fleet
-//	<leader> <digit>  -> if that slot is bound, switch to it; else bind the current bubble to it
-//	Ctrl-\            -> instant fleet (no leader)
+//	Ctrl-Left Ctrl-Left -> fleet
+//	Ctrl-Left <digit>   -> jump to that slot if bound, else bind the current bubble
 //
-// everything else is forwarded to claude untouched (Esc included).
-type leaderState struct{ armed bool }
+// Ctrl-\ is a single-key instant fleet fallback. Everything else (incl. Ctrl-A
+// and Esc) goes straight to claude.
+const detachByte = 0x1c // Ctrl-\
 
-func (s *leaderState) feed(b byte, current addr.Address, marks map[int]addr.Address) diveResult {
-	if !s.armed {
-		switch b {
-		case leaderByte:
-			s.armed = true
-			return diveResult{}
-		case detachByte:
-			return diveResult{fleet: true}
-		default:
-			return diveResult{forward: []byte{b}}
+// markAction handles a digit pressed after the Ctrl-Left leader: jump to a bound
+// slot, or bind the current bubble to a free one. Returns the address to switch
+// into, or "" to stay (already there / just bound).
+func markAction(marks map[int]addr.Address, slot int, current addr.Address) addr.Address {
+	if dest, ok := marks[slot]; ok && dest != "" {
+		if dest == current {
+			return ""
 		}
+		return dest
 	}
-	s.armed = false
-	switch {
-	case b == leaderByte: // leader leader -> fleet
-		return diveResult{fleet: true}
-	case b >= '0' && b <= '9':
-		slot := int(b - '0')
-		if dest, ok := marks[slot]; ok && dest != "" {
-			if dest == current {
-				return diveResult{} // already here
-			}
-			return diveResult{switchTo: dest}
-		}
-		marks[slot] = current // unbound slot -> bind the current bubble
-		return diveResult{}
-	default:
-		return diveResult{forward: []byte{leaderByte, b}} // unknown: don't lose keys
+	if marks != nil {
+		marks[slot] = current
 	}
+	return ""
 }
 
 func runApp() {
-	if v := os.Getenv("BUBBLES_LEADER"); v != "" {
-		leaderByte = parseLeader(v)
-	}
 	baseDir := defaultWorkspace() // dir where `bubbles` was launched
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-%d.sock", os.Getpid()))
 	self, _ := os.Executable()
@@ -282,7 +230,7 @@ func diveInto(lr *runner.LocalRunner, a addr.Address, marks map[int]addr.Address
 
 	// Input loop. Esc and everything else go straight to claude; the Ctrl-Q
 	// leader (and Ctrl-\) are intercepted by the state machine.
-	var ls leaderState
+	armed := false // true after a Ctrl-Left leader press
 	buf := make([]byte, 1)
 	for {
 		n, err := os.Stdin.Read(buf)
@@ -292,21 +240,32 @@ func diveInto(lr *runner.LocalRunner, a addr.Address, marks map[int]addr.Address
 		if buf[0] == 0x1b { // escape sequence (arrows etc.) or a lone Esc
 			seq := append([]byte{0x1b}, readEscapeRest()...)
 			if isCtrlLeft(seq) {
-				return "" // Ctrl-Left -> back to fleet
+				if armed {
+					return "" // Ctrl-Left Ctrl-Left -> fleet
+				}
+				armed = true // first Ctrl-Left: arm the leader
+				continue
 			}
-			ls = leaderState{} // drop any half-typed leader
-			f.Write(seq)       // forward arrows / lone Esc to claude
+			armed = false
+			f.Write(seq) // forward other arrows / lone Esc to claude
 			continue
 		}
-		res := ls.feed(buf[0], a, marks)
-		switch {
-		case res.fleet:
-			return ""
-		case res.switchTo != "":
-			return res.switchTo
-		case len(res.forward) > 0:
-			f.Write(res.forward)
+		b := buf[0]
+		if armed {
+			armed = false
+			if b >= '0' && b <= '9' {
+				if dest := markAction(marks, int(b-'0'), a); dest != "" {
+					return dest // switch into the bound bubble
+				}
+				continue // bound/no-op: stay
+			}
+			f.Write([]byte{b}) // leader + other key: just send the key
+			continue
 		}
+		if b == detachByte { // Ctrl-\
+			return ""
+		}
+		f.Write([]byte{b})
 	}
 }
 
