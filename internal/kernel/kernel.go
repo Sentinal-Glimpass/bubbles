@@ -58,10 +58,11 @@ func (k *Kernel) session(a addr.Address) runner.Session {
 	return k.sessions[a]
 }
 
-// Send files a message in the recipient's inbox (no interruption). If the
-// recipient is root it also notifies the dashboard (blink); if urgent, it is
-// additionally queued into the recipient's session for pickup on its next turn.
-func (k *Kernel) Send(from, to addr.Address, subject, body string, urgent bool) error {
+// Send files a message in the recipient's inbox. The recipient is then notified
+// without interruption: a short "you have mail" line is queued into its session
+// (picked up on its next turn), prompting it to call inbox(). Messages to root
+// blink the dashboard instead.
+func (k *Kernel) Send(from, to addr.Address, subject, body string) error {
 	if !k.Caps.CanSend(from, to) {
 		return ErrNotContact
 	}
@@ -69,14 +70,14 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, urgent bool) 
 	if b, ok := k.Reg.Get(from); ok {
 		fromName = b.Persona
 	}
-	k.Store.Append(inbox.Message{From: from, FromName: fromName, To: to, Subject: subject, Body: body, Urgent: urgent})
-	switch {
-	case to == addr.Root:
+	k.Store.Append(inbox.Message{From: from, FromName: fromName, To: to, Subject: subject, Body: body})
+	if to == addr.Root {
 		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body})
-	case urgent:
-		if s := k.session(to); s != nil {
-			_, _ = s.Write([]byte(formatInject(from, fromName, subject, body)))
-		}
+		return nil
+	}
+	if s := k.session(to); s != nil {
+		unread := k.Store.UnreadCount(to)
+		_, _ = s.Write([]byte(formatNotify(from, fromName, subject, unread)))
 	}
 	return nil
 }
@@ -90,11 +91,7 @@ func (k *Kernel) Inbox(owner addr.Address) []string {
 		if m.FromName != "" {
 			from += " (" + m.FromName + ")"
 		}
-		tag := ""
-		if m.Urgent {
-			tag = " [urgent]"
-		}
-		out = append(out, fmt.Sprintf("[%d] from %s%s — %s: %s", m.ID, from, tag, m.Subject, m.Body))
+		out = append(out, fmt.Sprintf("[%d] from %s — %s: %s", m.ID, from, m.Subject, m.Body))
 	}
 	return out
 }
@@ -156,12 +153,13 @@ func (k *Kernel) Relaunch(a addr.Address, dir, persona, sessionID string) error 
 	return nil
 }
 
-// formatInject renders an urgent message typed into a session's input (no Esc,
-// so claude queues it for the next turn rather than being interrupted).
-func formatInject(from addr.Address, name, subject, body string) string {
+// formatNotify renders the non-interrupting "you have mail" line typed into a
+// recipient's session (no Esc, so claude queues it for its next turn). It only
+// announces the message; the content is read via inbox().
+func formatNotify(from addr.Address, name, subject string, unread int) string {
 	f := from.String()
 	if name != "" {
 		f += " (" + name + ")"
 	}
-	return fmt.Sprintf("\n[message from %s] %s — %s\n", f, subject, body)
+	return fmt.Sprintf("\n📬 New message from %s: %q — you have %d unread. Call the inbox() tool to read.\n", f, subject, unread)
 }

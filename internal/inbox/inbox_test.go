@@ -5,7 +5,7 @@ import "testing"
 func TestAppendTakeAndCount(t *testing.T) {
 	s := New()
 	s.Append(Message{From: "0.1", FromName: "scout", To: "0.2", Subject: "hi"})
-	s.Append(Message{From: "0.3", FromName: "docs", To: "0.2", Subject: "yo", Urgent: true})
+	s.Append(Message{From: "0.3", FromName: "docs", To: "0.2", Subject: "yo"})
 
 	if n := s.UnreadCount("0.2"); n != 2 {
 		t.Fatalf("unread = %d want 2", n)

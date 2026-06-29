@@ -11,7 +11,7 @@ type fakeBackend struct {
 	sends [][4]string
 }
 
-func (f *fakeBackend) Send(from, to, subject, body string, urgent bool) error {
+func (f *fakeBackend) Send(from, to, subject, body string) error {
 	f.sends = append(f.sends, [4]string{from, to, subject, body})
 	return nil
 }

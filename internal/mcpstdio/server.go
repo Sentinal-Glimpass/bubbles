@@ -88,18 +88,9 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 		}
 		return ""
 	}
-	argBool := func(k string) bool {
-		switch v := p.Arguments[k].(type) {
-		case bool:
-			return v
-		case string:
-			return v == "true"
-		}
-		return false
-	}
 	switch p.Name {
 	case "send":
-		if err := s.B.Send(s.Self, arg("to"), arg("subject"), arg("body"), argBool("urgent")); err != nil {
+		if err := s.B.Send(s.Self, arg("to"), arg("subject"), arg("body")); err != nil {
 			return toolErr(msg.ID, err.Error())
 		}
 		return toolOK(msg.ID, "delivered to "+arg("to")+"'s inbox")

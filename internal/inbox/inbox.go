@@ -17,7 +17,6 @@ type Message struct {
 	To       addr.Address
 	Subject  string
 	Body     string
-	Urgent   bool
 	Read     bool
 }
 

@@ -46,8 +46,8 @@ func runMCPStdio() {
 // ipcBackend implements mcpstdio.Backend by relaying over the IPC socket.
 type ipcBackend struct{ c *ipc.Client }
 
-func (b *ipcBackend) Send(from, to, subject, body string, urgent bool) error {
-	rep, err := b.c.Do(ipc.Request{Op: "send", From: from, To: to, Subject: subject, Body: body, Urgent: urgent})
+func (b *ipcBackend) Send(from, to, subject, body string) error {
+	rep, err := b.c.Do(ipc.Request{Op: "send", From: from, To: to, Subject: subject, Body: body})
 	if err != nil {
 		return err
 	}
