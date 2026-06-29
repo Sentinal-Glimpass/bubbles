@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
@@ -130,10 +131,23 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 	for _, r := range m.Bubbles { // relaunch sessions (resume conversations)
 		_ = k.Relaunch(addr.Address(r.Addr), r.Dir, r.Persona, r.SessionID)
 	}
-	for slot, a := range m.Marks {
+	// load number-slots, deduped: at most one slot per bubble (lowest slot wins),
+	// so a stale multi-binding from an older save can't flicker.
+	var slots []int
+	for slot := range m.Marks {
 		if n, err := strconv.Atoi(slot); err == nil {
-			marks[n] = addr.Address(a)
+			slots = append(slots, n)
 		}
+	}
+	sort.Ints(slots)
+	seen := map[addr.Address]bool{}
+	for _, n := range slots {
+		a := addr.Address(m.Marks[strconv.Itoa(n)])
+		if a == "" || seen[a] {
+			continue
+		}
+		seen[a] = true
+		marks[n] = a
 	}
 	for _, gr := range m.Groups { // groups (session bubble itself restored via Bubbles)
 		var ms []addr.Address
