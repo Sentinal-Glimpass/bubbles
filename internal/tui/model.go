@@ -31,10 +31,11 @@ type Model struct {
 	Marks    map[int]addr.Address // shared number-slots: digit binds (if free) or jumps (if bound)
 	AllowAll *bool                // shared permission toggle (Ctrl+P): true => --dangerously-skip-permissions
 
-	rows    []addr.Address
-	cursor  int
-	pings   map[addr.Address]string
-	blinkOn bool
+	rows     []addr.Address
+	cursor   int
+	pings    map[addr.Address]string
+	blinkOn  bool
+	expanded map[addr.Address]bool // which nodes show their children (root open by default)
 
 	spawnStage     int // 0 = none, 1 = entering persona, 2 = picking folder
 	pendingParent  addr.Address // bubble the new one is created under
@@ -52,9 +53,11 @@ type Model struct {
 	quitting bool
 }
 
-// New builds a Model over a kernel, rows seeded from the registry.
+// New builds a Model over a kernel, rows seeded from the registry. Root starts
+// expanded (top-level bubbles visible); deeper levels collapse until expanded.
 func New(k *kernel.Kernel) Model {
-	return Model{k: k, pings: map[addr.Address]string{}, rows: buildRows(k.Reg)}
+	exp := map[addr.Address]bool{addr.Root: true}
+	return Model{k: k, pings: map[addr.Address]string{}, expanded: exp, rows: buildRows(k.Reg, exp)}
 }
 
 func (m Model) Init() tea.Cmd { return blinkTick() }
@@ -63,12 +66,16 @@ func blinkTick() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return blinkTickMsg{} })
 }
 
-// buildRows returns addresses in depth-first tree order, children sorted.
-func buildRows(reg *registry.Registry) []addr.Address {
+// buildRows returns addresses in depth-first tree order, children sorted. A
+// node's children are included only if the node is expanded.
+func buildRows(reg *registry.Registry, expanded map[addr.Address]bool) []addr.Address {
 	var out []addr.Address
 	var walk func(a addr.Address)
 	walk = func(a addr.Address) {
 		out = append(out, a)
+		if !expanded[a] {
+			return
+		}
 		ch := reg.Children(a)
 		sort.Slice(ch, func(i, j int) bool { return ch[i].Addr < ch[j].Addr })
 		for _, c := range ch {
@@ -111,6 +118,32 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		if m.cursor < len(m.rows)-1 {
 			m.cursor++
+		}
+	case "right", "l": // expand the highlighted node
+		if len(m.rows) > 0 {
+			a := m.rows[m.cursor]
+			if !m.expanded[a] && len(m.k.Reg.Children(a)) > 0 {
+				m.expanded[a] = true
+				m.rows = buildRows(m.k.Reg, m.expanded)
+			}
+		}
+	case "left", "h": // collapse the node, or hop to its parent
+		if len(m.rows) > 0 {
+			a := m.rows[m.cursor]
+			if m.expanded[a] && len(m.k.Reg.Children(a)) > 0 {
+				delete(m.expanded, a)
+				m.rows = buildRows(m.k.Reg, m.expanded)
+				if m.cursor >= len(m.rows) {
+					m.cursor = len(m.rows) - 1
+				}
+			} else if p, ok := a.Parent(); ok {
+				for i, r := range m.rows {
+					if r == p {
+						m.cursor = i
+						break
+					}
+				}
+			}
 		}
 	case "enter":
 		if len(m.rows) > 0 {
@@ -266,7 +299,8 @@ func (m Model) updateFolderPick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = os.MkdirAll(dir, 0o755)
 			// root authorizes; the new bubble is attached under the selected parent
 			_, _ = m.k.SpawnUnder(addr.Root, m.pendingParent, m.pendingPersona, dir, runner.SpawnOpts{Persona: m.pendingPersona})
-			m.rows = buildRows(m.k.Reg)
+			m.expanded[m.pendingParent] = true // reveal the new child
+			m.rows = buildRows(m.k.Reg, m.expanded)
 		}
 		return m.clearSpawn(), nil
 	}

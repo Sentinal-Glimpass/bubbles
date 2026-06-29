@@ -135,6 +135,47 @@ func TestTogglePermission(t *testing.T) {
 	}
 }
 
+func hasAddr(rows []addr.Address, a addr.Address) bool {
+	for _, r := range rows {
+		if r == a {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBuildRowsCollapse(t *testing.T) {
+	k := newKernelWith(t, "parent") // 0.1
+	k.SpawnUnder(addr.Root, addr.Address("0.1"), "child", t.TempDir(), runner.SpawnOpts{Persona: "child"})
+
+	exp := map[addr.Address]bool{addr.Root: true} // 0.1 collapsed
+	rows := buildRows(k.Reg, exp)
+	if !hasAddr(rows, "0.1") {
+		t.Fatal("0.1 should be visible (root expanded)")
+	}
+	if hasAddr(rows, "0.1.1") {
+		t.Fatal("0.1.1 should be hidden while 0.1 is collapsed")
+	}
+	exp["0.1"] = true // expand 0.1
+	if rows = buildRows(k.Reg, exp); !hasAddr(rows, "0.1.1") {
+		t.Fatal("0.1.1 should appear once 0.1 is expanded")
+	}
+}
+
+func TestDescendantCount(t *testing.T) {
+	k := newKernelWith(t, "a", "b") // 0.1, 0.2
+	k.SpawnUnder(addr.Root, addr.Address("0.1"), "c", t.TempDir(), runner.SpawnOpts{Persona: "c"}) // 0.1.1
+	if got := descendantCount(k.Reg, addr.Root); got != 3 {
+		t.Fatalf("root descendants = %d want 3", got)
+	}
+	if got := descendantCount(k.Reg, addr.Address("0.1")); got != 1 {
+		t.Fatalf("0.1 descendants = %d want 1", got)
+	}
+	if got := descendantCount(k.Reg, addr.Address("0.2")); got != 0 {
+		t.Fatalf("0.2 descendants = %d want 0", got)
+	}
+}
+
 func TestSpawnUnderSelectedBubble(t *testing.T) {
 	k := newKernelWith(t, "parent") // 0.1
 	m := New(k)

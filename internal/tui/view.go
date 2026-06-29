@@ -16,6 +16,16 @@ var (
 	pingBlink  = lipgloss.NewStyle().Reverse(true).Bold(true)
 )
 
+// descendantCount returns the total number of bubbles nested under a.
+func descendantCount(reg *registry.Registry, a addr.Address) int {
+	ch := reg.Children(a)
+	n := len(ch)
+	for _, c := range ch {
+		n += descendantCount(reg, c.Addr)
+	}
+	return n
+}
+
 func dot(s registry.Status) string {
 	switch s {
 	case registry.Working:
@@ -74,7 +84,16 @@ func (m Model) View() string {
 				mark = "✓"
 			}
 		}
-		line := fmt.Sprintf("%s%s%s%s %s %s", cursor, mark, strings.Repeat("  ", depth), status, a, persona)
+		toggle, count := " ", ""
+		if nd := descendantCount(m.k.Reg, a); nd > 0 {
+			if m.expanded[a] {
+				toggle = "▾"
+			} else {
+				toggle = "▸"
+			}
+			count = fmt.Sprintf(" (%d)", nd)
+		}
+		line := fmt.Sprintf("%s%s%s%s %s %s %s%s", cursor, mark, strings.Repeat("  ", depth), toggle, status, a, persona, count)
 		if slot, ok := slotOf[a]; ok {
 			line += fmt.Sprintf(" [%d]", slot)
 		}
@@ -111,7 +130,7 @@ func (m Model) View() string {
 	case m.introStage == 1:
 		b.WriteString("introduce — ↑/↓ + enter to add bubbles (✓); enter again on a ✓ bubble to finalize; esc cancels\n")
 	default:
-		b.WriteString(helpStyle.Render("↑/↓ move · enter dive · 0-9 bind/jump · n new · i introduce · q quit") + "\n")
+		b.WriteString(helpStyle.Render("↑/↓ move · →/← expand/collapse · enter dive · 0-9 bind/jump · n new · i introduce · q quit") + "\n")
 	}
 	return b.String()
 }
