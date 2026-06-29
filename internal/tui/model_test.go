@@ -45,6 +45,26 @@ func TestRenderAndPing(t *testing.T) {
 	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
 }
 
+func TestEnterRootStartsRoot(t *testing.T) {
+	k := newKernelWith(t)
+	m := New(k)
+	m.BaseDir = t.TempDir()
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // cursor starts on root
+
+	fm := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
+	if fm.Selected != addr.Root {
+		t.Fatalf("enter on root: Selected = %q want root", fm.Selected)
+	}
+	if _, ok := k.Reg.Get(addr.Root); !ok {
+		t.Fatal("root missing")
+	}
+	if b, _ := k.Reg.Get(addr.Root); b.SessionID == "" {
+		t.Fatal("root session not started on enter")
+	}
+}
+
 func TestDiveSelectsAndQuits(t *testing.T) {
 	k := newKernelWith(t, "scout", "docs")
 	m := New(k)

@@ -66,6 +66,24 @@ func TestFleetEndToEnd(t *testing.T) {
 	}
 }
 
+func TestStartRoot(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	if err := k.StartRoot("/tmp/x"); err != nil {
+		t.Fatalf("StartRoot: %v", err)
+	}
+	first := fr.Session(addr.Root)
+	if first == nil {
+		t.Fatal("root session not launched")
+	}
+	if err := k.StartRoot("/tmp/x"); err != nil || fr.Session(addr.Root) != first {
+		t.Fatal("StartRoot should be idempotent")
+	}
+	if b, _ := k.Reg.Get(addr.Root); b.Dir != "/tmp/x" || b.SessionID == "" {
+		t.Fatalf("root not configured: dir=%q sid=%q", b.Dir, b.SessionID)
+	}
+}
+
 func TestIntroduceRootOnly(t *testing.T) {
 	k := New(runner.NewFake())
 	if err := k.Introduce("0.1", "0.2", "0.3"); !errors.Is(err, ErrNotAllowed) {

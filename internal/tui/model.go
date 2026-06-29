@@ -156,11 +156,13 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if len(m.rows) > 0 {
 			sel := m.rows[m.cursor]
-			if !sel.IsRoot() { // can't dive into yourself
+			if sel.IsRoot() {
+				_ = m.k.StartRoot(m.BaseDir) // launch root's own session, then dive in
+			} else {
 				delete(m.pings, sel) // visiting clears the ping
-				m.Selected = sel
-				return m, tea.Quit
 			}
+			m.Selected = sel
+			return m, tea.Quit
 		}
 	case "ctrl+p":
 		if m.AllowAll != nil {

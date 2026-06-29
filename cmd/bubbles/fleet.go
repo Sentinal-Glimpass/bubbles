@@ -36,6 +36,9 @@ func saveFleet(baseDir string, k *kernel.Kernel, marks map[int]addr.Address) err
 	var recs []bubbleRec
 	for _, b := range k.Reg.All() {
 		if b.Addr.IsRoot() {
+			if b.SessionID != "" { // root was started: persist it so it resumes
+				recs = append(recs, bubbleRec{Addr: "0", Persona: "root", Dir: b.Dir, SessionID: b.SessionID})
+			}
 			continue
 		}
 		var cs []string
@@ -86,6 +89,12 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 		return marks
 	}
 	for _, r := range m.Bubbles { // registry first, so addresses exist
+		if addr.Address(r.Addr).IsRoot() { // root is pre-seeded; just restore its session info
+			if b, ok := k.Reg.Get(addr.Root); ok {
+				b.Dir, b.SessionID = r.Dir, r.SessionID
+			}
+			continue
+		}
 		k.Reg.Restore(registry.Bubble{
 			Addr: addr.Address(r.Addr), Persona: r.Persona, Dir: r.Dir,
 			Parent: addr.Address(r.Parent), Status: registry.Idle, SessionID: r.SessionID,

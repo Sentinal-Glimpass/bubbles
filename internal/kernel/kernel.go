@@ -149,6 +149,31 @@ func newSessionID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// StartRoot launches root's own claude session in dir if it isn't already
+// running, so the operator can dive into a top-level agent. Idempotent.
+func (k *Kernel) StartRoot(dir string) error {
+	if k.session(addr.Root) != nil {
+		return nil
+	}
+	b, ok := k.Reg.Get(addr.Root)
+	if !ok {
+		return nil
+	}
+	if b.Dir == "" {
+		b.Dir = dir
+	}
+	resume := b.SessionID != "" // set => restored, resume its conversation
+	if b.SessionID == "" {
+		b.SessionID = newSessionID()
+	}
+	sess, err := k.runner.Launch(addr.Root, b.Dir, runner.SpawnOpts{Persona: "root", SessionID: b.SessionID, Resume: resume})
+	if err != nil {
+		return err
+	}
+	k.setSession(addr.Root, sess)
+	return nil
+}
+
 // Relaunch starts a session for an already-registered (restored) bubble and
 // wires delivery, without assigning a new address. Used when rehydrating a saved
 // fleet; the session resumes its prior conversation.
