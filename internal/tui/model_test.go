@@ -58,29 +58,30 @@ func TestDiveSelectsAndQuits(t *testing.T) {
 	}
 }
 
-func TestIntroduceTwoBubbles(t *testing.T) {
-	k := newKernelWith(t, "alice", "bob") // 0.1, 0.2
+func TestIntroduceGroup(t *testing.T) {
+	k := newKernelWith(t, "alice", "bob", "carol") // 0.1, 0.2, 0.3
 	m := New(k)
 	m.BaseDir = t.TempDir()
 
-	// before: 0.1 and 0.2 don't know each other
-	if k.Caps.CanSend(addr.Address("0.1"), addr.Address("0.2")) {
-		t.Fatal("0.1 should not reach 0.2 before introduction")
-	}
-
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}}) // introduce mode
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // root -> 0.1
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // pick first = 0.1
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // 0.1 -> 0.2
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // pick second = 0.2
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // add 0.1 ✓
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.2
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // add 0.2 ✓
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.3
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // add 0.3 ✓
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // again on 0.3 -> finalize
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
 
-	if !k.Caps.CanSend(addr.Address("0.1"), addr.Address("0.2")) ||
-		!k.Caps.CanSend(addr.Address("0.2"), addr.Address("0.1")) {
-		t.Fatal("after introduce, 0.1 and 0.2 should be mutual contacts")
+	// every pair among {0.1, 0.2, 0.3} should now be mutual contacts
+	for _, p := range [][2]string{{"0.1", "0.2"}, {"0.2", "0.3"}, {"0.1", "0.3"}} {
+		if !k.Caps.CanSend(addr.Address(p[0]), addr.Address(p[1])) ||
+			!k.Caps.CanSend(addr.Address(p[1]), addr.Address(p[0])) {
+			t.Fatalf("after group introduce, %s and %s should be mutual contacts", p[0], p[1])
+		}
 	}
 }
 

@@ -38,8 +38,8 @@ type Model struct {
 	pendingPersona string
 	input          string
 
-	introStage int          // 0 = none, 1 = pick first, 2 = pick second
-	introFirst addr.Address // first bubble chosen for an introduction
+	introStage int                   // 0 = none, 1 = selecting members
+	introSet   map[addr.Address]bool // bubbles chosen for a group introduction
 
 	// Selected is set to the address the user dived into, then the program
 	// quits so the caller (cmd/bubbles) can hand over the terminal.
@@ -122,17 +122,19 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i":
 		if len(m.rows) > 2 { // need at least two non-root bubbles
 			m.introStage = 1
+			m.introSet = map[addr.Address]bool{}
 		}
 	}
 	return m, nil
 }
 
-// updateIntroducing handles the two-step "introduce A ↔ B" picker. The cursor
-// still moves; enter picks the highlighted bubble (root is skipped).
+// updateIntroducing handles the group picker: enter adds the highlighted bubble
+// to the set (✓); enter again on an already-selected bubble finalizes, making
+// every member a mutual contact of every other. Root is skipped.
 func (m Model) updateIntroducing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.introStage, m.introFirst = 0, ""
+		m.introStage, m.introSet = 0, nil
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -144,20 +146,29 @@ func (m Model) updateIntroducing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		sel := m.rows[m.cursor]
 		if sel.IsRoot() {
-			return m, nil // can't introduce root; it already knows everyone
+			return m, nil // root already knows everyone
 		}
-		switch m.introStage {
-		case 1:
-			m.introFirst = sel
-			m.introStage = 2
-		case 2:
-			if sel != m.introFirst {
-				_ = m.k.Introduce(addr.Root, m.introFirst, sel)
-			}
-			m.introStage, m.introFirst = 0, ""
+		if m.introSet[sel] { // second enter on a ✓ bubble -> finalize
+			m.finalizeIntroduce()
+			m.introStage, m.introSet = 0, nil
+		} else {
+			m.introSet[sel] = true
 		}
 	}
 	return m, nil
+}
+
+// finalizeIntroduce makes every selected bubble a mutual contact of every other.
+func (m Model) finalizeIntroduce() {
+	var members []addr.Address
+	for a := range m.introSet {
+		members = append(members, a)
+	}
+	for i := 0; i < len(members); i++ {
+		for j := i + 1; j < len(members); j++ {
+			_ = m.k.Introduce(addr.Root, members[i], members[j])
+		}
+	}
 }
 
 func (m Model) updateSpawning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

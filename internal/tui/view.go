@@ -45,7 +45,14 @@ func (m Model) View() string {
 		if bub, ok := m.k.Reg.Get(a); ok {
 			persona, status = bub.Persona, dot(bub.Status)
 		}
-		line := fmt.Sprintf("%s%s%s %s %s", cursor, strings.Repeat("  ", depth), status, a, persona)
+		mark := ""
+		if m.introStage > 0 {
+			mark = " "
+			if m.introSet[a] {
+				mark = "✓"
+			}
+		}
+		line := fmt.Sprintf("%s%s%s%s %s %s", cursor, mark, strings.Repeat("  ", depth), status, a, persona)
 		if subj, ok := m.pings[a]; ok {
 			label := " ✉ " + subj + " "
 			if m.blinkOn {
@@ -65,9 +72,7 @@ func (m Model) View() string {
 	case m.spawnStage == 2:
 		b.WriteString("bubble '" + m.pendingPersona + "' — folder (blank = ./" + m.pendingPersona + "): " + m.input + "▏\n")
 	case m.introStage == 1:
-		b.WriteString("introduce — move to the FIRST bubble and press enter (esc cancels)\n")
-	case m.introStage == 2:
-		b.WriteString("introduce " + m.introFirst.String() + " ↔ pick the SECOND bubble, enter\n")
+		b.WriteString("introduce — ↑/↓ + enter to add bubbles (✓); enter again on a ✓ bubble to finalize; esc cancels\n")
 	default:
 		b.WriteString(helpStyle.Render("↑/↓ move · enter dive · n new · i introduce · q quit") + "\n")
 	}

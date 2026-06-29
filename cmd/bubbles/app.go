@@ -11,7 +11,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/creack/pty"
-	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
@@ -167,54 +166,18 @@ func diveInto(lr *runner.LocalRunner, a addr.Address) {
 		}
 	}()
 
-	// Input loop. Double-tap Esc detaches to the fleet; a lone Esc is forwarded
-	// to claude (interrupt) after a short grace period. Ctrl-\ detaches instantly.
-	// unix.Poll times the lone-Esc flush without a goroutine that would steal
-	// input after we return.
-	const escByte = 0x1b
-	pendingEsc := false
-	var buf [1]byte
+	// Input loop. Everything (including Esc, which claude uses heavily) is
+	// forwarded straight to the bubble; only Ctrl-\ detaches back to the fleet.
+	buf := make([]byte, 1)
 	for {
-		timeout := -1
-		if pendingEsc {
-			timeout = 300 // ms to wait for a second Esc
-		}
-		fds := []unix.PollFd{{Fd: int32(os.Stdin.Fd()), Events: unix.POLLIN}}
-		n, err := unix.Poll(fds, timeout)
-		if err == unix.EINTR { // e.g. interrupted by SIGWINCH
-			continue
-		}
-		if err != nil {
+		n, err := os.Stdin.Read(buf)
+		if err != nil || n == 0 {
 			break
 		}
-		if n == 0 { // timeout: a lone Esc — forward it to claude
-			if pendingEsc {
-				f.Write([]byte{escByte})
-				pendingEsc = false
-			}
-			continue
-		}
-		rn, rerr := os.Stdin.Read(buf[:])
-		if rerr != nil || rn == 0 {
+		if buf[0] == detachByte { // Ctrl-\
 			break
 		}
-		b := buf[0]
-		if b == detachByte { // Ctrl-\
-			break
-		}
-		if pendingEsc {
-			pendingEsc = false
-			if b == escByte { // Esc Esc -> detach
-				break
-			}
-			f.Write([]byte{escByte, b}) // lone Esc followed by another key
-			continue
-		}
-		if b == escByte {
-			pendingEsc = true
-			continue
-		}
-		f.Write([]byte{b})
+		f.Write(buf[:n])
 	}
 	detached.Store(true)
 	// The inner claude session may have enabled mouse reporting / bracketed
