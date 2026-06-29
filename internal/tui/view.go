@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 )
 
@@ -35,6 +36,11 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("BUBBLES — fleet") + "\n\n")
 
+	slotOf := map[addr.Address]int{}
+	for slot, a := range m.Marks {
+		slotOf[a] = slot
+	}
+
 	for i, a := range m.rows {
 		depth := strings.Count(string(a), ".")
 		cursor := "  "
@@ -53,6 +59,9 @@ func (m Model) View() string {
 			}
 		}
 		line := fmt.Sprintf("%s%s%s%s %s %s", cursor, mark, strings.Repeat("  ", depth), status, a, persona)
+		if slot, ok := slotOf[a]; ok {
+			line += fmt.Sprintf(" [%d]", slot)
+		}
 		if subj, ok := m.pings[a]; ok {
 			label := " ✉ " + subj + " "
 			if m.blinkOn {
@@ -74,7 +83,7 @@ func (m Model) View() string {
 	case m.introStage == 1:
 		b.WriteString("introduce — ↑/↓ + enter to add bubbles (✓); enter again on a ✓ bubble to finalize; esc cancels\n")
 	default:
-		b.WriteString(helpStyle.Render("↑/↓ move · enter dive · n new · i introduce · q quit") + "\n")
+		b.WriteString(helpStyle.Render("↑/↓ move · enter dive · 0-9 bind/jump · n new · i introduce · q quit") + "\n")
 	}
 	return b.String()
 }

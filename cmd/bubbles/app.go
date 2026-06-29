@@ -21,7 +21,60 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/tui"
 )
 
-const detachByte = 0x1c // Ctrl-\ detaches from a dived-in bubble
+const (
+	leaderByte = 0x11 // Ctrl-Q: leader/prefix key inside a bubble
+	detachByte = 0x1c // Ctrl-\: instant detach fallback
+)
+
+// diveResult is the decision the leader state machine makes for one input byte.
+type diveResult struct {
+	forward  []byte       // bytes to write to claude
+	switchTo addr.Address // non-empty => switch into this bubble
+	fleet    bool         // true => return to the fleet view
+}
+
+// leaderState implements the Ctrl-Q leader:
+//
+//	Ctrl-Q q       -> fleet
+//	Ctrl-Q <digit> -> if that slot is bound, switch to it; else bind the current bubble to it
+//	Ctrl-Q Ctrl-Q  -> send a literal Ctrl-Q to claude
+//	Ctrl-\         -> instant fleet (no leader)
+//
+// everything else is forwarded to claude untouched (Esc included).
+type leaderState struct{ armed bool }
+
+func (s *leaderState) feed(b byte, current addr.Address, marks map[int]addr.Address) diveResult {
+	if !s.armed {
+		switch b {
+		case leaderByte:
+			s.armed = true
+			return diveResult{}
+		case detachByte:
+			return diveResult{fleet: true}
+		default:
+			return diveResult{forward: []byte{b}}
+		}
+	}
+	s.armed = false
+	switch {
+	case b == 'q':
+		return diveResult{fleet: true}
+	case b == leaderByte:
+		return diveResult{forward: []byte{leaderByte}} // literal Ctrl-Q
+	case b >= '0' && b <= '9':
+		slot := int(b - '0')
+		if dest, ok := marks[slot]; ok && dest != "" {
+			if dest == current {
+				return diveResult{} // already here
+			}
+			return diveResult{switchTo: dest}
+		}
+		marks[slot] = current // unbound slot -> bind the current bubble
+		return diveResult{}
+	default:
+		return diveResult{forward: []byte{leaderByte, b}} // unknown: don't lose keys
+	}
+}
 
 func runApp() {
 	baseDir := defaultWorkspace() // dir where `bubbles` was launched
@@ -44,8 +97,10 @@ func runApp() {
 
 	// Quit/relaunch loop: the TUI quits when you dive in; we hand over the
 	// terminal, then relaunch the fleet view.
+	marks := map[int]addr.Address{} // shared number-slots, used in fleet and in-dive
 	m := tui.New(k)
 	m.BaseDir = baseDir
+	m.Marks = marks
 	for {
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		k.Bus.Subscribe(addr.Root, func(msg bus.Message) {
@@ -59,9 +114,13 @@ func runApp() {
 		if sel == "" {
 			return // user quit
 		}
-		diveInto(lr, sel)
+		// Dive loop: keep switching bubble-to-bubble until we return to fleet.
+		for sel != "" {
+			sel = diveInto(lr, sel, marks)
+		}
 		m = tui.New(k) // refresh rows, clear selection
 		m.BaseDir = baseDir
+		m.Marks = marks
 	}
 }
 
@@ -123,12 +182,13 @@ func mcpConfigJSON(exe, sock string, a addr.Address, spawnable bool) string {
 	return string(b)
 }
 
-// diveInto hands the terminal to a bubble's PTY until the detach byte (Ctrl-\).
-func diveInto(lr *runner.LocalRunner, a addr.Address) {
+// diveInto hands the terminal to a bubble's PTY. It returns "" to go back to the
+// fleet, or the address of another bubble to switch directly into (Ctrl-Q num).
+func diveInto(lr *runner.LocalRunner, a addr.Address, marks map[int]addr.Address) addr.Address {
 	sess := lr.Session(a)
 	ps, ok := sess.(runner.PTYSession)
 	if !ok || ps == nil {
-		return
+		return ""
 	}
 	f := ps.PTY()
 
@@ -148,8 +208,11 @@ func diveInto(lr *runner.LocalRunner, a addr.Address) {
 		defer term.Restore(int(os.Stdin.Fd()), old)
 	}
 	fmt.Print("\x1b[2J\x1b[H") // clear, so claude's full-screen redraw is clean
+	// On the way out, disable any mouse reporting / bracketed paste claude turned on.
+	defer fmt.Print("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\r\n")
 
 	var detached atomic.Bool
+	defer detached.Store(true)
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -166,23 +229,25 @@ func diveInto(lr *runner.LocalRunner, a addr.Address) {
 		}
 	}()
 
-	// Input loop. Everything (including Esc, which claude uses heavily) is
-	// forwarded straight to the bubble; only Ctrl-\ detaches back to the fleet.
+	// Input loop. Esc and everything else go straight to claude; the Ctrl-Q
+	// leader (and Ctrl-\) are intercepted by the state machine.
+	var ls leaderState
 	buf := make([]byte, 1)
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil || n == 0 {
-			break
+			return ""
 		}
-		if buf[0] == detachByte { // Ctrl-\
-			break
+		res := ls.feed(buf[0], a, marks)
+		switch {
+		case res.fleet:
+			return ""
+		case res.switchTo != "":
+			return res.switchTo
+		case len(res.forward) > 0:
+			f.Write(res.forward)
 		}
-		f.Write(buf[:n])
 	}
-	detached.Store(true)
-	// The inner claude session may have enabled mouse reporting / bracketed
-	// paste; disable them so the fleet view (and the user's terminal) are clean.
-	fmt.Print("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\r\n")
 }
 
 // defaultWorkspace is the directory where `bubbles` was launched; bubble folders

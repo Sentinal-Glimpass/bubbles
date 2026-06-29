@@ -85,6 +85,28 @@ func TestIntroduceGroup(t *testing.T) {
 	}
 }
 
+func TestMarkBindAndJump(t *testing.T) {
+	k := newKernelWith(t, "alice", "bob") // 0.1, 0.2
+	m := New(k)
+	m.BaseDir = t.TempDir()
+	marks := map[int]addr.Address{}
+	m.Marks = marks
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // root -> 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}}) // slot 1 free -> bind 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // 0.1 -> 0.2
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}}) // slot 1 bound -> jump to 0.1 (quits)
+
+	fm := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
+	if fm.Selected != addr.Address("0.1") {
+		t.Fatalf("digit jump Selected = %q want 0.1", fm.Selected)
+	}
+	if marks[1] != addr.Address("0.1") {
+		t.Fatalf("slot 1 = %q want 0.1 (binding should persist in shared map)", marks[1])
+	}
+}
+
 func TestSpawnKeyAddsBubble(t *testing.T) {
 	k := newKernelWith(t) // start with just root
 	m := New(k)

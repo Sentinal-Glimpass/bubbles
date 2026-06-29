@@ -27,7 +27,8 @@ type blinkTickMsg struct{}
 // Model is the fleet tree.
 type Model struct {
 	k       *kernel.Kernel
-	BaseDir string // dir where `bubbles` was launched; bubble folders are downstream of it
+	BaseDir string               // dir where `bubbles` was launched; bubble folders are downstream of it
+	Marks   map[int]addr.Address // shared number-slots: digit binds (if free) or jumps (if bound)
 
 	rows    []addr.Address
 	cursor  int
@@ -124,6 +125,29 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.introStage = 1
 			m.introSet = map[addr.Address]bool{}
 		}
+	default:
+		// digit: jump to the bound bubble, or bind the highlighted one if free
+		if len(msg.Runes) == 1 && msg.Runes[0] >= '0' && msg.Runes[0] <= '9' {
+			return m.handleMark(int(msg.Runes[0] - '0'))
+		}
+	}
+	return m, nil
+}
+
+func (m Model) handleMark(slot int) (tea.Model, tea.Cmd) {
+	if dest, ok := m.Marks[slot]; ok && dest != "" {
+		if !dest.IsRoot() {
+			m.Selected = dest // jump: dive into the bound bubble
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	cur := m.rows[m.cursor]
+	if !cur.IsRoot() {
+		if m.Marks == nil {
+			m.Marks = map[int]addr.Address{}
+		}
+		m.Marks[slot] = cur // bind the highlighted bubble
 	}
 	return m, nil
 }
