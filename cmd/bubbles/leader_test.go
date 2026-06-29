@@ -6,19 +6,6 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 )
 
-func TestIsCtrlLeft(t *testing.T) {
-	for _, s := range []string{"\x1b[1;5D", "\x1b[5D", "\x1bO5D"} {
-		if !isCtrlLeft([]byte(s)) {
-			t.Errorf("isCtrlLeft(%q) = false want true", s)
-		}
-	}
-	for _, s := range []string{"\x1b[D", "\x1b[1;5C", "\x1b", "\x1b[A", "x"} {
-		if isCtrlLeft([]byte(s)) {
-			t.Errorf("isCtrlLeft(%q) = true want false", s)
-		}
-	}
-}
-
 func TestMarkAction(t *testing.T) {
 	cur := addr.Address("0.1")
 	marks := map[int]addr.Address{}

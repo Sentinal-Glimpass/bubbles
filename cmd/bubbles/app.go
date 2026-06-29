@@ -12,7 +12,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/creack/pty"
-	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
@@ -23,15 +22,13 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/tui"
 )
 
-// Ctrl-Left is the in-bubble leader (a terminal escape sequence). It's used as a
-// prefix:
+// leaderByte (Ctrl-\) is the in-bubble leader prefix:
 //
-//	Ctrl-Left Ctrl-Left -> fleet
-//	Ctrl-Left <digit>   -> jump to that slot if bound, else bind the current bubble
+//	Ctrl-\ Ctrl-\   -> fleet
+//	Ctrl-\ <digit>  -> jump to that slot if bound, else bind the current bubble
 //
-// Ctrl-\ is a single-key instant fleet fallback. Everything else (incl. Ctrl-A
-// and Esc) goes straight to claude.
-const detachByte = 0x1c // Ctrl-\
+// Everything else (incl. Esc, arrows) goes straight to claude.
+const leaderByte = 0x1c // Ctrl-\
 
 // markAction handles a digit pressed after the Ctrl-Left leader: jump to a bound
 // slot, or bind the current bubble to a free one. Returns the address to switch
@@ -233,79 +230,34 @@ func diveInto(lr *runner.LocalRunner, a addr.Address, marks map[int]addr.Address
 
 	// Input loop. Esc and everything else go straight to claude; the Ctrl-Q
 	// leader (and Ctrl-\) are intercepted by the state machine.
-	armed := false // true after a Ctrl-Left leader press
+	armed := false // true after a leader (Ctrl-\) press
 	buf := make([]byte, 1)
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil || n == 0 {
 			return ""
 		}
-		if buf[0] == 0x1b { // escape sequence (arrows etc.) or a lone Esc
-			seq := append([]byte{0x1b}, readEscapeRest()...)
-			if isCtrlLeft(seq) {
-				if armed {
-					return "" // Ctrl-Left Ctrl-Left -> fleet
-				}
-				armed = true // first Ctrl-Left: arm the leader
-				continue
-			}
-			armed = false
-			f.Write(seq) // forward other arrows / lone Esc to claude
-			continue
-		}
 		b := buf[0]
 		if armed {
 			armed = false
-			if b >= '0' && b <= '9' {
+			switch {
+			case b == leaderByte: // Ctrl-\ Ctrl-\ -> fleet
+				return ""
+			case b >= '0' && b <= '9':
 				if dest := markAction(marks, int(b-'0'), a); dest != "" {
 					return dest // switch into the bound bubble
 				}
-				continue // bound/no-op: stay
+			default:
+				f.Write([]byte{b}) // leader + other key: just send the key
 			}
-			f.Write([]byte{b}) // leader + other key: just send the key
 			continue
 		}
-		if b == detachByte { // Ctrl-\
-			return ""
+		if b == leaderByte {
+			armed = true
+			continue
 		}
 		f.Write([]byte{b})
 	}
-}
-
-// readEscapeRest grabs the rest of an escape sequence after an initial Esc, using
-// a short poll so a lone Esc (interrupt) isn't held up. Returns the bytes that
-// followed Esc (empty for a lone Esc).
-func readEscapeRest() []byte {
-	var out []byte
-	timeout := 25 // ms to wait for a sequence to materialize after Esc
-	for {
-		fds := []unix.PollFd{{Fd: int32(os.Stdin.Fd()), Events: unix.POLLIN}}
-		n, err := unix.Poll(fds, timeout)
-		if err == unix.EINTR {
-			continue
-		}
-		if err != nil || n == 0 {
-			return out
-		}
-		var b [32]byte
-		rn, rerr := os.Stdin.Read(b[:])
-		if rn > 0 {
-			out = append(out, b[:rn]...)
-		}
-		if rerr != nil {
-			return out
-		}
-		timeout = 5 // collect the rest of the burst, then stop
-	}
-}
-
-// isCtrlLeft reports whether seq is a Ctrl-Left arrow (terminal-dependent forms).
-func isCtrlLeft(seq []byte) bool {
-	switch string(seq) {
-	case "\x1b[1;5D", "\x1b[5D", "\x1bO5D":
-		return true
-	}
-	return false
 }
 
 // defaultWorkspace is the directory where `bubbles` was launched; bubble folders
