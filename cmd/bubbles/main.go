@@ -12,6 +12,14 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/mcpstdio"
 )
 
+// hostedMode is true when the app runs as the daemon's child: then `q` detaches
+// the client (fleet keeps running) instead of quitting the process.
+var hostedMode bool
+
+// detachSentinel is emitted by the hosted app on `q`; the client sees it and
+// detaches. It's an OSC string terminals ignore, so it never shows on screen.
+const detachSentinel = "\x1b]6660;bubbles-detach\x07"
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -24,8 +32,12 @@ func main() {
 		case "stop":
 			runStop()
 			return
-		case "--hosted", "--local":
-			runApp() // the actual app: --hosted = child of the daemon, --local = no daemon
+		case "--hosted":
+			hostedMode = true
+			runApp() // child of the daemon: q detaches
+			return
+		case "--local":
+			runApp() // no daemon: q quits
 			return
 		}
 	}

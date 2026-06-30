@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +15,7 @@ import (
 	"golang.org/x/term"
 )
 
-const clientDetachByte = 0x1d // Ctrl-] detaches the client; the fleet keeps running
+const clientStopByte = 0x1d // Ctrl-] stops the whole fleet
 
 // runClient attaches the terminal to the workspace daemon (starting it detached
 // if it isn't running) and relays bytes both ways. Pressing Ctrl-] detaches and
@@ -50,11 +51,22 @@ func runClient() {
 	}
 
 	done := make(chan string, 2)
-	go func() { // app output -> our terminal; ends when the fleet stops
-		_, _ = io.Copy(os.Stdout, conn)
-		done <- "stopped"
+	go func() { // app output -> our terminal; detach when the app emits the sentinel
+		sc := &sentinelScanner{w: os.Stdout, sentinel: []byte(detachSentinel)}
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := conn.Read(buf)
+			if n > 0 && sc.write(buf[:n]) {
+				done <- "detached"
+				return
+			}
+			if rerr != nil {
+				done <- "stopped"
+				return
+			}
+		}
 	}()
-	go func() { // our keys -> app; Ctrl-] detaches
+	go func() { // our keys -> app; Ctrl-] stops the fleet
 		buf := make([]byte, 1)
 		for {
 			n, rerr := os.Stdin.Read(buf)
@@ -62,8 +74,8 @@ func runClient() {
 				done <- "stopped"
 				return
 			}
-			if buf[0] == clientDetachByte {
-				done <- "detached"
+			if buf[0] == clientStopByte {
+				done <- "stop"
 				return
 			}
 			if _, werr := conn.Write(buf[:n]); werr != nil {
@@ -76,11 +88,41 @@ func runClient() {
 	reason := <-done
 	restore()
 	conn.Close()
-	if reason == "detached" {
+	switch reason {
+	case "detached":
 		fmt.Print("\r\n[detached — fleet still running; run `bubbles` to reattach]\r\n")
-	} else {
+	case "stop":
+		runStop() // tear down the daemon + fleet
+		fmt.Print("\r\n[fleet stopped]\r\n")
+	default:
 		fmt.Print("\r\n[fleet stopped]\r\n")
 	}
+}
+
+// sentinelScanner writes a byte stream to w but strips (and detects) a sentinel
+// that may straddle write boundaries.
+type sentinelScanner struct {
+	w        io.Writer
+	sentinel []byte
+	carry    []byte
+}
+
+func (s *sentinelScanner) write(p []byte) bool {
+	data := make([]byte, 0, len(s.carry)+len(p))
+	data = append(data, s.carry...)
+	data = append(data, p...)
+	if i := bytes.Index(data, s.sentinel); i >= 0 {
+		_, _ = s.w.Write(data[:i])
+		s.carry = nil
+		return true
+	}
+	keep := len(s.sentinel) - 1 // a partial sentinel might continue next time
+	if keep > len(data) {
+		keep = len(data)
+	}
+	_, _ = s.w.Write(data[:len(data)-keep])
+	s.carry = append([]byte(nil), data[len(data)-keep:]...)
+	return false
 }
 
 func waitDial(sock string, timeout time.Duration) (net.Conn, error) {

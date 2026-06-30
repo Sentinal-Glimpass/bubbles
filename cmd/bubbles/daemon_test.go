@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"os"
@@ -60,6 +61,38 @@ func TestDaemonRelay(t *testing.T) {
 	}
 	if !readContains(conn2, "persona", 6*time.Second) {
 		t.Fatal("keystroke relay failed — app did not react to 'n'")
+	}
+
+	// q in the fleet view must DETACH (emit the sentinel), not kill the fleet.
+	// Pace the keys so the input parser doesn't fuse Esc+q into Alt+q.
+	_, _ = conn2.Write([]byte{0x1b}) // esc: leave the spawn prompt
+	time.Sleep(400 * time.Millisecond)
+	_, _ = conn2.Write([]byte("q"))
+	if !readContains(conn2, detachSentinel, 6*time.Second) {
+		t.Fatal("q should emit the detach sentinel (fleet keeps running)")
+	}
+	conn2.Close()
+
+	// fleet survives q: a fresh client still reattaches
+	conn3 := dialWithin(t, sock, 3*time.Second)
+	defer conn3.Close()
+	sendHello(conn3)
+	if !readContains(conn3, "BUBBLES", 6*time.Second) {
+		t.Fatal("fleet should survive q (detach) — reattach failed")
+	}
+}
+
+func TestSentinelScanner(t *testing.T) {
+	var out bytes.Buffer
+	s := &sentinelScanner{w: &out, sentinel: []byte("XYZ")}
+	if s.write([]byte("helloX")) {
+		t.Fatal("no full sentinel yet")
+	}
+	if !s.write([]byte("YZworld")) { // sentinel straddles the boundary
+		t.Fatal("should detect sentinel across writes")
+	}
+	if out.String() != "hello" {
+		t.Fatalf("output = %q want %q", out.String(), "hello")
 	}
 }
 

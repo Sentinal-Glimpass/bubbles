@@ -90,8 +90,16 @@ func runApp() {
 		}
 		_ = saveFleet(baseDir, k, marks) // persist fleet-view changes (spawn/introduce/marks)
 		sel := final.(tui.Model).Selected
-		if sel == "" {
-			return // user quit
+		if sel == "" { // q / ctrl-c
+			if hostedMode {
+				fmt.Print(detachSentinel) // tell the client to detach; the fleet keeps running
+				m = tui.New(k)            // restart the view for the next attach
+				m.BaseDir = baseDir
+				m.Marks = marks
+				m.AllowAll = &allowAll
+				continue
+			}
+			return // --local: actually quit
 		}
 		// Dive loop: keep switching bubble-to-bubble until we return to fleet.
 		for sel != "" {

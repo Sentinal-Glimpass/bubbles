@@ -72,9 +72,9 @@ Each bubble runs `claude` in its own folder (so it inherits that folder's
 `bubbles` runs your fleet in a **background daemon per directory**, so it stays
 alive even when you close the IDE:
 
-- **`Ctrl+]`** — **detach**: closes the IDE but leaves the whole fleet running
-  (agents keep working). Run `bubbles` again from the same directory to reattach.
-- **`q`** — quit the fleet entirely (stops every bubble).
+- **`q`** — **detach**: closes the IDE but leaves the whole fleet running (agents
+  keep working). Run `bubbles` again from the same directory to reattach.
+- **`Ctrl+]`** — stop the fleet entirely (every bubble).
 - **`bubbles stop`** — stop a detached fleet without reattaching.
 - **`bubbles --local`** — run once in the foreground with no daemon (closing it
   stops the fleet); handy for a quick session.
