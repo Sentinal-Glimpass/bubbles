@@ -1,183 +1,145 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
-	"github.com/Sentinal-Glimpass/bubbles/internal/control"
-	"github.com/Sentinal-Glimpass/bubbles/internal/ipc"
-	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
-	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
+	"github.com/creack/pty"
 )
 
-// controlSock is the daemon's control socket for a workspace (one daemon per dir).
+func pidFile(baseDir string) string { return filepath.Join(baseDir, ".bubbles", "daemon.pid") }
+
+// controlSock is the daemon's relay socket for a workspace (one daemon per dir).
 func controlSock(baseDir string) string {
 	return filepath.Join(baseDir, ".bubbles", "control.sock")
 }
 
-// daemon is the long-lived process that owns the kernel and every claude PTY, so
-// the fleet survives the TUI closing.
-type daemon struct {
-	k       *kernel.Kernel
-	baseDir string
-	stop    chan struct{}
-
-	mu    sync.Mutex
-	marks map[int]addr.Address
+// hello is the client's attach handshake (its terminal size).
+type hello struct {
+	Rows uint16 `json:"rows"`
+	Cols uint16 `json:"cols"`
 }
 
-// runDaemon sets up the kernel, MCP socket, and control server, restores the
-// fleet, then runs until told to stop (control "stop" op or SIGTERM/SIGINT).
+// runDaemon hosts the real bubbles app (`--hosted`) as a child on a PTY and
+// relays that PTY to whichever client is attached. The app — kernel, claude
+// children, everything — keeps running even with no client attached, so the
+// fleet survives the IDE closing.
 func runDaemon() {
 	baseDir := defaultWorkspace()
 	_ = os.MkdirAll(filepath.Join(baseDir, ".bubbles"), 0o755)
-	mcpSock := filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-daemon-%d.sock", os.Getpid()))
 	self, _ := os.Executable()
 
-	lr := runner.NewLocal()
-	lr.CitizenPrompt = citizenPrompt
-	allowAll := true
-	lr.AllowAll = &allowAll
-	k := kernel.New(lr)
-	lr.MCPConfig = func(a addr.Address) string { return mcpConfigJSON(self, mcpSock, a, k.Caps.CanSpawn(a)) }
-
-	ipcLn, err := ipc.Serve(mcpSock, func(r ipc.Request) ipc.Reply { return handleIPC(k, r) })
+	cmd := exec.Command(self, "--hosted")
+	cmd.Dir = baseDir
+	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		fatal(err)
 	}
-	defer ipcLn.Close()
-	defer os.Remove(mcpSock)
+	defer ptmx.Close()
+	_ = pty.Setsize(ptmx, &pty.Winsize{Rows: 40, Cols: 120}) // default until a client attaches
 
-	marks := restoreFleet(baseDir, k)
-	d := &daemon{k: k, baseDir: baseDir, marks: marks, stop: make(chan struct{})}
-
-	ctl := controlSock(baseDir)
-	_ = os.Remove(ctl) // clear any stale socket
-	ctlLn, err := control.Serve(ctl, d.handle)
+	sock := controlSock(baseDir)
+	_ = os.Remove(sock) // clear a stale socket
+	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		fatal(err)
 	}
-	defer ctlLn.Close()
-	defer os.Remove(ctl)
+	defer ln.Close()
+	defer os.Remove(sock)
 
-	go func() { // periodic durability save
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
+	_ = os.WriteFile(pidFile(baseDir), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	defer os.Remove(pidFile(baseDir))
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() { <-sigCh; _ = cmd.Process.Kill(); ln.Close() }() // `bubbles stop` / signal -> tear down
+
+	var mu sync.Mutex
+	var client net.Conn
+
+	// PTY output -> the attached client (discarded when none, so the app never blocks).
+	go func() {
+		buf := make([]byte, 4096)
 		for {
-			select {
-			case <-t.C:
-				d.save()
-			case <-d.stop:
+			n, rerr := ptmx.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				c := client
+				mu.Unlock()
+				if c != nil {
+					_, _ = c.Write(buf[:n])
+				}
+			}
+			if rerr != nil {
 				return
 			}
 		}
 	}()
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-	select {
-	case <-d.stop:
-	case <-sig:
-	}
-	d.save()
-}
+	go func() { _ = cmd.Wait(); ln.Close() }() // app quit -> stop accepting -> daemon exits
 
-func (d *daemon) save() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	_ = saveFleet(d.baseDir, d.k, d.marks)
-}
-
-func (d *daemon) snapshot() *control.Snapshot {
-	var bubbles []control.BubbleInfo
-	for _, b := range d.k.Reg.All() {
-		bubbles = append(bubbles, control.BubbleInfo{
-			Addr: b.Addr.String(), Persona: b.Persona, Parent: b.Parent.String(),
-			Status: string(b.Status), Unread: d.k.Store.UnreadCount(b.Addr),
-		})
-	}
-	var grs []control.GroupInfo
-	for _, g := range d.k.Groups.All() {
-		ms := make([]string, 0, len(g.Members))
-		for _, m := range g.Members {
-			ms = append(ms, m.String())
+	for {
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
 		}
-		grs = append(grs, control.GroupInfo{Name: g.Name, Members: ms, Session: g.Session.String()})
-	}
-	mk := map[string]string{}
-	for slot, a := range d.marks {
-		mk[strconv.Itoa(slot)] = a.String()
-	}
-	return &control.Snapshot{Bubbles: bubbles, Groups: grs, Marks: mk}
-}
+		dec := json.NewDecoder(conn)
+		var h hello
+		_ = dec.Decode(&h)
 
-func (d *daemon) handle(r control.Request) control.Reply {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	switch r.Op {
-	case "snapshot":
-		return control.Reply{OK: true, Snapshot: d.snapshot()}
-	case "spawn":
-		a, err := d.k.SpawnUnder(addr.Root, addr.Address(r.Parent), r.Persona, r.Dir, runner.SpawnOpts{Persona: r.Persona})
-		if err != nil {
-			return control.Reply{OK: false, Err: err.Error()}
+		mu.Lock()
+		if client != nil {
+			client.Close() // a newer client takes over
 		}
-		return control.Reply{OK: true, Addr: a.String(), Snapshot: d.snapshot()}
-	case "startRoot":
-		_ = d.k.StartRoot(r.Dir)
-		return control.Reply{OK: true, Snapshot: d.snapshot()}
-	case "introduce":
-		ms := toAddrs(r.Members)
-		for i := 0; i < len(ms); i++ {
-			for j := i + 1; j < len(ms); j++ {
-				_ = d.k.Introduce(addr.Root, ms[i], ms[j])
+		client = conn
+		mu.Unlock()
+
+		if h.Rows > 1 && h.Cols > 1 { // apply size + nudge a repaint
+			ws := &pty.Winsize{Rows: h.Rows, Cols: h.Cols}
+			small := *ws
+			small.Rows--
+			_ = pty.Setsize(ptmx, &small)
+			time.Sleep(50 * time.Millisecond)
+			_ = pty.Setsize(ptmx, ws)
+		}
+
+		go func(c net.Conn, buffered io.Reader) { // client input -> PTY
+			_, _ = io.Copy(ptmx, io.MultiReader(buffered, c))
+			mu.Lock()
+			if client == c {
+				client = nil
 			}
-		}
-		return control.Reply{OK: true, Snapshot: d.snapshot()}
-	case "createGroup":
-		d.k.CreateGroup(r.Name, toAddrs(r.Members), r.IntroduceAll)
-		return control.Reply{OK: true, Snapshot: d.snapshot()}
-	case "attachGroupSession":
-		_, _ = d.k.AttachGroupSession(r.Name, r.Dir, runner.SpawnOpts{Persona: "#" + r.Name})
-		return control.Reply{OK: true, Snapshot: d.snapshot()}
-	case "deleteGroup":
-		d.k.DeleteGroup(r.Name)
-		return control.Reply{OK: true, Snapshot: d.snapshot()}
-	case "setMark":
-		if d.marks == nil {
-			d.marks = map[int]addr.Address{}
-		}
-		bindSlotAddr(d.marks, r.Slot, addr.Address(r.A))
-		return control.Reply{OK: true, Snapshot: d.snapshot()}
-	case "stop":
-		close(d.stop)
-		return control.Reply{OK: true}
-	default:
-		return control.Reply{OK: false, Err: "unknown op: " + r.Op}
+			mu.Unlock()
+		}(conn, dec.Buffered())
 	}
 }
 
-func toAddrs(ss []string) []addr.Address {
-	out := make([]addr.Address, 0, len(ss))
-	for _, s := range ss {
-		out = append(out, addr.Address(s))
+// runStop stops the workspace's persistent fleet (kills the daemon and, via the
+// closed PTY, its app + claude children).
+func runStop() {
+	baseDir := defaultWorkspace()
+	data, err := os.ReadFile(pidFile(baseDir))
+	if err != nil {
+		fmt.Println("no fleet running in this directory")
+		return
 	}
-	return out
-}
-
-// bindSlotAddr binds a to a slot, ensuring one slot per bubble (mirrors the TUI).
-func bindSlotAddr(marks map[int]addr.Address, slot int, a addr.Address) {
-	for s, x := range marks {
-		if x == a && s != slot {
-			delete(marks, s)
-		}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+	if pid <= 0 {
+		fmt.Println("no fleet running in this directory")
+		return
 	}
-	marks[slot] = a
+	_ = syscall.Kill(-pid, syscall.SIGTERM) // the daemon's whole session group
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	fmt.Println("fleet stopped")
 }

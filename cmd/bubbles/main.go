@@ -21,9 +21,15 @@ func main() {
 		case "daemon":
 			runDaemon()
 			return
+		case "stop":
+			runStop()
+			return
+		case "--hosted", "--local":
+			runApp() // the actual app: --hosted = child of the daemon, --local = no daemon
+			return
 		}
 	}
-	runApp()
+	runClient() // default: attach to (or start) the persistent workspace daemon
 }
 
 // runMCPStdio is the MCP server claude spawns for one bubble. It relays tool

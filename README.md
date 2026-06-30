@@ -63,11 +63,24 @@ bubbles
 - Press **`n`** to spawn a bubble: type a persona (e.g. `api`), pick a folder, done.
 - Press **`Enter`** on a bubble to **dive in** — it's a live `claude` session.
 - Press **`Ctrl+\` `Ctrl+\`** to pop back to the fleet.
-- Press **`q`** to quit.
 
 Each bubble runs `claude` in its own folder (so it inherits that folder's
-`CLAUDE.md` and `.claude/` setup), and the fleet is saved per-directory — quit and
-reopen from the same place and your bubbles resume.
+`CLAUDE.md` and `.claude/` setup).
+
+### The fleet keeps running
+
+`bubbles` runs your fleet in a **background daemon per directory**, so it stays
+alive even when you close the IDE:
+
+- **`Ctrl+]`** — **detach**: closes the IDE but leaves the whole fleet running
+  (agents keep working). Run `bubbles` again from the same directory to reattach.
+- **`q`** — quit the fleet entirely (stops every bubble).
+- **`bubbles stop`** — stop a detached fleet without reattaching.
+- **`bubbles --local`** — run once in the foreground with no daemon (closing it
+  stops the fleet); handy for a quick session.
+
+The fleet is also saved to disk and resumes (`claude --resume`) if the daemon is
+ever stopped and you reopen.
 
 ## Keys
 
