@@ -46,6 +46,59 @@ func (s *Store) Delete(name string) {
 	s.list = out
 }
 
+// AddMember adds a to the named group (no-op if absent or already a member).
+func (s *Store) AddMember(name string, a addr.Address) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, g := range s.list {
+		if g.Name != name {
+			continue
+		}
+		for _, m := range g.Members {
+			if m == a {
+				return
+			}
+		}
+		g.Members = append(g.Members, a)
+		return
+	}
+}
+
+// RemoveMember drops a from the named group (no-op if absent).
+func (s *Store) RemoveMember(name string, a addr.Address) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, g := range s.list {
+		if g.Name == name {
+			g.Members = without(g.Members, a)
+			return
+		}
+	}
+}
+
+// PurgeMember removes a from every group's membership (and clears it as a
+// session), used when a bubble is deleted.
+func (s *Store) PurgeMember(a addr.Address) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, g := range s.list {
+		g.Members = without(g.Members, a)
+		if g.Session == a {
+			g.Session = ""
+		}
+	}
+}
+
+func without(ms []addr.Address, a addr.Address) []addr.Address {
+	out := ms[:0]
+	for _, m := range ms {
+		if m != a {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 func (s *Store) Get(name string) (Group, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

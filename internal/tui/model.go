@@ -59,6 +59,10 @@ type Model struct {
 	groupSession bool // option: attach a coordinator session
 	groupDel     bool // delete-a-group picker is open
 	groupDelCur  int
+	groupDelName string // group chosen for deletion, pending the "members too?" question
+	groupDelAsk  bool   // the "also delete member bubbles?" confirmation is showing
+
+	delBubble addr.Address // bubble pending a delete confirmation ("" = none)
 
 	// Selected is set to the address the user dived into, then the program
 	// quits so the caller (cmd/bubbles) can hand over the terminal.
@@ -188,6 +192,9 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.groupDel {
 		return m.updateGroupDelete(msg)
 	}
+	if m.delBubble != "" {
+		return m.updateBubbleDelete(msg)
+	}
 	// digits: jump to a bound slot / bind a free one, or (re)assign when armed with `m`
 	if len(msg.Runes) == 1 && msg.Runes[0] >= '0' && msg.Runes[0] <= '9' {
 		return m.handleDigit(int(msg.Runes[0] - '0'))
@@ -281,7 +288,34 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		if len(m.k.Groups.All()) > 0 {
 			m.groupDel, m.groupDelCur = true, 0
+			m.groupDelName, m.groupDelAsk = "", false
 		}
+	case "d": // delete the highlighted bubble (and its subtree) after a confirm
+		if a := m.curAddr(); a != "" && !a.IsRoot() {
+			m.delBubble = a
+		}
+	}
+	return m, nil
+}
+
+// updateBubbleDelete handles the confirm prompt for deleting a bubble subtree.
+func (m Model) updateBubbleDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "enter":
+		for _, r := range m.k.DeleteBubble(m.delBubble) {
+			for s, a := range m.Marks { // clear number-slots pointing at removed bubbles
+				if a == r {
+					delete(m.Marks, s)
+				}
+			}
+		}
+		m.delBubble = ""
+		m.rows = m.fleetRows()
+		if m.cursor >= len(m.rows) {
+			m.cursor = len(m.rows) - 1
+		}
+	case "n", "esc":
+		m.delBubble = ""
 	}
 	return m, nil
 }
@@ -359,6 +393,25 @@ func (m Model) updateGrouping(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateGroupDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	gs := m.k.Groups.All()
+	if m.groupDelAsk { // "also delete the member bubbles?" step
+		switch msg.String() {
+		case "y":
+			m.k.DeleteGroup(m.groupDelName, true)
+		case "n":
+			m.k.DeleteGroup(m.groupDelName, false)
+		case "esc":
+			m.groupDelAsk, m.groupDel = false, false
+			return m, nil
+		default:
+			return m, nil
+		}
+		m.groupDelAsk, m.groupDel = false, false
+		m.rows = m.fleetRows()
+		if m.cursor >= len(m.rows) {
+			m.cursor = len(m.rows) - 1
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "esc":
 		m.groupDel = false
@@ -372,10 +425,17 @@ func (m Model) updateGroupDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter", "d", "x":
 		if m.groupDelCur < len(gs) {
-			m.k.DeleteGroup(gs[m.groupDelCur].Name)
-			m.rows = m.fleetRows() // a session bubble may have been removed
+			g := gs[m.groupDelCur]
+			if len(g.Members) > 0 { // ask whether to delete the members too
+				m.groupDelName, m.groupDelAsk = g.Name, true
+			} else {
+				m.k.DeleteGroup(g.Name, false)
+				m.groupDel = false
+				m.rows = m.fleetRows()
+			}
+		} else {
+			m.groupDel = false
 		}
-		m.groupDel = false
 	}
 	return m, nil
 }

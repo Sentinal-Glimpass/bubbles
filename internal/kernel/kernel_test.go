@@ -137,8 +137,8 @@ func TestGroups(t *testing.T) {
 		t.Fatal("group session bubble should be in the registry")
 	}
 
-	// delete removes the group + session, but contacts remain
-	k.DeleteGroup("team")
+	// delete removes the group + session, but contacts and members remain
+	k.DeleteGroup("team", false)
 	if _, ok := k.Groups.Get("team"); ok {
 		t.Fatal("group should be gone")
 	}
@@ -147,6 +147,9 @@ func TestGroups(t *testing.T) {
 	}
 	if !k.Caps.CanSend(sess, a) {
 		t.Fatal("deleting a group must NOT remove contacts")
+	}
+	if _, ok := k.Reg.Get(a); !ok {
+		t.Fatal("deleting a group without deleteMembers must keep the member bubbles")
 	}
 }
 
@@ -310,5 +313,59 @@ func TestSpawnPassesModel(t *testing.T) {
 	last := fr.Launches[len(fr.Launches)-1]
 	if last.Opts.Model != "opus" {
 		t.Fatalf("model = %q want opus", last.Opts.Model)
+	}
+}
+
+// TestDeleteBubbleSubtree: deleting a bubble removes it and its descendants, and
+// purges group membership; root is never deletable.
+func TestDeleteBubbleSubtree(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	parent, _ := k.Spawn(addr.Root, "parent", "/tmp/p", runner.SpawnOpts{Persona: "parent"})       // 0.1
+	child, _ := k.SpawnUnder(addr.Root, parent, "child", "/tmp/c", runner.SpawnOpts{Persona: "c"}) // 0.1.1
+	other, _ := k.Spawn(addr.Root, "other", "/tmp/o", runner.SpawnOpts{Persona: "other"})          // 0.2
+	k.CreateGroup("team", []addr.Address{parent, other}, false)
+
+	removed := k.DeleteBubble(parent)
+	if len(removed) != 2 {
+		t.Fatalf("removed = %v want [child parent]", removed)
+	}
+	if _, ok := k.Reg.Get(parent); ok {
+		t.Fatal("parent should be removed")
+	}
+	if _, ok := k.Reg.Get(child); ok {
+		t.Fatal("child (subtree) should be removed")
+	}
+	if !fr.Session(parent).Closed() || !fr.Session(child).Closed() {
+		t.Fatal("deleted bubbles' sessions should be killed")
+	}
+	g, _ := k.Groups.Get("team")
+	if len(g.Members) != 1 || g.Members[0] != other {
+		t.Fatalf("group membership should be purged of deleted bubble: %+v", g.Members)
+	}
+	if r := k.DeleteBubble(addr.Root); r != nil {
+		t.Fatal("root must not be deletable")
+	}
+	if _, ok := k.Reg.Get(other); !ok {
+		t.Fatal("unrelated bubble should survive")
+	}
+}
+
+// TestDeleteGroupWithMembers: deleteMembers=true removes the member bubbles too.
+func TestDeleteGroupWithMembers(t *testing.T) {
+	k := New(runner.NewFake())
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Persona: "a"})
+	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Persona: "b"})
+	k.CreateGroup("team", []addr.Address{a, b}, false)
+
+	k.DeleteGroup("team", true)
+	if _, ok := k.Groups.Get("team"); ok {
+		t.Fatal("group should be gone")
+	}
+	if _, ok := k.Reg.Get(a); ok {
+		t.Fatal("member a should be deleted with the group")
+	}
+	if _, ok := k.Reg.Get(b); ok {
+		t.Fatal("member b should be deleted with the group")
 	}
 }

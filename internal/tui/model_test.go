@@ -452,3 +452,46 @@ func TestSpawnOptionsModelAndGrant(t *testing.T) {
 		t.Fatal("grant-spawn ON should let 0.1 spawn")
 	}
 }
+
+func TestDeleteBubbleFlow(t *testing.T) {
+	k := newKernelWith(t, "a", "b") // 0.1, 0.2
+	m := New(k)
+	m.BaseDir = t.TempDir()
+
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // root -> 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}}) // delete 0.1 -> confirm
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}) // yes
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return !bytes.Contains(b, []byte("0.1 a")) // 0.1 gone from the tree
+	}, teatest.WithDuration(3*time.Second))
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	if _, ok := k.Reg.Get(addr.Address("0.1")); ok {
+		t.Fatal("0.1 should have been deleted")
+	}
+}
+
+func TestDeleteGroupKeepMembers(t *testing.T) {
+	k := newKernelWith(t, "a", "b") // 0.1, 0.2
+	k.CreateGroup("team", []addr.Address{"0.1", "0.2"}, false)
+	m := New(k)
+	m.BaseDir = t.TempDir()
+
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}) // delete-group picker
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // choose team -> "members too?"
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}) // no, keep members
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	if _, ok := k.Groups.Get("team"); ok {
+		t.Fatal("group should be deleted")
+	}
+	if _, ok := k.Reg.Get(addr.Address("0.1")); !ok {
+		t.Fatal("members should be kept when answering 'no'")
+	}
+}

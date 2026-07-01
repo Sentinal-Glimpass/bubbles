@@ -269,10 +269,45 @@ func (k *Kernel) AttachGroupSession(name, dir string, opts runner.SpawnOpts) (ad
 	return a, nil
 }
 
-// DeleteGroup removes a group. If it had a session, that coordinator bubble is
-// killed and removed. Everyone's contacts are left intact.
-func (k *Kernel) DeleteGroup(name string) {
-	if g, ok := k.Groups.Get(name); ok && g.Session != "" {
+// DeleteBubble removes a bubble and its entire subtree: each session is killed
+// and dropped from the registry, the sessions map, and any group membership.
+// Root cannot be deleted. Returns the addresses removed (so callers can clear
+// number-slots pointing at them).
+func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
+	if a.IsRoot() {
+		return nil
+	}
+	var victims []addr.Address
+	var collect func(x addr.Address)
+	collect = func(x addr.Address) {
+		for _, c := range k.Reg.Children(x) {
+			collect(c.Addr)
+		}
+		victims = append(victims, x)
+	}
+	collect(a)
+	for _, v := range victims {
+		_ = k.runner.Kill(v)
+		k.Reg.Remove(v)
+		k.smu.Lock()
+		delete(k.sessions, v)
+		k.smu.Unlock()
+		k.Groups.PurgeMember(v)
+	}
+	return victims
+}
+
+// DeleteGroup removes a group. If deleteMembers, each member bubble (and its
+// subtree) is deleted too; otherwise only the grouping is removed and members
+// live on. A coordinator session is always killed. Contacts are left intact.
+func (k *Kernel) DeleteGroup(name string, deleteMembers bool) {
+	g, ok := k.Groups.Get(name)
+	if ok && deleteMembers {
+		for _, m := range g.Members {
+			k.DeleteBubble(m)
+		}
+	}
+	if ok && g.Session != "" {
 		_ = k.runner.Kill(g.Session)
 		k.Reg.Remove(g.Session)
 		k.smu.Lock()

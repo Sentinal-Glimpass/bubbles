@@ -222,6 +222,21 @@ func (m Model) View() string {
 	case m.groupStage == 3:
 		b.WriteString(fmt.Sprintf("group '%s' — [i] introduce all: %s   [s] attach session: %s   [enter] create   [esc] cancel\n",
 			m.groupName, onOff(m.groupIntro), onOff(m.groupSession)))
+	case m.delBubble != "":
+		n := descendantCount(m.k.Reg, m.delBubble)
+		label := m.delBubble.String()
+		if bub, ok := m.k.Reg.Get(m.delBubble); ok && bub.Persona != "" {
+			label += " (" + bub.Persona + ")"
+		}
+		sub := ""
+		if n > 0 {
+			sub = fmt.Sprintf(" and its %d descendant(s)", n)
+		}
+		b.WriteString("delete " + label + sub + "? [y]es  [n]o\n")
+	case m.groupDel && m.groupDelAsk:
+		g, _ := m.k.Groups.Get(m.groupDelName)
+		b.WriteString(fmt.Sprintf("delete group '%s' — also delete its %d member bubble(s)? [y]es  [n]o (keep them)  [esc] cancel\n",
+			m.groupDelName, len(g.Members)))
 	case m.groupDel:
 		b.WriteString("delete group — ↑/↓ select, enter to delete, esc cancel:\n")
 		for i, g := range m.k.Groups.All() {
@@ -232,7 +247,7 @@ func (m Model) View() string {
 			b.WriteString("  " + cur + g.Name + fmt.Sprintf(" (%d members)\n", len(g.Members)))
 		}
 	default:
-		b.WriteString(helpStyle.Render("↑/↓ move (cyclable) · →/← expand/collapse · enter dive · 0-9 jump · m+0-9 set slot · n new · i introduce · g group · G del-group · ctrl+p perms · q quit") + "\n")
+		b.WriteString(helpStyle.Render("↑/↓ move (cyclable) · →/← expand/collapse · enter dive · 0-9 jump · m+0-9 slot · n new · d delete · i introduce · g group · G del-group · ctrl+p perms · q quit") + "\n")
 	}
 	return b.String()
 }
