@@ -184,3 +184,88 @@ func TestIntroduceRootOnly(t *testing.T) {
 		t.Fatalf("got %v want ErrNotAllowed", err)
 	}
 }
+
+// TestSendHealsResumableBubble: a message to a crashed bubble relaunches it via
+// --resume (same session id), then injects the notice into the new session.
+func TestSendHealsResumableBubble(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	a, err := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	b, _ := k.Reg.Get(a)
+	origID := b.SessionID
+	orig := fr.Session(a)
+	orig.Die() // the process crashes
+
+	if _, err := k.Send(addr.Root, a, "ping", "body", 0); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	ns := fr.Session(a)
+	if ns == orig {
+		t.Fatal("dead recipient should have been relaunched")
+	}
+	if !ns.Alive() {
+		t.Fatal("relaunched session should be alive")
+	}
+	if !strings.Contains(ns.Written(), "📬 New message") {
+		t.Fatalf("notice not injected into healed session: %q", ns.Written())
+	}
+	last := fr.Launches[len(fr.Launches)-1]
+	if !last.Opts.Resume || last.Opts.SessionID != origID {
+		t.Fatalf("expected a --resume of %q, got %+v", origID, last.Opts)
+	}
+	if b2, _ := k.Reg.Get(a); b2.SessionID != origID {
+		t.Fatalf("session id should be unchanged on a successful resume, got %q", b2.SessionID)
+	}
+}
+
+// TestSendHealsWithFreshFallback: when the resume fails (session id gone), Send
+// falls back to a fresh session with a NEW id.
+func TestSendHealsWithFreshFallback(t *testing.T) {
+	fr := runner.NewFake()
+	fr.FailResume = true // any --resume yields a dead session
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	b, _ := k.Reg.Get(a)
+	origID := b.SessionID
+	fr.Session(a).Die()
+
+	if _, err := k.Send(addr.Root, a, "ping", "body", 0); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	ns := fr.Session(a)
+	if !ns.Alive() {
+		t.Fatal("fresh fallback session should be alive")
+	}
+	if !strings.Contains(ns.Written(), "📬 New message") {
+		t.Fatalf("notice not injected into fresh session: %q", ns.Written())
+	}
+	b2, _ := k.Reg.Get(a)
+	if b2.SessionID == origID {
+		t.Fatalf("fresh fallback should assign a new session id, still %q", origID)
+	}
+	last := fr.Launches[len(fr.Launches)-1]
+	if last.Opts.Resume || last.Opts.SessionID != b2.SessionID {
+		t.Fatalf("expected a fresh (non-resume) launch with the new id, got %+v", last.Opts)
+	}
+}
+
+// TestSendLiveBubbleNoRelaunch: a live recipient is never relaunched.
+func TestSendLiveBubbleNoRelaunch(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	n0 := len(fr.Launches)
+	if _, err := k.Send(addr.Root, a, "ping", "body", 0); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(fr.Launches) != n0 {
+		t.Fatalf("a live bubble should not be relaunched (launches %d -> %d)", n0, len(fr.Launches))
+	}
+}

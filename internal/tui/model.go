@@ -72,21 +72,21 @@ type fleetRow struct {
 	depth  int          // indent
 }
 
-// New builds a Model over a kernel. Root starts expanded (top-level bubbles
-// visible); deeper levels and groups collapse until expanded.
+// New builds a Model over a kernel. Root starts collapsed (minimized) and sits
+// at the bottom, below the groups; expand it with → to reveal the fleet.
 func New(k *kernel.Kernel) Model {
 	m := Model{
 		k:             k,
 		pings:         map[addr.Address]string{},
-		expanded:      map[addr.Address]bool{addr.Root: true},
+		expanded:      map[addr.Address]bool{}, // root collapsed by default
 		groupExpanded: map[string]bool{},
 	}
 	m.rows = m.fleetRows()
 	return m
 }
 
-// fleetRows builds the full row list: the location tree, then each group as an
-// expandable node (outside the main root) revealing its members + session.
+// fleetRows builds the full row list: each group as an expandable node at the
+// top, then the location tree (root) at the bottom, minimized by default.
 func (m Model) fleetRows() []fleetRow {
 	sessions := map[addr.Address]bool{} // group coordinator sessions live under their group, not the tree
 	for _, g := range m.k.Groups.All() {
@@ -95,19 +95,19 @@ func (m Model) fleetRows() []fleetRow {
 		}
 	}
 	var out []fleetRow
-	for _, a := range buildRows(m.k.Reg, m.expanded) {
-		if sessions[a] {
-			continue
-		}
-		out = append(out, fleetRow{addr: a, depth: strings.Count(string(a), ".")})
-	}
-	for _, g := range m.k.Groups.All() {
+	for _, g := range m.k.Groups.All() { // groups on top, outside the main root
 		out = append(out, fleetRow{group: g.Name, header: true})
 		if m.groupExpanded[g.Name] {
 			for _, mem := range g.Members { // the coordinator session is reached via Enter on the group node
 				out = append(out, fleetRow{addr: mem, group: g.Name, depth: 1})
 			}
 		}
+	}
+	for _, a := range buildRows(m.k.Reg, m.expanded) { // root subtree at the bottom
+		if sessions[a] {
+			continue
+		}
+		out = append(out, fleetRow{addr: a, depth: strings.Count(string(a), ".")})
 	}
 	return out
 }
@@ -196,13 +196,13 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		m.quitting = true
 		return m, tea.Quit
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
+	case "up", "k": // cyclable: wraps to the bottom at the top
+		if n := len(m.rows); n > 0 {
+			m.cursor = (m.cursor - 1 + n) % n
 		}
-	case "down", "j":
-		if m.cursor < len(m.rows)-1 {
-			m.cursor++
+	case "down", "j": // cyclable: wraps to the top at the bottom
+		if n := len(m.rows); n > 0 {
+			m.cursor = (m.cursor + 1) % n
 		}
 	case "right", "l": // expand the highlighted node (tree bubble or group)
 		r := m.curRow()

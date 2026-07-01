@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/bus"
@@ -31,6 +32,11 @@ type Kernel struct {
 	Store  *inbox.Store
 	Groups *groups.Store
 
+	// RelaunchProbe is how long EnsureAlive waits to see if a *resumed* session
+	// survives before falling back to a fresh one (a doomed --resume exits fast).
+	// Tests set it to 0; real use gives claude a moment to fail.
+	RelaunchProbe time.Duration
+
 	runner   runner.Runner
 	smu      sync.Mutex
 	sessions map[addr.Address]runner.Session
@@ -39,13 +45,14 @@ type Kernel struct {
 // New builds a Kernel over the given runner, with root seeded.
 func New(r runner.Runner) *Kernel {
 	return &Kernel{
-		Bus:      bus.New(),
-		Caps:     caps.New(),
-		Reg:      registry.New(),
-		Store:    inbox.New(),
-		Groups:   groups.New(),
-		runner:   r,
-		sessions: map[addr.Address]runner.Session{},
+		Bus:           bus.New(),
+		Caps:          caps.New(),
+		Reg:           registry.New(),
+		Store:         inbox.New(),
+		Groups:        groups.New(),
+		RelaunchProbe: 800 * time.Millisecond,
+		runner:        r,
+		sessions:      map[addr.Address]runner.Session{},
 	}
 }
 
@@ -78,11 +85,54 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int) 
 	if to == addr.Root {
 		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard
 	}
-	if s := k.session(to); s != nil { // inject the notice into the recipient's session (incl. root, if running)
+	if s := k.EnsureAlive(to); s != nil { // heal a dead recipient, then inject the notice (incl. root, if running)
 		unread := k.Store.UnreadCount(to)
 		_, _ = s.Write([]byte(formatNotify(from, fromName, subject, unread)))
 	}
 	return id, nil
+}
+
+// EnsureAlive returns a live session for a, relaunching it if its process has
+// died. It first tries to resume the bubble's prior conversation; if that
+// session id no longer exists (the resumed process exits at once), it starts a
+// fresh session seeded with the persona. Root is never auto-launched here (it is
+// managed via StartRoot / dive-in). Returns nil if a has no launchable session.
+func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
+	cur := k.session(a)
+	if a.IsRoot() {
+		return cur
+	}
+	if cur != nil && cur.Alive() {
+		return cur
+	}
+	b, ok := k.Reg.Get(a)
+	if !ok {
+		return cur // unregistered address: nothing to relaunch
+	}
+	if cur != nil {
+		_ = cur.Close()
+	}
+	// Try to resume the existing conversation.
+	if b.SessionID != "" {
+		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, SessionID: b.SessionID, Resume: true}); err == nil {
+			if k.RelaunchProbe > 0 {
+				time.Sleep(k.RelaunchProbe) // give a doomed resume time to exit
+			}
+			if sess.Alive() {
+				k.setSession(a, sess)
+				return sess
+			}
+			_ = sess.Close() // resume failed (session id gone) -> fall through to fresh
+		}
+	}
+	// Fresh session with a new id, seeded with the persona.
+	b.SessionID = newSessionID()
+	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, SessionID: b.SessionID, Resume: false})
+	if err != nil {
+		return nil
+	}
+	k.setSession(a, sess)
+	return sess
 }
 
 // Status reports the delivery state of messages from sent: delivered / read /

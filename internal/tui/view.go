@@ -210,7 +210,7 @@ func (m Model) View() string {
 			b.WriteString("  " + cur + g.Name + fmt.Sprintf(" (%d members)\n", len(g.Members)))
 		}
 	default:
-		b.WriteString(helpStyle.Render("↑/↓ move · →/← expand/collapse · enter dive · 0-9 jump · n new · i introduce · g group · G del-group · q quit") + "\n")
+		b.WriteString(helpStyle.Render("↑/↓ move (cyclable) · →/← expand/collapse · enter dive · 0-9 jump · m+0-9 set slot · n new · i introduce · g group · G del-group · ctrl+p perms · q quit") + "\n")
 	}
 	return b.String()
 }

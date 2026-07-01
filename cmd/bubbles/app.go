@@ -103,7 +103,7 @@ func runApp() {
 		}
 		// Dive loop: keep switching bubble-to-bubble until we return to fleet.
 		for sel != "" {
-			sel = diveInto(lr, sel, marks)
+			sel = diveInto(k, sel, marks)
 		}
 		_ = saveFleet(baseDir, k, marks) // persist anything spawned during the dive
 		m = tui.New(k)                   // refresh rows, clear selection
@@ -182,8 +182,10 @@ func mcpConfigJSON(exe, sock string, a addr.Address, spawnable bool) string {
 
 // diveInto hands the terminal to a bubble's PTY. It returns "" to go back to the
 // fleet, or the address of another bubble to switch directly into (Ctrl-Q num).
-func diveInto(lr *runner.LocalRunner, a addr.Address, marks map[int]addr.Address) addr.Address {
-	sess := lr.Session(a)
+// EnsureAlive heals a dead session first, so diving into a crashed bubble (or
+// one whose resume id vanished) transparently relaunches it.
+func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) addr.Address {
+	sess := k.EnsureAlive(a)
 	ps, ok := sess.(runner.PTYSession)
 	if !ok || ps == nil {
 		return ""

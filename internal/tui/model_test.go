@@ -25,12 +25,20 @@ func newKernelWith(t *testing.T, personas ...string) *kernel.Kernel {
 	return k
 }
 
+// expandRoot opens the (now collapsed-by-default) root so tests can navigate to
+// its children.
+func expandRoot(m Model) Model {
+	m.expanded[addr.Root] = true
+	m.rows = m.fleetRows()
+	return m
+}
+
 func TestRenderAndPing(t *testing.T) {
 	k := newKernelWith(t, "scout", "docs")
 	m := New(k)
 	m.BaseDir = t.TempDir()
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return bytes.Contains(b, []byte("scout")) && bytes.Contains(b, []byte("docs"))
@@ -50,7 +58,7 @@ func TestEnterRootStartsRoot(t *testing.T) {
 	m := New(k)
 	m.BaseDir = t.TempDir()
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // cursor starts on root
 
 	fm := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
@@ -70,7 +78,7 @@ func TestDiveSelectsAndQuits(t *testing.T) {
 	m := New(k)
 	m.BaseDir = t.TempDir()
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // root -> 0.1
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // dive
 
@@ -85,7 +93,7 @@ func TestIntroduceGroup(t *testing.T) {
 	m := New(k)
 	m.BaseDir = t.TempDir()
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}}) // introduce mode
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.1
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // add 0.1 ✓
@@ -116,7 +124,7 @@ func TestFolderPickerSelectsSubdir(t *testing.T) {
 	m := New(k)
 	m.BaseDir = base
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	tm.Type("worker")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // persona -> folder list [".", "api/", "+ new"]
@@ -145,7 +153,7 @@ func TestTogglePermission(t *testing.T) {
 	m.BaseDir = t.TempDir()
 	m.AllowAll = &allow
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlP})
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
@@ -201,7 +209,7 @@ func TestCreateGroup(t *testing.T) {
 	m := New(k)
 	m.BaseDir = t.TempDir()
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}) // group mode
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.1
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // add 0.1 ✓
@@ -282,7 +290,7 @@ func TestReassignMark(t *testing.T) {
 	m.BaseDir = t.TempDir()
 	m.Marks = marks
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.1
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}}) // slot 1 free -> bind 0.1
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.2
@@ -302,7 +310,7 @@ func TestSpawnUnderSelectedBubble(t *testing.T) {
 	m := New(k)
 	m.BaseDir = t.TempDir()
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // root -> 0.1
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}) // spawn under 0.1
 	tm.Type("child")
@@ -331,7 +339,7 @@ func TestMarkBindAndJump(t *testing.T) {
 	marks := map[int]addr.Address{}
 	m.Marks = marks
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // root -> 0.1
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}}) // slot 1 free -> bind 0.1
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // 0.1 -> 0.2
@@ -351,7 +359,7 @@ func TestSpawnKeyAddsBubble(t *testing.T) {
 	m := New(k)
 	m.BaseDir = t.TempDir()
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	tm.Type("tester")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // persona -> folder stage
@@ -366,5 +374,53 @@ func TestSpawnKeyAddsBubble(t *testing.T) {
 
 	if _, ok := k.Reg.Get(addr.Address("0.1")); !ok {
 		t.Fatal("spawned bubble 0.1 not in registry")
+	}
+}
+
+func TestCursorCyclable(t *testing.T) {
+	k := newKernelWith(t, "a", "b") // 0.1, 0.2
+	m := expandRoot(New(k))         // rows: [root, 0.1, 0.2]
+	if len(m.rows) < 3 {
+		t.Fatalf("need >=3 rows, got %d", len(m.rows))
+	}
+	// up at the top wraps to the bottom
+	m.cursor = 0
+	up, _ := m.updateNormal(tea.KeyMsg{Type: tea.KeyUp})
+	if got := up.(Model).cursor; got != len(m.rows)-1 {
+		t.Fatalf("up at top: cursor = %d want %d", got, len(m.rows)-1)
+	}
+	// down at the bottom wraps to the top
+	m.cursor = len(m.rows) - 1
+	down, _ := m.updateNormal(tea.KeyMsg{Type: tea.KeyDown})
+	if got := down.(Model).cursor; got != 0 {
+		t.Fatalf("down at bottom: cursor = %d want 0", got)
+	}
+}
+
+func TestRootCollapsedAtBottom(t *testing.T) {
+	k := newKernelWith(t, "a", "b") // 0.1, 0.2
+	k.CreateGroup("team", []addr.Address{"0.1"}, false)
+	m := New(k) // default: root collapsed, group present
+
+	if len(m.rows) == 0 {
+		t.Fatal("no rows")
+	}
+	// root is the bottom row
+	last := m.rows[len(m.rows)-1]
+	if last.header || last.addr != addr.Root {
+		t.Fatalf("bottom row should be root, got %+v", last)
+	}
+	// the group header sits above root
+	if !m.rows[0].header || m.rows[0].group != "team" {
+		t.Fatalf("top row should be the group header, got %+v", m.rows[0])
+	}
+	// root is minimized: its children are hidden by default
+	for _, r := range m.rows {
+		if r.addr == addr.Address("0.1") && r.group == "" {
+			t.Fatal("root children should be hidden while root is collapsed")
+		}
+		if r.addr == addr.Address("0.2") {
+			t.Fatal("root children should be hidden while root is collapsed")
+		}
 	}
 }

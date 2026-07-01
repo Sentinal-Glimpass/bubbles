@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -157,6 +158,15 @@ func (s *ptySession) Close() error {
 		_ = s.cmd.Process.Kill()
 	}
 	return nil
+}
+
+// Alive probes the process on-demand (signal 0 — no watcher goroutine): true
+// while claude is running, false once it has exited/crashed.
+func (s *ptySession) Alive() bool {
+	if s.cmd == nil || s.cmd.Process == nil {
+		return false
+	}
+	return s.cmd.Process.Signal(syscall.Signal(0)) == nil
 }
 
 // PTY returns the master file for dive-in terminal handoff.

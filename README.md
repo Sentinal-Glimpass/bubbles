@@ -161,6 +161,10 @@ hierarchy, inbox messaging with read/reply status, persistence, and permission
 toggle. On the roadmap: remote bubbles over SSH (run the fleet on a beefy VM),
 channels/broadcast, in-dive message banners, and escalation policies.
 
+- **bubbles-net** — connect your fleet to a friend's fleet over the internet and
+  introduce bubbles across machines (E2E-encrypted, rendezvous server, no accounts).
+  See [docs/WHATS-COMING.md](docs/WHATS-COMING.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

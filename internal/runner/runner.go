@@ -16,6 +16,7 @@ type SpawnOpts struct {
 type Session interface {
 	Write(p []byte) (int, error)
 	Close() error
+	Alive() bool // false once the underlying process has exited (for lazy self-heal)
 }
 
 // Runner launches and kills sessions by address.
