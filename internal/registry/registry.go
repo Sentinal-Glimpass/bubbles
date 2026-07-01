@@ -79,6 +79,24 @@ func (r *Registry) SetStatus(a addr.Address, s Status) {
 	}
 }
 
+// SetPersona renames a bubble (display + future launches).
+func (r *Registry) SetPersona(a addr.Address, persona string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.Persona = persona
+	}
+}
+
+// SetModel changes a bubble's model alias (applied on its next relaunch).
+func (r *Registry) SetModel(a addr.Address, model string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.Model = model
+	}
+}
+
 // All returns every bubble, including root (unordered).
 func (r *Registry) All() []*Bubble {
 	r.mu.Lock()

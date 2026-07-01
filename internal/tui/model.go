@@ -64,6 +64,16 @@ type Model struct {
 
 	delBubble addr.Address // bubble pending a delete confirmation ("" = none)
 
+	editing     bool         // bubble settings editor open
+	editAddr    addr.Address // bubble being edited
+	editField   int          // 0 persona, 1 model, 2 grant
+	editPersona string
+	editModel   string
+	editGrant   bool
+
+	groupEdit     bool   // group-membership editor open
+	groupEditName string // group being edited
+
 	// Selected is set to the address the user dived into, then the program
 	// quits so the caller (cmd/bubbles) can hand over the terminal.
 	Selected addr.Address
@@ -195,6 +205,12 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.delBubble != "" {
 		return m.updateBubbleDelete(msg)
 	}
+	if m.editing {
+		return m.updateEditBubble(msg)
+	}
+	if m.groupEdit {
+		return m.updateGroupEdit(msg)
+	}
 	// digits: jump to a bound slot / bind a free one, or (re)assign when armed with `m`
 	if len(msg.Runes) == 1 && msg.Runes[0] >= '0' && msg.Runes[0] <= '9' {
 		return m.handleDigit(int(msg.Runes[0] - '0'))
@@ -294,6 +310,114 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a := m.curAddr(); a != "" && !a.IsRoot() {
 			m.delBubble = a
 		}
+	case "e": // edit: a group's membership (on a header) or a bubble's settings
+		r := m.curRow()
+		if r.header {
+			m.groupEdit, m.groupEditName = true, r.group
+		} else if a := r.addr; a != "" && !a.IsRoot() {
+			if b, ok := m.k.Reg.Get(a); ok {
+				m.editing, m.editAddr, m.editField = true, a, 0
+				m.editPersona, m.editModel, m.editGrant = b.Persona, b.Model, m.k.Caps.CanSpawn(a)
+				if m.editModel == "" {
+					m.editModel = runner.DefaultModel
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+// updateEditBubble is the bubble settings editor: ↑/↓ move between fields
+// (persona / model / spawn grant), edit the focused field, enter saves.
+func (m Model) updateEditBubble(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.editing = false
+		return m, nil
+	case "enter":
+		if p := strings.TrimSpace(m.editPersona); p != "" {
+			m.k.Reg.SetPersona(m.editAddr, p)
+		}
+		m.k.Reg.SetModel(m.editAddr, m.editModel)
+		if m.editGrant {
+			m.k.Caps.GrantSpawnDepth(m.editAddr, 1)
+		} else {
+			m.k.Caps.GrantSpawnDepth(m.editAddr, 0)
+		}
+		m.editing = false
+		m.rows = m.fleetRows()
+		return m, nil
+	case "up":
+		m.editField = (m.editField + 2) % 3
+		return m, nil
+	case "down":
+		m.editField = (m.editField + 1) % 3
+		return m, nil
+	}
+	switch m.editField {
+	case 0: // persona
+		if msg.String() == "backspace" {
+			if len(m.editPersona) > 0 {
+				m.editPersona = m.editPersona[:len(m.editPersona)-1]
+			}
+		} else if len(msg.Runes) > 0 {
+			m.editPersona += string(msg.Runes)
+		}
+	case 1: // model
+		switch msg.String() {
+		case "left":
+			m.editModel = cycleModel(m.editModel, -1)
+		case "right":
+			m.editModel = cycleModel(m.editModel, +1)
+		}
+	case 2: // spawn grant
+		switch msg.String() {
+		case "left", "right", " ", "s":
+			m.editGrant = !m.editGrant
+		}
+	}
+	return m, nil
+}
+
+// inEditGroup reports whether a is a member of the group being edited.
+func (m Model) inEditGroup(a addr.Address) bool {
+	g, ok := m.k.Groups.Get(m.groupEditName)
+	if !ok {
+		return false
+	}
+	for _, mem := range g.Members {
+		if mem == a {
+			return true
+		}
+	}
+	return false
+}
+
+// updateGroupEdit toggles bubbles in/out of a group: navigate the fleet and
+// press enter on a bubble to add or remove it.
+func (m Model) updateGroupEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.groupEdit, m.groupEditName = false, ""
+	case "up", "k":
+		if n := len(m.rows); n > 0 {
+			m.cursor = (m.cursor - 1 + n) % n
+		}
+	case "down", "j":
+		if n := len(m.rows); n > 0 {
+			m.cursor = (m.cursor + 1) % n
+		}
+	case "enter":
+		a := m.curAddr()
+		if a == "" || a.IsRoot() {
+			return m, nil
+		}
+		if m.inEditGroup(a) {
+			m.k.Groups.RemoveMember(m.groupEditName, a)
+		} else {
+			m.k.Groups.AddMember(m.groupEditName, a)
+		}
+		m.rows = m.fleetRows() // member counts update
 	}
 	return m, nil
 }

@@ -495,3 +495,71 @@ func TestDeleteGroupKeepMembers(t *testing.T) {
 		t.Fatal("members should be kept when answering 'no'")
 	}
 }
+
+func TestEditBubbleSettings(t *testing.T) {
+	k := newKernelWith(t, "worker") // 0.1, model "" (default), no grant
+	m := New(k)
+	m.BaseDir = t.TempDir()
+
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})                      // -> 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}}) // edit
+	// field 0 (persona): clear "worker" and type "boss"
+	for range "worker" {
+		tm.Send(tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	tm.Type("boss")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> model field
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // sonnet -> opus
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> grant field
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // grant ON
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	b, _ := k.Reg.Get(addr.Address("0.1"))
+	if b.Persona != "boss" {
+		t.Fatalf("persona = %q want boss", b.Persona)
+	}
+	if b.Model != "opus" {
+		t.Fatalf("model = %q want opus", b.Model)
+	}
+	if !k.Caps.CanSpawn(addr.Address("0.1")) {
+		t.Fatal("grant should be ON after edit")
+	}
+}
+
+func TestEditGroupMembership(t *testing.T) {
+	k := newKernelWith(t, "a", "b") // 0.1, 0.2
+	k.CreateGroup("team", []addr.Address{"0.1"}, false)
+	m := New(k)
+	m.BaseDir = t.TempDir()
+
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
+	// group header is the top row; open its membership editor
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}}) // edit group "team"
+	// navigate to 0.2 (rows: [team, root, 0.1, 0.2]) and add it
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // -> root
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // -> 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // -> 0.2
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // add 0.2
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})   // done
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	g, _ := k.Groups.Get("team")
+	has01, has02 := false, false
+	for _, mem := range g.Members {
+		if mem == addr.Address("0.1") {
+			has01 = true
+		}
+		if mem == addr.Address("0.2") {
+			has02 = true
+		}
+	}
+	if !has01 || !has02 {
+		t.Fatalf("team members = %v want both 0.1 and 0.2", g.Members)
+	}
+}

@@ -147,9 +147,9 @@ func (m Model) View() string {
 			persona, status = bub.Persona, dot(bub.Status)
 		}
 		mark := ""
-		if m.introStage > 0 || m.groupStage == 1 {
+		if m.introStage > 0 || m.groupStage == 1 || m.groupEdit {
 			mark = " "
-			if m.introSet[a] || m.groupSet[a] {
+			if m.introSet[a] || m.groupSet[a] || (m.groupEdit && m.inEditGroup(a)) {
 				mark = "✓"
 			}
 		}
@@ -222,6 +222,26 @@ func (m Model) View() string {
 	case m.groupStage == 3:
 		b.WriteString(fmt.Sprintf("group '%s' — [i] introduce all: %s   [s] attach session: %s   [enter] create   [esc] cancel\n",
 			m.groupName, onOff(m.groupIntro), onOff(m.groupSession)))
+	case m.editing:
+		caret := ""
+		if m.editField == 0 {
+			caret = "▏"
+		}
+		sel := func(i int) string {
+			if i == m.editField {
+				return "> "
+			}
+			return "  "
+		}
+		b.WriteString("edit " + m.editAddr.String() + " — ↑/↓ field · enter save · esc cancel:\n")
+		b.WriteString(sel(0) + "persona: " + m.editPersona + caret + "\n")
+		b.WriteString(sel(1) + "model:   " + modelChoiceLabel(m.editModel) + "   (←/→)\n")
+		b.WriteString(sel(2) + "spawn grant (depth 1): " + onOff(m.editGrant) + "   (←/→ toggle)\n")
+		b.WriteString(helpStyle.Render("  persona/grant apply now; model applies on next relaunch") + "\n")
+	case m.groupEdit:
+		g, _ := m.k.Groups.Get(m.groupEditName)
+		b.WriteString(fmt.Sprintf("edit group '%s' (%d members) — ↑/↓ move · enter add/remove a bubble (✓) · esc done\n",
+			m.groupEditName, len(g.Members)))
 	case m.delBubble != "":
 		n := descendantCount(m.k.Reg, m.delBubble)
 		label := m.delBubble.String()
@@ -247,7 +267,7 @@ func (m Model) View() string {
 			b.WriteString("  " + cur + g.Name + fmt.Sprintf(" (%d members)\n", len(g.Members)))
 		}
 	default:
-		b.WriteString(helpStyle.Render("↑/↓ move (cyclable) · →/← expand/collapse · enter dive · 0-9 jump · m+0-9 slot · n new · d delete · i introduce · g group · G del-group · ctrl+p perms · q quit") + "\n")
+		b.WriteString(helpStyle.Render("↑/↓ move · →/← expand · enter dive · 0-9 jump · m+0-9 slot · n new · e edit · d delete · i introduce · g group · G del-group · ctrl+p perms · q quit") + "\n")
 	}
 	return b.String()
 }
