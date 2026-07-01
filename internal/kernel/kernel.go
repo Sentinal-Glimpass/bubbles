@@ -114,7 +114,7 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	}
 	// Try to resume the existing conversation.
 	if b.SessionID != "" {
-		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, SessionID: b.SessionID, Resume: true}); err == nil {
+		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
 			if k.RelaunchProbe > 0 {
 				time.Sleep(k.RelaunchProbe) // give a doomed resume time to exit
 			}
@@ -127,7 +127,7 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	}
 	// Fresh session with a new id, seeded with the persona.
 	b.SessionID = newSessionID()
-	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, SessionID: b.SessionID, Resume: false})
+	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, Model: b.Model, SessionID: b.SessionID, Resume: false})
 	if err != nil {
 		return nil
 	}
@@ -204,8 +204,21 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 	}
 	b := k.Reg.Add(parent, persona, dir)
 	b.SessionID = newSessionID()
+	b.Model = opts.Model
 	k.Caps.AddContact(b.Addr, addr.Root) // every bubble can reach root
 	k.Caps.AddContact(parent, b.Addr)    // the parent can reach its child (one-directional: no vice versa, no siblings, no ancestors)
+
+	// Spawn-ability grant. Root grants explicitly (opts.GrantSpawn => depth 1: the
+	// child may spawn, but its own children may not). A non-root spawner can only
+	// pass down depth-1, so a depth-1 bubble's children get nothing — an AI can
+	// never hand its spawn grant to its children.
+	if by == addr.Root {
+		if opts.GrantSpawn {
+			k.Caps.GrantSpawnDepth(b.Addr, 1)
+		}
+	} else if d := k.Caps.SpawnDepth(by); d > 1 {
+		k.Caps.GrantSpawnDepth(b.Addr, d-1)
+	}
 	opts.SessionID = b.SessionID
 	sess, err := k.runner.Launch(b.Addr, dir, opts)
 	if err != nil {
@@ -296,9 +309,13 @@ func (k *Kernel) StartRoot(dir string) error {
 
 // Relaunch starts a session for an already-registered (restored) bubble and
 // wires delivery, without assigning a new address. Used when rehydrating a saved
-// fleet; the session resumes its prior conversation.
+// fleet; the session resumes its prior conversation with its saved model.
 func (k *Kernel) Relaunch(a addr.Address, dir, persona, sessionID string) error {
-	sess, err := k.runner.Launch(a, dir, runner.SpawnOpts{Persona: persona, SessionID: sessionID, Resume: true})
+	model := ""
+	if b, ok := k.Reg.Get(a); ok {
+		model = b.Model
+	}
+	sess, err := k.runner.Launch(a, dir, runner.SpawnOpts{Persona: persona, Model: model, SessionID: sessionID, Resume: true})
 	if err != nil {
 		return err
 	}

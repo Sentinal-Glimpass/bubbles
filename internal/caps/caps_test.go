@@ -48,3 +48,27 @@ func TestSpawnBudget(t *testing.T) {
 		t.Fatalf("second consume got %v want ErrNoBudget", err)
 	}
 }
+
+func TestSpawnDepthGrant(t *testing.T) {
+	s := New()
+	// depth grant: can spawn, unlimited count (no decrement)
+	s.GrantSpawnDepth("0.1", 1)
+	if !s.CanSpawn("0.1") {
+		t.Fatal("depth-1 bubble should be able to spawn")
+	}
+	if err := s.ConsumeSpawn("0.1"); err != nil {
+		t.Fatalf("depth grant should be unlimited count: %v", err)
+	}
+	if err := s.ConsumeSpawn("0.1"); err != nil {
+		t.Fatalf("depth grant should still spawn: %v", err)
+	}
+	if s.SpawnDepth("0.1") != 1 {
+		t.Fatalf("depth = %d want 1", s.SpawnDepth("0.1"))
+	}
+	if got := s.SpawnDepth(addr.Root); got < 1<<20 {
+		t.Fatalf("root depth should be effectively unlimited, got %d", got)
+	}
+	if s.SpawnDepth("0.9") != 0 {
+		t.Fatal("ungranted bubble should have depth 0")
+	}
+}

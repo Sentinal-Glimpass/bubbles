@@ -25,6 +25,7 @@ type Bubble struct {
 	Status    Status
 	Parent    addr.Address
 	Dir       string
+	Model     string // claude --model alias ("" => default); persisted so a restart keeps it
 	SessionID string // claude session id, so same-folder bubbles resume distinctly
 }
 

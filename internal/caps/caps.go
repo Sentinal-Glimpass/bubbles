@@ -16,13 +16,15 @@ var ErrNoBudget = errors.New("caps: no spawn budget")
 type Store struct {
 	mu       sync.Mutex
 	contacts map[addr.Address]map[addr.Address]bool
-	spawn    map[addr.Address]int
+	spawn    map[addr.Address]int // count budget (finite grants)
+	depth    map[addr.Address]int // spawn-grant depth: levels of spawning this bubble may seed
 }
 
 func New() *Store {
 	return &Store{
 		contacts: map[addr.Address]map[addr.Address]bool{},
 		spawn:    map[addr.Address]int{},
+		depth:    map[addr.Address]int{},
 	}
 }
 
@@ -70,23 +72,47 @@ func (s *Store) GrantSpawn(owner addr.Address, n int) {
 	s.mu.Unlock()
 }
 
-// CanSpawn reports whether owner may spawn. Root always may.
+// GrantSpawnDepth grants owner the spawn ability to a given depth: depth 1 means
+// it may spawn but its children may not (the grant does not propagate). Root is
+// implicitly unlimited.
+func (s *Store) GrantSpawnDepth(owner addr.Address, depth int) {
+	s.mu.Lock()
+	s.depth[owner] = depth
+	s.mu.Unlock()
+}
+
+// SpawnDepth returns owner's granted spawn depth (0 = none). Root is unlimited.
+func (s *Store) SpawnDepth(owner addr.Address) int {
+	if owner == addr.Root {
+		return 1 << 30
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.depth[owner]
+}
+
+// CanSpawn reports whether owner may spawn. Root always may; otherwise it needs
+// either a count budget or a spawn-depth grant.
 func (s *Store) CanSpawn(owner addr.Address) bool {
 	if owner == addr.Root {
 		return true
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.spawn[owner] > 0
+	return s.spawn[owner] > 0 || s.depth[owner] > 0
 }
 
-// ConsumeSpawn decrements owner's budget. Root is unlimited (no-op).
+// ConsumeSpawn decrements owner's count budget. Root and depth-granted bubbles
+// are unlimited (no decrement).
 func (s *Store) ConsumeSpawn(owner addr.Address) error {
 	if owner == addr.Root {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.depth[owner] > 0 {
+		return nil // depth grant: unlimited count
+	}
 	if s.spawn[owner] <= 0 {
 		return ErrNoBudget
 	}

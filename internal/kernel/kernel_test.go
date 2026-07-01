@@ -269,3 +269,46 @@ func TestSendLiveBubbleNoRelaunch(t *testing.T) {
 		t.Fatalf("a live bubble should not be relaunched (launches %d -> %d)", n0, len(fr.Launches))
 	}
 }
+
+// TestSpawnGrantDepthOne: root grants spawn (depth 1); the grantee can spawn but
+// its children cannot — an AI can't hand its spawn grant down.
+func TestSpawnGrantDepthOne(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+
+	// root spawns a manager WITH the grant
+	mgr, err := k.SpawnUnder(addr.Root, addr.Root, "mgr", "/tmp/mgr", runner.SpawnOpts{Persona: "mgr", GrantSpawn: true})
+	if err != nil {
+		t.Fatalf("spawn mgr: %v", err)
+	}
+	if !k.Caps.CanSpawn(mgr) {
+		t.Fatal("granted manager should be able to spawn")
+	}
+	// the manager spawns a worker (no grant flag passed by an AI)
+	worker, err := k.Spawn(mgr, "worker", "/tmp/worker", runner.SpawnOpts{Persona: "worker"})
+	if err != nil {
+		t.Fatalf("mgr spawn worker: %v", err)
+	}
+	if k.Caps.CanSpawn(worker) {
+		t.Fatal("a depth-1 manager's child must NOT inherit the spawn ability")
+	}
+
+	// a bubble spawned WITHOUT the grant cannot spawn at all
+	plain, _ := k.SpawnUnder(addr.Root, addr.Root, "plain", "/tmp/plain", runner.SpawnOpts{Persona: "plain"})
+	if k.Caps.CanSpawn(plain) {
+		t.Fatal("ungranted bubble should not be able to spawn")
+	}
+}
+
+// TestSpawnPassesModel: the chosen model reaches the runner.
+func TestSpawnPassesModel(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	if _, err := k.SpawnUnder(addr.Root, addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w", Model: "opus"}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	last := fr.Launches[len(fr.Launches)-1]
+	if last.Opts.Model != "opus" {
+		t.Fatalf("model = %q want opus", last.Opts.Model)
+	}
+}

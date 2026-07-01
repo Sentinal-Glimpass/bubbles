@@ -129,7 +129,8 @@ func TestFolderPickerSelectsSubdir(t *testing.T) {
 	tm.Type("worker")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // persona -> folder list [".", "api/", "+ new"]
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> "api/"
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // select api
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // select api -> options
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // options -> create
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return bytes.Contains(b, []byte("worker"))
@@ -315,7 +316,8 @@ func TestSpawnUnderSelectedBubble(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}) // spawn under 0.1
 	tm.Type("child")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // persona -> folder picker (rooted at 0.1's dir)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick "." -> spawn
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick "." -> options
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // options -> spawn
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return bytes.Contains(b, []byte("child"))
@@ -363,7 +365,8 @@ func TestSpawnKeyAddsBubble(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	tm.Type("tester")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // persona -> folder stage
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // blank folder -> spawn in BaseDir/tester
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // blank folder -> options
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // options -> spawn in BaseDir/tester
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return bytes.Contains(b, []byte("tester"))
@@ -422,5 +425,30 @@ func TestRootCollapsedAtBottom(t *testing.T) {
 		if r.addr == addr.Address("0.2") {
 			t.Fatal("root children should be hidden while root is collapsed")
 		}
+	}
+}
+
+func TestSpawnOptionsModelAndGrant(t *testing.T) {
+	k := newKernelWith(t) // just root
+	m := New(k)
+	m.BaseDir = t.TempDir()
+
+	tm := teatest.NewTestModel(t, expandRoot(m), teatest.WithInitialTermSize(80, 24))
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	tm.Type("mgr")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // persona -> folder
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // pick "." -> options
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight})                     // model: sonnet -> opus
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}) // grant spawn ON
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})                     // create
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(b, []byte("mgr"))
+	}, teatest.WithDuration(3*time.Second))
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	if !k.Caps.CanSpawn(addr.Address("0.1")) {
+		t.Fatal("grant-spawn ON should let 0.1 spawn")
 	}
 }

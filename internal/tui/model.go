@@ -39,12 +39,15 @@ type Model struct {
 	groupExpanded map[string]bool       // which group nodes show their members
 	markSet       bool                  // armed by `m`: next digit (re)assigns the cursor bubble to that slot
 
-	spawnStage     int          // 0 = none, 1 = entering persona, 2 = picking folder
+	spawnStage     int          // 0 = none, 1 = persona, 2 = folder, 3 = options (model + grant)
 	pendingParent  addr.Address // bubble the new one is created under
 	pendingPersona string
+	pendingDir     string // folder chosen in stage 2, used at stage 3
 	input          string
 	folderChoices  []folderChoice
 	folderCursor   int
+	spawnModel     string // chosen model alias (sonnet/opus/fable)
+	spawnGrant     bool   // grant the new bubble the spawn ability (depth 1)
 
 	introStage int                   // 0 = none, 1 = selecting members
 	introSet   map[addr.Address]bool // bubbles chosen for a group introduction
@@ -262,6 +265,7 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a = addr.Root // on a group header: spawn under root
 		}
 		m.spawnStage, m.input, m.pendingParent = 1, "", a
+		m.spawnModel, m.spawnGrant = runner.DefaultModel, false // reset options
 	case "m":
 		m.markSet = true // arm: next digit (re)assigns the highlighted bubble
 	case "i":
@@ -465,14 +469,32 @@ type folderChoice struct {
 }
 
 func (m Model) clearSpawn() Model {
-	m.spawnStage, m.input, m.pendingPersona, m.pendingParent = 0, "", "", ""
+	m.spawnStage, m.input, m.pendingPersona, m.pendingParent, m.pendingDir = 0, "", "", "", ""
 	m.folderChoices, m.folderCursor = nil, 0
 	return m
+}
+
+// spawnModels is the model picker's cycle order (aliases track the latest of
+// each family).
+var spawnModels = []string{"sonnet", "opus", "fable"}
+
+func cycleModel(cur string, delta int) string {
+	i := 0
+	for j, mdl := range spawnModels {
+		if mdl == cur {
+			i = j
+		}
+	}
+	n := len(spawnModels)
+	return spawnModels[(i+delta+n)%n]
 }
 
 func (m Model) updateSpawning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "esc" {
 		return m.clearSpawn(), nil
+	}
+	if m.spawnStage == 3 {
+		return m.updateSpawnOptions(msg)
 	}
 	if m.spawnStage == 2 {
 		return m.updateFolderPick(msg)
@@ -514,11 +536,31 @@ func (m Model) updateFolderPick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			c := m.folderChoices[m.folderCursor]
 			dir := resolveFolder(m.baseDirFor(m.pendingParent), c.folder, m.pendingPersona)
 			_ = os.MkdirAll(dir, 0o755)
-			// root authorizes; the new bubble is attached under the selected parent
-			_, _ = m.k.SpawnUnder(addr.Root, m.pendingParent, m.pendingPersona, dir, runner.SpawnOpts{Persona: m.pendingPersona})
-			m.expanded[m.pendingParent] = true // reveal the new child
-			m.rows = m.fleetRows()
+			m.pendingDir = dir
+			m.spawnStage = 3 // -> options (model + grant), then spawn
+			return m, nil
 		}
+		return m.clearSpawn(), nil
+	}
+	return m, nil
+}
+
+// updateSpawnOptions is spawn stage 3: pick the model (←/→) and toggle the spawn
+// grant (s), then enter to create the bubble.
+func (m Model) updateSpawnOptions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "left", "h":
+		m.spawnModel = cycleModel(m.spawnModel, -1)
+	case "right", "l":
+		m.spawnModel = cycleModel(m.spawnModel, +1)
+	case "s":
+		m.spawnGrant = !m.spawnGrant // grant spawn ability (depth 1)
+	case "enter":
+		// root authorizes; the new bubble is attached under the selected parent
+		_, _ = m.k.SpawnUnder(addr.Root, m.pendingParent, m.pendingPersona, m.pendingDir,
+			runner.SpawnOpts{Persona: m.pendingPersona, Model: m.spawnModel, GrantSpawn: m.spawnGrant})
+		m.expanded[m.pendingParent] = true // reveal the new child
+		m.rows = m.fleetRows()
 		return m.clearSpawn(), nil
 	}
 	return m, nil

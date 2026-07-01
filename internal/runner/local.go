@@ -57,6 +57,11 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	if r.CitizenPrompt != "" {
 		args = append(args, "--append-system-prompt", r.citizen(a))
 	}
+	model := opts.Model
+	if model == "" {
+		model = DefaultModel
+	}
+	args = append(args, "--model", model)
 	if r.AllowAll != nil && *r.AllowAll {
 		args = append(args, "--dangerously-skip-permissions")
 	} else {

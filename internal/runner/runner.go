@@ -6,11 +6,17 @@ import "github.com/Sentinal-Glimpass/bubbles/internal/addr"
 
 // SpawnOpts configures a launched session.
 type SpawnOpts struct {
-	Persona   string
-	Goal      string
-	SessionID string // claude --session-id (new) / --resume target (restore)
-	Resume    bool   // restored bubble: resume its conversation, no initial prompt
+	Persona    string
+	Goal       string
+	Model      string // claude --model alias ("sonnet"/"opus"/"fable"); "" => sonnet
+	GrantSpawn bool   // root grants this bubble the spawn ability (depth 1: it can spawn, but its children cannot)
+	SessionID  string // claude --session-id (new) / --resume target (restore)
+	Resume     bool   // restored bubble: resume its conversation, no initial prompt
 }
+
+// DefaultModel is the model alias used when SpawnOpts.Model is empty. Aliases
+// track the latest of each family, so "sonnet" is the current Sonnet.
+const DefaultModel = "sonnet"
 
 // Session is a running agent we can inject input into (message delivery).
 type Session interface {

@@ -14,12 +14,14 @@ import (
 
 // bubbleRec is a persisted bubble (one entry in the fleet manifest).
 type bubbleRec struct {
-	Addr      string   `json:"addr"`
-	Persona   string   `json:"persona"`
-	Dir       string   `json:"dir"`
-	Parent    string   `json:"parent"`
-	SessionID string   `json:"sessionId"`
-	Contacts  []string `json:"contacts"`
+	Addr       string   `json:"addr"`
+	Persona    string   `json:"persona"`
+	Dir        string   `json:"dir"`
+	Parent     string   `json:"parent"`
+	Model      string   `json:"model,omitempty"`
+	SpawnDepth int      `json:"spawnDepth,omitempty"` // spawn-grant depth (0 = none)
+	SessionID  string   `json:"sessionId"`
+	Contacts   []string `json:"contacts"`
 }
 
 // groupRec is a persisted group.
@@ -56,7 +58,8 @@ func saveFleet(baseDir string, k *kernel.Kernel, marks map[int]addr.Address) err
 		}
 		recs = append(recs, bubbleRec{
 			Addr: b.Addr.String(), Persona: b.Persona, Dir: b.Dir,
-			Parent: b.Parent.String(), SessionID: b.SessionID, Contacts: cs,
+			Parent: b.Parent.String(), Model: b.Model, SpawnDepth: k.Caps.SpawnDepth(b.Addr),
+			SessionID: b.SessionID, Contacts: cs,
 		})
 	}
 	mk := map[string]string{}
@@ -114,8 +117,11 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 		}
 		k.Reg.Restore(registry.Bubble{
 			Addr: addr.Address(r.Addr), Persona: r.Persona, Dir: r.Dir,
-			Parent: addr.Address(r.Parent), Status: registry.Idle, SessionID: r.SessionID,
+			Parent: addr.Address(r.Parent), Status: registry.Idle, Model: r.Model, SessionID: r.SessionID,
 		})
+		if r.SpawnDepth > 0 {
+			k.Caps.GrantSpawnDepth(addr.Address(r.Addr), r.SpawnDepth) // restore the spawn grant
+		}
 	}
 	for _, r := range m.Bubbles { // contacts
 		for _, c := range r.Contacts {

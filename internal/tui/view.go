@@ -23,6 +23,20 @@ func onOff(b bool) string {
 	return "OFF"
 }
 
+// modelChoiceLabel renders the model cycle with the current choice bracketed,
+// e.g. "[sonnet] opus fable".
+func modelChoiceLabel(cur string) string {
+	parts := make([]string, len(spawnModels))
+	for i, mdl := range spawnModels {
+		if mdl == cur {
+			parts[i] = "[" + mdl + "]"
+		} else {
+			parts[i] = mdl
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 // descendantCount returns the total number of bubbles nested under a.
 func descendantCount(reg *registry.Registry, a addr.Address) int {
 	ch := reg.Children(a)
@@ -151,6 +165,9 @@ func (m Model) View() string {
 			}
 		}
 		line := fmt.Sprintf("%s%s%s%s %s %s %s%s", cursor, mark, strings.Repeat("  ", r.depth), toggle, status, a, persona, count)
+		if !a.IsRoot() && m.k.Caps.CanSpawn(a) {
+			line += " ⚡" // has the spawn grant
+		}
 		if slot, ok := slotOf[a]; ok {
 			line += fmt.Sprintf(" [%d]", slot)
 		}
@@ -189,6 +206,11 @@ func (m Model) View() string {
 			}
 			b.WriteString("  " + cur + c.label + "\n")
 		}
+	case m.spawnStage == 3:
+		b.WriteString("bubble '" + m.pendingPersona + "' under " + m.parentLabel() + " — options:\n")
+		b.WriteString("  model: " + modelChoiceLabel(m.spawnModel) + "   (←/→ to change)\n")
+		b.WriteString("  grant spawn ability (depth 1): " + onOff(m.spawnGrant) + "   ('s' toggles)\n")
+		b.WriteString(helpStyle.Render("  [enter] create · [esc] cancel") + "\n")
 	case m.introStage == 1:
 		b.WriteString("introduce — ↑/↓ + enter to add bubbles (✓); enter again on a ✓ bubble to finalize; esc cancels\n")
 	case m.markSet:
