@@ -88,17 +88,25 @@ ever stopped and you reopen.
 
 | Key | Action |
 |---|---|
-| `↑`/`↓` | move cursor |
-| `→`/`←` | expand / collapse a node |
+| `↑`/`↓` | move cursor (cyclable — wraps top/bottom) |
+| `→`/`←` | expand / collapse a node (root starts collapsed, at the bottom) |
 | `Enter` | dive into the bubble (or start root) |
-| `n` | new bubble under the highlighted one |
+| `n` | new bubble → persona → folder → **options: model (sonnet/opus/fable) + optional spawn grant** |
+| `e` | **edit**: on a bubble, change persona / model / spawn grant; on a group header, add/remove member bubbles |
+| `d` | **delete** the highlighted bubble and its subtree (with confirm) |
 | `i` | introduce: add bubbles (`Enter`), `Enter` again on a ✓ to finalize |
 | `g` | create a **group**: select bubbles → name it → options (introduce-all / attach a coordinator session) |
-| `G` | delete a group (contacts are left intact) |
+| `G` | delete a group (asks whether to also delete the member bubbles) |
 | `0`–`9` | jump to a bound slot, or bind the highlighted bubble to a free one |
 | `m` then `0`–`9` | (re)assign the highlighted bubble to a slot |
 | `Ctrl+P` | toggle permission mode for new bubbles (allow-all ⇄ ask) |
 | `q` | quit |
+
+A `⚡` marks a bubble holding the **spawn grant** (it can spawn children, but at
+depth 1 its children cannot). New bubbles default to the latest Sonnet; each keeps
+its own model across restarts. If a bubble's `claude` crashes, it **self-heals** —
+the next message to it (or diving in) relaunches it, resuming its conversation, or
+starting fresh if the session id is gone.
 
 **Inside a bubble** (`Ctrl+\` is the leader)
 
