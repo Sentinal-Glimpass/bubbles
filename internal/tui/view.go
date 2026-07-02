@@ -168,6 +168,9 @@ func (m Model) View() string {
 		if !a.IsRoot() && m.k.Caps.CanSpawn(a) {
 			line += " ⚡" // has the spawn grant
 		}
+		if !a.IsRoot() && !m.k.IsHot(a) {
+			line += helpStyle.Render(" ⏸") // paged out (cold) — resumes on next message/dive
+		}
 		if slot, ok := slotOf[a]; ok {
 			line += fmt.Sprintf(" [%d]", slot)
 		}

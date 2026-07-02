@@ -369,3 +369,56 @@ func TestDeleteGroupWithMembers(t *testing.T) {
 		t.Fatal("member b should be deleted with the group")
 	}
 }
+
+// TestKeepLimitedHot: the resident set is bounded to MaxHot; the coldest bubble
+// pages out (process killed, state kept) when a launch would exceed it.
+func TestKeepLimitedHot(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.MaxHot = 2
+	k.RelaunchProbe = 0
+
+	a1, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Persona: "a"})
+	a2, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Persona: "b"})
+	a3, _ := k.Spawn(addr.Root, "c", "/tmp/c", runner.SpawnOpts{Persona: "c"}) // 3rd launch -> evict coldest (a1)
+
+	if k.IsHot(a1) {
+		t.Fatal("coldest a1 should have been paged out")
+	}
+	if !fr.Session(a1).Closed() {
+		t.Fatal("paged-out a1's process should be killed")
+	}
+	if !k.IsHot(a2) || !k.IsHot(a3) {
+		t.Fatal("a2 and a3 should stay hot")
+	}
+	// a1's record survives (resumes on use)
+	if _, ok := k.Reg.Get(a1); !ok {
+		t.Fatal("paged-out bubble must keep its registry record")
+	}
+
+	// touch a2 (message it) so a3 becomes the coldest, then spawn a4 -> a3 evicts
+	if _, err := k.Send(addr.Root, a2, "ping", "", 0); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	a4, _ := k.Spawn(addr.Root, "d", "/tmp/d", runner.SpawnOpts{Persona: "d"})
+	if k.IsHot(a3) {
+		t.Fatal("a3 should be evicted (a2 was just used, a3 coldest)")
+	}
+	if !k.IsHot(a2) || !k.IsHot(a4) {
+		t.Fatal("a2 (recently used) and a4 (new) should be hot")
+	}
+
+	// paging a1 back in resumes it (self-heal) and stays within MaxHot
+	if s := k.EnsureAlive(a1); s == nil || !s.Alive() {
+		t.Fatal("a1 should page back in")
+	}
+	hot := 0
+	for _, b := range []addr.Address{a1, a2, a3, a4} {
+		if k.IsHot(b) {
+			hot++
+		}
+	}
+	if hot > k.MaxHot {
+		t.Fatalf("hot set = %d exceeds MaxHot %d", hot, k.MaxHot)
+	}
+}

@@ -62,6 +62,7 @@ func runApp() {
 	lr.AllowAll = &allowAll
 	lr.MemMaxMB = 8192 // per-bubble RAM ceiling: a runaway is OOM-killed alone (state persists; self-heal resumes it)
 	k := kernel.New(lr)
+	k.MaxHot = 6 // keep at most ~6 worker sessions resident (≈ 50 GB budget / 8 GB cap); the rest page out and resume on use
 	lr.MCPConfig = func(a addr.Address) string {
 		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a))
 	}

@@ -37,6 +37,11 @@ func runClient() {
 	}
 	defer conn.Close()
 
+	if staleDaemon(baseDir) { // an upgrade was installed after the daemon started
+		fmt.Print("\r\n⚠  a newer bubbles is installed — run `bubbles stop`, then `bubbles`, to upgrade the running fleet.\r\n")
+		time.Sleep(1800 * time.Millisecond) // let it be seen before the TUI takes the screen
+	}
+
 	cols, rows, _ := term.GetSize(int(os.Stdout.Fd()))
 	_ = json.NewEncoder(conn).Encode(hello{Rows: uint16(rows), Cols: uint16(cols)})
 

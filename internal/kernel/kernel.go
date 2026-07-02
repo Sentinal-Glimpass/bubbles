@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -37,9 +38,16 @@ type Kernel struct {
 	// Tests set it to 0; real use gives claude a moment to fail.
 	RelaunchProbe time.Duration
 
+	// MaxHot bounds the number of live (resident) worker sessions. When a launch
+	// would exceed it, the least-recently-used bubble is paged out (its process
+	// killed; its state persists, and it resumes on next use). 0 = unlimited.
+	MaxHot int
+
 	runner   runner.Runner
 	smu      sync.Mutex
 	sessions map[addr.Address]runner.Session
+	lastUsed map[addr.Address]int64 // logical-clock LRU stamp per bubble
+	clock    int64
 }
 
 // New builds a Kernel over the given runner, with root seeded.
@@ -53,6 +61,63 @@ func New(r runner.Runner) *Kernel {
 		RelaunchProbe: 800 * time.Millisecond,
 		runner:        r,
 		sessions:      map[addr.Address]runner.Session{},
+		lastUsed:      map[addr.Address]int64{},
+	}
+}
+
+// touch stamps a as most-recently-used (for LRU eviction).
+func (k *Kernel) touch(a addr.Address) {
+	k.smu.Lock()
+	k.clock++
+	k.lastUsed[a] = k.clock
+	k.smu.Unlock()
+}
+
+// IsHot reports whether a has a live (resident) session.
+func (k *Kernel) IsHot(a addr.Address) bool {
+	s := k.session(a)
+	return s != nil && s.Alive()
+}
+
+// evictIfNeeded pages out the least-recently-used worker sessions until at most
+// MaxHot remain live (root is always resident and never counts). keep is never
+// evicted (the bubble just launched). Paging out = kill the process; the
+// registry entry, inbox, and session id persist, so it resumes on next use.
+func (k *Kernel) evictIfNeeded(keep addr.Address) {
+	if k.MaxHot <= 0 {
+		return
+	}
+	k.smu.Lock()
+	type ent struct {
+		a    addr.Address
+		used int64
+	}
+	live := 0
+	var evictable []ent
+	for a, s := range k.sessions {
+		if a == addr.Root || s == nil || !s.Alive() {
+			continue
+		}
+		live++
+		if a != keep {
+			evictable = append(evictable, ent{a, k.lastUsed[a]})
+		}
+	}
+	if live <= k.MaxHot {
+		k.smu.Unlock()
+		return
+	}
+	sort.Slice(evictable, func(i, j int) bool { return evictable[i].used < evictable[j].used }) // coldest first
+	need := live - k.MaxHot
+	var victims []addr.Address
+	for i := 0; i < len(evictable) && need > 0; i++ {
+		victims = append(victims, evictable[i].a)
+		delete(k.sessions, evictable[i].a) // mark cold under lock
+		need--
+	}
+	k.smu.Unlock()
+	for _, v := range victims {
+		_ = k.runner.Kill(v) // page out
 	}
 }
 
@@ -103,6 +168,7 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 		return cur
 	}
 	if cur != nil && cur.Alive() {
+		k.touch(a) // used -> most-recently-used
 		return cur
 	}
 	b, ok := k.Reg.Get(a)
@@ -120,6 +186,8 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 			}
 			if sess.Alive() {
 				k.setSession(a, sess)
+				k.touch(a)
+				k.evictIfNeeded(a) // page in -> may page out a colder bubble
 				return sess
 			}
 			_ = sess.Close() // resume failed (session id gone) -> fall through to fresh
@@ -132,6 +200,8 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 		return nil
 	}
 	k.setSession(a, sess)
+	k.touch(a)
+	k.evictIfNeeded(a)
 	return sess
 }
 
@@ -225,6 +295,8 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 		return "", err
 	}
 	k.setSession(b.Addr, sess)
+	k.touch(b.Addr)
+	k.evictIfNeeded(b.Addr) // keep the hot set bounded
 	return b.Addr, nil
 }
 

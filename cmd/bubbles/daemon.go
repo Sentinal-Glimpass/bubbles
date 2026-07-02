@@ -20,6 +20,39 @@ import (
 
 func pidFile(baseDir string) string { return filepath.Join(baseDir, ".bubbles", "daemon.pid") }
 
+func buildFile(baseDir string) string { return filepath.Join(baseDir, ".bubbles", "daemon.build") }
+
+// buildStamp returns a fingerprint of an executable (its size + modtime), used
+// to detect when a newer bubbles has been installed than the running daemon.
+func buildStamp(exe string) string {
+	fi, err := os.Stat(exe)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d-%d", fi.Size(), fi.ModTime().UnixNano())
+}
+
+func writeBuildStamp(baseDir, exe string) {
+	if s := buildStamp(exe); s != "" {
+		_ = os.WriteFile(buildFile(baseDir), []byte(s), 0o644)
+	}
+}
+
+// staleDaemon reports whether the installed binary differs from the one the
+// running daemon recorded (i.e. an upgrade happened; a restart is needed).
+func staleDaemon(baseDir string) bool {
+	rec, err := os.ReadFile(buildFile(baseDir))
+	if err != nil {
+		return false
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	cur := buildStamp(self)
+	return cur != "" && strings.TrimSpace(string(rec)) != cur
+}
+
 // controlSock is the daemon's relay socket for a workspace (one daemon per dir).
 func controlSock(baseDir string) string {
 	return filepath.Join(baseDir, ".bubbles", "control.sock")
@@ -39,6 +72,8 @@ func runDaemon() {
 	baseDir := defaultWorkspace()
 	_ = os.MkdirAll(filepath.Join(baseDir, ".bubbles"), 0o755)
 	self, _ := os.Executable()
+	writeBuildStamp(baseDir, self) // record the binary this daemon is running, for staleness detection
+	defer os.Remove(buildFile(baseDir))
 
 	cmd := exec.Command(self, "--hosted")
 	cmd.Dir = baseDir
