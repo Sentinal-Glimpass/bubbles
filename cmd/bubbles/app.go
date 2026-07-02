@@ -73,6 +73,13 @@ func runApp() {
 			k.EnforceBudget()
 		}
 	}()
+	go func() { // periodic inbox drain: deliver pooled (non-urgent) messages so none go unanswered
+		t := time.NewTicker(time.Duration(messagePollMinutes()) * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			k.DrainInboxes()
+		}
+	}()
 
 	ln, err := ipc.Serve(sock, func(r ipc.Request) ipc.Reply { return handleIPC(k, r) })
 	if err != nil {
@@ -128,7 +135,7 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 	from := addr.Address(r.From)
 	switch r.Op {
 	case "send":
-		id, err := k.Send(from, addr.Address(r.To), r.Subject, r.Body, r.ReplyTo)
+		id, err := k.Send(from, addr.Address(r.To), r.Subject, r.Body, r.ReplyTo, r.Urgent)
 		if err != nil {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}

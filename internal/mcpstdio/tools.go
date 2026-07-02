@@ -6,7 +6,7 @@ package mcpstdio
 // Backend executes tool calls. The identity (from/by) is fixed by the Server to
 // this bubble's own address, so a session cannot spoof another bubble.
 type Backend interface {
-	Send(from, to, subject, body string, replyTo int) (int, error)
+	Send(from, to, subject, body string, replyTo int, urgent bool) (int, error)
 	Contacts(owner string) []string
 	Inbox(owner string) []string
 	Status(owner string) []string
@@ -35,10 +35,14 @@ func (s *Server) tools() []Tool {
 		"type":        "integer",
 		"description": "Optional id of the inbox message you are replying to (marks it answered for the sender).",
 	}
+	sendProps["urgent"] = map[string]any{
+		"type":        "boolean",
+		"description": "If true, wake the recipient immediately. If false (default), the message is pooled and delivered in the next drain cycle — use false unless a timely reply is needed.",
+	}
 	ts := []Tool{
 		{
 			Name:        "send",
-			Description: "Send a message to a contact's inbox (root is \"0\"). Returns the message id. They are notified and read it via inbox().",
+			Description: "Send a message to a contact's inbox (root is \"0\"). Returns the message id; they read it via inbox(). By default it's pooled and delivered in batches; pass urgent=true for an immediate reply.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": sendProps,

@@ -150,7 +150,7 @@ func (k *Kernel) session(a addr.Address) runner.Session {
 // without interruption: a short "you have mail" line is queued into its session
 // (picked up on its next turn), prompting it to call inbox(). Messages to root
 // blink the dashboard instead.
-func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int) (int, error) {
+func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, urgent bool) (int, error) {
 	if !k.Caps.CanSend(from, to) {
 		return 0, ErrNotContact
 	}
@@ -161,13 +161,40 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int) 
 	id := k.Store.Append(inbox.Message{From: from, FromName: fromName, To: to, Subject: subject, Body: body, ReplyTo: replyTo})
 	k.Caps.AddContact(to, from) // reply grant: the recipient can always reply to whoever messaged it
 	if to == addr.Root {
-		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard
+		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard (root is the human; always notified)
 	}
-	if s := k.EnsureAlive(to); s != nil { // heal a dead recipient, then inject the notice (incl. root, if running)
-		unread := k.Store.UnreadCount(to)
-		_, _ = s.Write([]byte(formatNotify(from, fromName, subject, unread)))
+	// Urgent messages wake the recipient NOW (page it in if cold, then nudge it).
+	// Non-urgent messages are pooled in the inbox and delivered by the periodic
+	// DrainInboxes, so a cold fleet isn't paged in on every message.
+	if urgent {
+		if s := k.EnsureAlive(to); s != nil {
+			_, _ = s.Write([]byte(formatNotify(from, fromName, subject, k.Store.UnreadCount(to))))
+		}
 	}
 	return id, nil
+}
+
+// DrainInboxes is the periodic non-urgent delivery batch: it wakes every non-root
+// bubble that has unread mail (paging in cold ones) and nudges it to read, so no
+// pooled message goes unanswered. The memory budget keeps the resident set
+// bounded as bubbles rotate through to drain.
+func (k *Kernel) DrainInboxes() {
+	for _, b := range k.Reg.All() {
+		if b.Addr.IsRoot() {
+			continue
+		}
+		n := k.Store.UnreadCount(b.Addr)
+		if n == 0 {
+			continue
+		}
+		if s := k.EnsureAlive(b.Addr); s != nil {
+			_, _ = s.Write([]byte(formatDrain(n)))
+		}
+	}
+}
+
+func formatDrain(n int) string {
+	return fmt.Sprintf("📬 You have %d unread message(s) — call the inbox() tool to read and reply.", n)
 }
 
 // EnsureAlive returns a live session for a, relaunching it if its process has

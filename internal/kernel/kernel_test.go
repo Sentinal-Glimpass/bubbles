@@ -32,7 +32,7 @@ func TestFleetEndToEnd(t *testing.T) {
 	}
 
 	// Worker -> root: blinks the dashboard (bus) and lands in root's inbox.
-	if _, err := k.Send(scout, addr.Root, "found 3 bugs", "details", 0); err != nil {
+	if _, err := k.Send(scout, addr.Root, "found 3 bugs", "details", 0, true); err != nil {
 		t.Fatalf("scout->root: %v", err)
 	}
 	if len(pings) != 1 || pings[0].From != scout {
@@ -40,7 +40,7 @@ func TestFleetEndToEnd(t *testing.T) {
 	}
 
 	// Workers can't talk before introduction.
-	if _, err := k.Send(scout, refactor, "hi", "", 0); !errors.Is(err, ErrNotContact) {
+	if _, err := k.Send(scout, refactor, "hi", "", 0, true); !errors.Is(err, ErrNotContact) {
 		t.Fatalf("got %v want ErrNotContact", err)
 	}
 	if err := k.Introduce(addr.Root, scout, refactor); err != nil {
@@ -48,7 +48,7 @@ func TestFleetEndToEnd(t *testing.T) {
 	}
 
 	// Worker -> worker: lands in the inbox AND queues a non-interrupting notice.
-	if _, err := k.Send(scout, refactor, "take the API layer", "thanks", 0); err != nil {
+	if _, err := k.Send(scout, refactor, "take the API layer", "thanks", 0, true); err != nil {
 		t.Fatalf("scout->refactor: %v", err)
 	}
 	if w := fr.Session(refactor).Written(); !strings.Contains(w, "📬 New message") ||
@@ -97,14 +97,14 @@ func TestReplyGrant(t *testing.T) {
 	if k.Caps.CanSend(c, p) {
 		t.Fatal("child should not reach parent before being messaged")
 	}
-	id, err := k.Send(p, c, "do X", "", 0) // parent messages child
+	id, err := k.Send(p, c, "do X", "", 0, true) // parent messages child
 	if err != nil {
 		t.Fatalf("parent->child: %v", err)
 	}
 	if !k.Caps.CanSend(c, p) {
 		t.Fatal("child should be able to reply after the parent messaged it")
 	}
-	if _, err := k.Send(c, p, "done", "", id); err != nil { // child replies (threaded)
+	if _, err := k.Send(c, p, "done", "", id, true); err != nil { // child replies (threaded)
 		t.Fatalf("child reply: %v", err)
 	}
 	// parent's status for that message shows "replied"
@@ -205,7 +205,7 @@ func TestSendHealsResumableBubble(t *testing.T) {
 	orig := fr.Session(a)
 	orig.Die() // the process crashes
 
-	if _, err := k.Send(addr.Root, a, "ping", "body", 0); err != nil {
+	if _, err := k.Send(addr.Root, a, "ping", "body", 0, true); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	ns := fr.Session(a)
@@ -241,7 +241,7 @@ func TestSendHealsWithFreshFallback(t *testing.T) {
 	origID := b.SessionID
 	fr.Session(a).Die()
 
-	if _, err := k.Send(addr.Root, a, "ping", "body", 0); err != nil {
+	if _, err := k.Send(addr.Root, a, "ping", "body", 0, true); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	ns := fr.Session(a)
@@ -268,7 +268,7 @@ func TestSendLiveBubbleNoRelaunch(t *testing.T) {
 	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
 	k.EnsureAlive(a) // page in first
 	n0 := len(fr.Launches)
-	if _, err := k.Send(addr.Root, a, "ping", "body", 0); err != nil {
+	if _, err := k.Send(addr.Root, a, "ping", "body", 0, true); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if len(fr.Launches) != n0 {
@@ -444,7 +444,7 @@ func TestLazySpawnColdUntilUsed(t *testing.T) {
 	}
 
 	// A message pages it in — launched fresh, with its goal as the initial prompt.
-	if _, err := k.Send(addr.Root, a, "hi", "", 0); err != nil {
+	if _, err := k.Send(addr.Root, a, "hi", "", 0, true); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if !k.IsHot(a) {
@@ -458,5 +458,37 @@ func TestLazySpawnColdUntilUsed(t *testing.T) {
 	}
 	if b, _ := k.Reg.Get(a); b.SessionID == "" {
 		t.Fatal("session id should be assigned on first launch (so later use resumes)")
+	}
+}
+
+// TestNonUrgentPoolsUntilDrain: a non-urgent message does NOT wake a cold bubble;
+// it stays in the inbox until the periodic DrainInboxes pages the bubble in.
+func TestNonUrgentPoolsUntilDrain(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+
+	// non-urgent -> filed, but the cold bubble is NOT launched
+	if _, err := k.Send(addr.Root, a, "later", "body", 0, false); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if k.IsHot(a) {
+		t.Fatal("a non-urgent message must NOT wake a cold bubble")
+	}
+	if len(fr.Launches) != 0 {
+		t.Fatalf("a pooled message should not launch anything, got %d launches", len(fr.Launches))
+	}
+	if k.Store.UnreadCount(a) != 1 {
+		t.Fatalf("the message should be pooled in the inbox, unread=%d", k.Store.UnreadCount(a))
+	}
+
+	// the drain cycle delivers it: pages the bubble in and nudges it to read
+	k.DrainInboxes()
+	if !k.IsHot(a) {
+		t.Fatal("DrainInboxes should page in a bubble that has pending mail")
+	}
+	if w := fr.Session(a).Written(); !strings.Contains(w, "unread message") {
+		t.Fatalf("drain should nudge the bubble to read, got %q", w)
 	}
 }

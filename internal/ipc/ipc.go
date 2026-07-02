@@ -17,6 +17,7 @@ type Request struct {
 	Subject string `json:"subject,omitempty"`
 	Body    string `json:"body,omitempty"`
 	ReplyTo int    `json:"replyTo,omitempty"`
+	Urgent  bool   `json:"urgent,omitempty"`
 	Persona string `json:"persona,omitempty"`
 	Dir     string `json:"dir,omitempty"`
 }

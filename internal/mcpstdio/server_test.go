@@ -8,11 +8,13 @@ import (
 )
 
 type fakeBackend struct {
-	sends [][4]string
+	sends  [][4]string
+	urgent []bool
 }
 
-func (f *fakeBackend) Send(from, to, subject, body string, replyTo int) (int, error) {
+func (f *fakeBackend) Send(from, to, subject, body string, replyTo int, urgent bool) (int, error) {
 	f.sends = append(f.sends, [4]string{from, to, subject, body})
+	f.urgent = append(f.urgent, urgent)
 	return 7, nil
 }
 func (f *fakeBackend) Contacts(owner string) []string        { return []string{"0", "0.2"} }

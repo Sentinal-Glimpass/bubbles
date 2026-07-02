@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/ipc"
 	"github.com/Sentinal-Glimpass/bubbles/internal/mcpstdio"
@@ -21,6 +22,7 @@ var hostedMode bool
 const detachSentinel = "\x1b]6660;bubbles-detach\x07"
 
 func main() {
+	applyMessagePollingFlag() // --message_polling <minutes> -> env, inherited by the daemon + hosted child
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "mcp-stdio":
@@ -42,6 +44,31 @@ func main() {
 		}
 	}
 	runClient() // default: attach to (or start) the persistent workspace daemon
+}
+
+// applyMessagePollingFlag reads `--message_polling <minutes>` and stashes it in
+// an env var so the detached daemon and the hosted app inherit it (the flag is
+// on the client invocation, but the drain runs in the hosted app).
+func applyMessagePollingFlag() {
+	for i := 0; i+1 < len(os.Args); i++ {
+		if os.Args[i] == "--message_polling" {
+			if n, err := strconv.Atoi(os.Args[i+1]); err == nil && n > 0 {
+				_ = os.Setenv("BUBBLES_MSG_POLL", os.Args[i+1])
+			}
+			return
+		}
+	}
+}
+
+// messagePollMinutes is the drain interval (minutes) from BUBBLES_MSG_POLL,
+// defaulting to 10.
+func messagePollMinutes() int {
+	if v := os.Getenv("BUBBLES_MSG_POLL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 10
 }
 
 // runMCPStdio is the MCP server claude spawns for one bubble. It relays tool
@@ -70,8 +97,8 @@ func runMCPStdio() {
 // ipcBackend implements mcpstdio.Backend by relaying over the IPC socket.
 type ipcBackend struct{ c *ipc.Client }
 
-func (b *ipcBackend) Send(from, to, subject, body string, replyTo int) (int, error) {
-	rep, err := b.c.Do(ipc.Request{Op: "send", From: from, To: to, Subject: subject, Body: body, ReplyTo: replyTo})
+func (b *ipcBackend) Send(from, to, subject, body string, replyTo int, urgent bool) (int, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "send", From: from, To: to, Subject: subject, Body: body, ReplyTo: replyTo, Urgent: urgent})
 	if err != nil {
 		return 0, err
 	}

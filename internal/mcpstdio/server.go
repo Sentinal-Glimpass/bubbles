@@ -100,13 +100,26 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 		}
 		return 0
 	}
+	argBool := func(k string) bool {
+		switch v := p.Arguments[k].(type) {
+		case bool:
+			return v
+		case string:
+			return v == "true" || v == "1"
+		}
+		return false
+	}
 	switch p.Name {
 	case "send":
-		id, err := s.B.Send(s.Self, arg("to"), arg("subject"), arg("body"), argInt("reply_to"))
+		id, err := s.B.Send(s.Self, arg("to"), arg("subject"), arg("body"), argInt("reply_to"), argBool("urgent"))
 		if err != nil {
 			return toolErr(msg.ID, err.Error())
 		}
-		return toolOK(msg.ID, fmt.Sprintf("delivered to %s's inbox (msg #%d)", arg("to"), id))
+		mode := "pooled"
+		if argBool("urgent") {
+			mode = "urgent"
+		}
+		return toolOK(msg.ID, fmt.Sprintf("delivered to %s's inbox (msg #%d, %s)", arg("to"), id, mode))
 	case "contacts":
 		return toolOK(msg.ID, strings.Join(s.B.Contacts(s.Self), ", "))
 	case "inbox":
