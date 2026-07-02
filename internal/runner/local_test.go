@@ -108,25 +108,27 @@ func TestLocalRunnerLaunchAndDeliver(t *testing.T) {
 	}
 }
 
-func TestWrapWithMemCap(t *testing.T) {
-	// no cap requested
-	if bin, args := wrapWithMemCap("claude", []string{"-p"}, 0, true); bin != "claude" || len(args) != 1 {
-		t.Fatalf("memMB=0 should be unchanged, got %s %v", bin, args)
-	}
-	// cap requested but unsupported -> unchanged
-	if bin, _ := wrapWithMemCap("claude", []string{"-p"}, 8192, false); bin != "claude" {
+func TestWrapInScope(t *testing.T) {
+	// unsupported -> unchanged (macOS / no systemd)
+	if bin, _ := wrapInScope("claude", []string{"-p"}, 0, false); bin != "claude" {
 		t.Fatalf("unsupported should be unchanged, got %s", bin)
 	}
-	// cap requested and supported -> wrapped in systemd-run
-	bin, args := wrapWithMemCap("claude", []string{"--foo", "bar"}, 8192, true)
+	// supported, NO cap -> still scoped for measurement, but WITHOUT MemoryMax
+	bin, args := wrapInScope("claude", []string{"-p"}, 0, true)
 	if bin != "systemd-run" {
-		t.Fatalf("bin = %s want systemd-run", bin)
+		t.Fatalf("uncapped should still be scoped, got %s", bin)
 	}
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "MemoryMax=8192M") || !strings.Contains(joined, "MemorySwapMax=0") {
-		t.Fatalf("missing memory props: %v", args)
+	if !strings.Contains(joined, "--scope") || strings.Contains(joined, "MemoryMax") {
+		t.Fatalf("uncapped scope should have no MemoryMax: %v", args)
 	}
-	// original command + args must follow the "--" separator, in order
+	// supported, WITH cap -> scoped + MemoryMax
+	_, args = wrapInScope("claude", []string{"--foo", "bar"}, 8192, true)
+	joined = strings.Join(args, " ")
+	if !strings.Contains(joined, "MemoryMax=8192M") || !strings.Contains(joined, "MemorySwapMax=0") {
+		t.Fatalf("capped scope missing props: %v", args)
+	}
+	// original command + args follow "--" in order
 	sep := -1
 	for i, a := range args {
 		if a == "--" {

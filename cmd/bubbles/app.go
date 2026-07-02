@@ -61,7 +61,7 @@ func runApp() {
 	lr.CitizenPrompt = citizenPrompt
 	allowAll := true // default: launch bubbles with --dangerously-skip-permissions
 	lr.AllowAll = &allowAll
-	lr.MemMaxMB = 8192 // per-bubble RAM ceiling: a runaway is OOM-killed alone (state persists; self-heal resumes it)
+	lr.MemMaxMB = 0 // no per-session hard cap (it was killing legit busy sessions); each runs in its own cgroup scope for measurement, bounded only by the global budget below
 	k := kernel.New(lr)
 	k.MemBudget = 45 << 30 // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
 	lr.MCPConfig = func(a addr.Address) string {
@@ -243,7 +243,7 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) addr
 	if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 		defer term.Restore(int(os.Stdin.Fd()), old)
 	}
-	fmt.Print("\x1b[2J\x1b[H") // clear, so claude's full-screen redraw is clean
+	fmt.Print("\x1b[?25h\x1b[2J\x1b[H") // show cursor (Bubbletea's alt-screen hides it) + clear for claude's redraw
 	// On the way out, disable any mouse reporting / bracketed paste claude turned on.
 	defer fmt.Print("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\r\n")
 

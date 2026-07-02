@@ -73,19 +73,21 @@ func (r *LocalRunner) writeSettings(a addr.Address) string {
 	return p
 }
 
-// wrapWithMemCap wraps a launch in a memory-capped transient cgroup scope
-// (systemd-run --user --scope) so the process is OOM-killed alone at memMB. When
-// capping is unsupported or memMB<=0 it returns the command unchanged.
-func wrapWithMemCap(bin string, args []string, memMB int, supported bool) (string, []string) {
-	if memMB <= 0 || !supported {
+// wrapInScope runs a launch in its own transient cgroup scope
+// (systemd-run --user --scope) so its resident memory is measured exactly
+// (memory.current, including child processes) for the global RAM budget. A hard
+// per-session MemoryMax is added ONLY when memMB>0 — by default a session is
+// bounded by the global budget (LRU eviction), never OOM-killed at a per-session
+// ceiling. When scopes are unsupported it returns the command unchanged.
+func wrapInScope(bin string, args []string, memMB int, supported bool) (string, []string) {
+	if !supported {
 		return bin, args
 	}
-	wrap := []string{
-		"--user", "--scope", "--quiet", "--collect",
-		"-p", fmt.Sprintf("MemoryMax=%dM", memMB),
-		"-p", "MemorySwapMax=0", // no swap crawl: die cleanly at the RAM ceiling
-		"--", bin,
+	wrap := []string{"--user", "--scope", "--quiet", "--collect", "-p", "MemorySwapMax=0"}
+	if memMB > 0 {
+		wrap = append(wrap, "-p", fmt.Sprintf("MemoryMax=%dM", memMB)) // optional hard cap
 	}
+	wrap = append(wrap, "--", bin)
 	return "systemd-run", append(wrap, args...)
 }
 
@@ -166,7 +168,7 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	if memMB == 0 {
 		memMB = r.MemMaxMB // fleet default
 	}
-	name, fullArgs := wrapWithMemCap(r.Bin, args, memMB, memCapSupported())
+	name, fullArgs := wrapInScope(r.Bin, args, memMB, memCapSupported())
 	cmd := exec.Command(name, fullArgs...)
 	cmd.Dir = dir
 	ptmx, err := pty.Start(cmd)
