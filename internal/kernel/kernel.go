@@ -168,19 +168,29 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 	if to == addr.Root {
 		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard (root is the human; always notified)
 	}
+	notify := []byte(formatNotify(from, fromName, subject, k.Store.UnreadCount(to)))
 	// Delivery policy:
 	//   - urgent: wake the recipient now (page it in if cold), then nudge it.
-	//   - non-urgent: deliver immediately IF it's already hot (free — it's running);
-	//     if it's cold, leave it pooled for the periodic DrainInboxes so we don't
-	//     page in a sleeping fleet on every message.
+	//   - non-urgent, already hot: deliver immediately (free — it's running).
+	//   - non-urgent, never launched: boot it. A freshly-spawned bubble awaiting
+	//     its first task must start when delegated to, instead of sitting cold
+	//     until the next drain — this is the "spawn a worker and message it a
+	//     charter" flow.
+	//   - non-urgent, previously run but paged out (has a SessionID): leave it
+	//     pooled for the periodic DrainInboxes, so we don't wake a whole sleeping
+	//     fleet on every message.
 	// Either way the message is already safely in the inbox.
 	if urgent {
 		if s := k.EnsureAlive(to); s != nil {
-			_, _ = s.Write([]byte(formatNotify(from, fromName, subject, k.Store.UnreadCount(to))))
+			_, _ = s.Write(notify)
 		}
 	} else if s := k.session(to); s != nil && s.Alive() {
 		k.touch(to)
-		_, _ = s.Write([]byte(formatNotify(from, fromName, subject, k.Store.UnreadCount(to))))
+		_, _ = s.Write(notify)
+	} else if b, ok := k.Reg.Get(to); ok && b.SessionID == "" && !to.IsRoot() {
+		if s := k.EnsureAlive(to); s != nil {
+			_, _ = s.Write(notify)
+		}
 	}
 	return id, nil
 }

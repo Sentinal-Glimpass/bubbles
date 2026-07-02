@@ -7,7 +7,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -111,14 +110,12 @@ func runApp() {
 		}
 		k.SyncSessionIDs()               // capture any in-session /resume before persisting
 		_ = saveFleet(baseDir, k, marks) // persist fleet-view changes (spawn/introduce/marks)
-		sel := final.(tui.Model).Selected
+		prev := final.(tui.Model)        // carries view state (expanded nodes, cursor, marks)
+		sel := prev.Selected
 		if sel == "" { // q / ctrl-c
 			if hostedMode {
 				fmt.Print(detachSentinel) // tell the client to detach; the fleet keeps running
-				m = tui.New(k)            // restart the view for the next attach
-				m.BaseDir = baseDir
-				m.Marks = marks
-				m.AllowAll = &allowAll
+				m = prev.Refreshed()      // restart the view for the next attach, keeping its state
 				continue
 			}
 			return // --local: actually quit
@@ -129,10 +126,7 @@ func runApp() {
 		}
 		k.SyncSessionIDs()               // capture any in-session /resume before persisting
 		_ = saveFleet(baseDir, k, marks) // persist anything spawned during the dive
-		m = tui.New(k)                   // refresh rows, clear selection
-		m.BaseDir = baseDir
-		m.Marks = marks
-		m.AllowAll = &allowAll
+		m = prev.Refreshed()             // back to fleet: same expand state + cursor where we left
 	}
 }
 
@@ -247,27 +241,16 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) addr
 	// On the way out, disable any mouse reporting / bracketed paste claude turned on.
 	defer fmt.Print("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\r\n")
 
-	var detached atomic.Bool
-	defer detached.Store(true)
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := f.Read(buf)
-			if detached.Load() {
-				return
-			}
-			if n > 0 {
-				os.Stdout.Write(buf[:n])
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
+	// Subscribe to the session's persistent output stream (replays recent
+	// scrollback first, so we see claude's current frame, not a black screen).
+	// We do NOT read f directly — the drainer owns the read side so claude is
+	// always drained and never stalls, viewed or not.
+	detach := ps.Attach(os.Stdout)
+	defer detach()
 
-	// Now that we're copying the bubble's output, force claude (an Ink TUI) to
-	// repaint — it only redraws on a size change, so re-entering an idle bubble
-	// would otherwise look blank. Shrink a row, pause so Ink renders, then restore.
+	// Force claude (an Ink TUI) to repaint — it only redraws on a size change, so
+	// re-entering an idle bubble would otherwise show a stale frame. Shrink a row,
+	// pause so Ink renders, then restore.
 	if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
 		smaller := *ws
 		if smaller.Rows > 1 {

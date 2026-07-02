@@ -461,29 +461,57 @@ func TestLazySpawnColdUntilUsed(t *testing.T) {
 	}
 }
 
-// TestNonUrgentPoolsUntilDrain: a non-urgent message does NOT wake a cold bubble;
-// it stays in the inbox until the periodic DrainInboxes pages the bubble in.
-func TestNonUrgentPoolsUntilDrain(t *testing.T) {
+// TestNonUrgentBootsFreshBubble: a non-urgent message to a NEVER-LAUNCHED bubble
+// boots it — a freshly-spawned worker awaiting its first task must start when a
+// charter is delegated to it, not sit cold until the next drain.
+func TestNonUrgentBootsFreshBubble(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
 
-	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Name: "w", Goal: "do the thing"})
 
-	// non-urgent -> filed, but the cold bubble is NOT launched
+	if _, err := k.Send(addr.Root, a, "start", "body", 0, false); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !k.IsHot(a) {
+		t.Fatal("a non-urgent message to a never-launched bubble should boot it")
+	}
+	if len(fr.Launches) != 1 {
+		t.Fatalf("expected exactly one launch, got %d", len(fr.Launches))
+	}
+	if last := fr.Launches[0]; last.Opts.Resume || last.Opts.Goal != "do the thing" {
+		t.Fatalf("first launch should be fresh with the goal, got %+v", last.Opts)
+	}
+	if !strings.Contains(fr.Session(a).Written(), "📬 New message") {
+		t.Fatal("the freshly-booted bubble should be nudged to read")
+	}
+}
+
+// TestNonUrgentPoolsPagedOutBubble: a non-urgent message to a PREVIOUSLY-RUN,
+// now paged-out bubble (it has a session id) stays pooled until DrainInboxes —
+// we don't wake a whole sleeping fleet on every message.
+func TestNonUrgentPoolsPagedOutBubble(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)    // launch once so it gets a session id
+	fr.Session(a).Die() // then it pages out / crashes -> cold but has a SessionID
+	n0 := len(fr.Launches)
+
+	// non-urgent -> filed, but the paged-out bubble is NOT relaunched
 	if _, err := k.Send(addr.Root, a, "later", "body", 0, false); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if k.IsHot(a) {
-		t.Fatal("a non-urgent message must NOT wake a cold bubble")
-	}
-	if len(fr.Launches) != 0 {
-		t.Fatalf("a pooled message should not launch anything, got %d launches", len(fr.Launches))
+	if len(fr.Launches) != n0 {
+		t.Fatalf("a pooled message should not relaunch a paged-out bubble (launches %d -> %d)", n0, len(fr.Launches))
 	}
 	if k.Store.UnreadCount(a) != 1 {
 		t.Fatalf("the message should be pooled in the inbox, unread=%d", k.Store.UnreadCount(a))
 	}
 
-	// the drain cycle delivers it: pages the bubble in and nudges it to read
+	// the drain cycle delivers it: pages the bubble back in and nudges it to read
 	k.DrainInboxes()
 	if !k.IsHot(a) {
 		t.Fatal("DrainInboxes should page in a bubble that has pending mail")

@@ -102,6 +102,24 @@ func New(k *kernel.Kernel) Model {
 	return m
 }
 
+// Refreshed returns m ready to re-run after a dive or detach: rows rebuilt and
+// selection/quit cleared, but the VIEW state (which nodes are expanded, group
+// expansion, and the cursor position) preserved — so coming back from a bubble
+// lands exactly where you left, not in the collapsed default. The cursor is
+// clamped in case rows shrank (e.g. a bubble was deleted) while diving.
+func (m Model) Refreshed() Model {
+	m.Selected = ""
+	m.quitting = false
+	m.rows = m.fleetRows()
+	if m.cursor >= len(m.rows) {
+		m.cursor = len(m.rows) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	return m
+}
+
 // fleetRows builds the full row list: each group as an expandable node at the
 // top, then the location tree (root) at the bottom, minimized by default.
 func (m Model) fleetRows() []fleetRow {

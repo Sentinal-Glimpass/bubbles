@@ -1,42 +1,52 @@
 package runner
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 )
 
-// readUntil reads from f until needle appears or it errors/times out.
-func readUntil(f *os.File, needle string) string {
-	done := make(chan string, 1)
-	go func() {
-		var b strings.Builder
-		tmp := make([]byte, 1024)
-		for {
-			n, err := f.Read(tmp)
-			if n > 0 {
-				b.Write(tmp[:n])
-				if strings.Contains(b.String(), needle) {
-					done <- b.String()
-					return
-				}
-			}
-			if err != nil {
-				done <- b.String()
-				return
-			}
+// syncBuf is a concurrency-safe buffer the drainer can stream into from its
+// goroutine while a test reads it.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// attachUntil subscribes to a session's output (replaying scrollback) and waits
+// until needle appears or it times out. This is how a viewer sees output now —
+// the PTY is drained by the session itself, not read directly.
+func attachUntil(ps PTYSession, needle string) string {
+	var buf syncBuf
+	detach := ps.Attach(&buf)
+	defer detach()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), needle) {
+			return buf.String()
 		}
-	}()
-	select {
-	case s := <-done:
-		return s
-	case <-time.After(3 * time.Second):
-		return ""
+		time.Sleep(20 * time.Millisecond)
 	}
+	return buf.String()
 }
 
 func TestLocalRunnerFlags(t *testing.T) {
@@ -60,7 +70,7 @@ func TestLocalRunnerFlags(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	sess.Write([]byte("go"))
 
-	out := readUntil(ps.PTY(), "go")
+	out := attachUntil(ps, "go")
 	for _, want := range []string{"--dangerously-skip-permissions", "--session-id", "sid-123"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
@@ -100,11 +110,111 @@ func TestLocalRunnerLaunchAndDeliver(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	out := readUntil(ps.PTY(), "ping-from-test")
+	out := attachUntil(ps, "ping-from-test")
 	for _, want := range []string{"ARGS:", "--permission-mode", "acceptEdits", "--mcp-config", "find bugs", "ping-from-test"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
+	}
+}
+
+// TestPTYDrainerNeverStalls is the core regression test for the "sessions stall
+// while working / balloon to 8GB" bug: with NOBODY attached, a session must
+// still be drained, so writing far more than the kernel PTY buffer (~64KB) never
+// blocks the process. Before the persistent drainer, this write would deadlock.
+func TestPTYDrainerNeverStalls(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("pty.Open unavailable: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+
+	s := &ptySession{ptmx: ptmx}
+	go s.drain()
+
+	big := bytes.Repeat([]byte("x"), 512*1024) // >> any PTY buffer, no viewer attached
+	done := make(chan error, 1)
+	go func() {
+		_, werr := tty.Write(big)
+		done <- werr
+	}()
+	select {
+	case werr := <-done:
+		if werr != nil {
+			t.Fatalf("write to PTY: %v", werr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("write to an unviewed PTY stalled — the drainer is not reading it")
+	}
+
+	// scrollback stays bounded even under a flood
+	s.rmu.Lock()
+	rl := len(s.ring)
+	s.rmu.Unlock()
+	if rl > scrollbackCap {
+		t.Fatalf("scrollback ring exceeded cap: %d > %d", rl, scrollbackCap)
+	}
+}
+
+// TestPTYAttachReplaysThenStreams: attaching replays what was produced before
+// the viewer arrived (so dive-in isn't a black screen), then streams live output.
+func TestPTYAttachReplaysThenStreams(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("pty.Open unavailable: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+
+	s := &ptySession{ptmx: ptmx}
+	go s.drain()
+
+	if _, err := tty.Write([]byte("BEFORE-attach\n")); err != nil {
+		t.Fatal(err)
+	}
+	// wait for the drainer to capture it into scrollback
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.rmu.Lock()
+		got := strings.Contains(string(s.ring), "BEFORE-attach")
+		s.rmu.Unlock()
+		if got {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var buf syncBuf
+	detach := s.Attach(&buf)
+	defer detach()
+	if !strings.Contains(buf.String(), "BEFORE-attach") {
+		t.Fatalf("attach should replay scrollback, got %q", buf.String())
+	}
+
+	if _, err := tty.Write([]byte("AFTER-attach\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), "AFTER-attach") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(buf.String(), "AFTER-attach") {
+		t.Fatalf("attach should stream live output, got %q", buf.String())
+	}
+
+	// after detach, live output stops flowing to the viewer
+	detach()
+	before := buf.String()
+	if _, err := tty.Write([]byte("POST-detach\n")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if buf.String() != before {
+		t.Fatalf("detached viewer should receive nothing more, got %q", buf.String())
 	}
 }
 

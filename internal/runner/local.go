@@ -3,6 +3,7 @@ package runner
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,12 +18,20 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 )
 
-// PTYSession is a Session backed by a PTY, exposing the master file so the TUI
-// can hand the terminal directly to the user for dive-in.
+// PTYSession is a Session backed by a PTY, exposing the master file (for input +
+// resize) and Attach (for output). Output is NOT read directly off PTY(): a
+// single persistent drainer owns the read side, so the session never blocks on a
+// full PTY buffer even when nobody is viewing it. Attach subscribes to that
+// stream (replaying recent scrollback first, so dive-in isn't a black screen).
 type PTYSession interface {
 	Session
 	PTY() *os.File
+	Attach(w io.Writer) (detach func())
 }
+
+// scrollbackCap bounds the per-session output ring kept for dive-in replay. Big
+// enough to hold a full claude repaint, small enough to be cheap per bubble.
+const scrollbackCap = 256 * 1024
 
 // LocalRunner launches real claude sessions in PTYs on this machine.
 type LocalRunner struct {
@@ -176,6 +185,7 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 		return nil, err
 	}
 	s := &ptySession{cmd: cmd, ptmx: ptmx, interrupt: r.InterruptByte}
+	go s.drain() // start reading immediately so claude never blocks on a full PTY buffer
 	r.mu.Lock()
 	if r.sessions == nil {
 		r.sessions = map[addr.Address]*ptySession{}
@@ -219,12 +229,72 @@ func initialPrompt(o SpawnOpts) string {
 	return "You are the '" + o.Persona + "' bubble. Introduce yourself briefly, then await instructions."
 }
 
-// ptySession is a running claude process behind a PTY.
+// ptySession is a running claude process behind a PTY. A single drainer
+// goroutine owns the read side of ptmx: it copies output into a bounded
+// scrollback ring and, when a viewer is attached, forwards it live. This means
+// the session is ALWAYS being read, so claude never blocks on a full PTY buffer
+// (which would stall it mid-work and balloon its memory with unflushed output).
 type ptySession struct {
 	cmd       *exec.Cmd
 	ptmx      *os.File
 	interrupt byte
 	wmu       sync.Mutex // serialize deliveries so text and Enter don't interleave
+
+	rmu  sync.Mutex // guards ring + sub
+	ring []byte     // recent output, capped at scrollbackCap (for dive-in replay)
+	sub  io.Writer  // live viewer (dive-in), or nil when nobody is attached
+}
+
+// drain is the persistent reader: it never stops until the PTY closes, so the
+// process is always drained. Output is appended to the scrollback ring and, if a
+// viewer is attached, streamed to it.
+func (s *ptySession) drain() {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := s.ptmx.Read(buf)
+		if n > 0 {
+			s.rmu.Lock()
+			s.ring = appendRing(s.ring, buf[:n])
+			if s.sub != nil {
+				_, _ = s.sub.Write(buf[:n])
+			}
+			s.rmu.Unlock()
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// Attach subscribes w to the live output stream, first replaying the recent
+// scrollback so the viewer sees claude's current frame immediately instead of a
+// black screen. Returns a detach func to stop forwarding. Only one viewer at a
+// time (dive-in is single-terminal); a second Attach replaces the first.
+func (s *ptySession) Attach(w io.Writer) (detach func()) {
+	s.rmu.Lock()
+	if len(s.ring) > 0 {
+		_, _ = w.Write(s.ring) // scrollback replay -> instant paint
+	}
+	s.sub = w
+	s.rmu.Unlock()
+	return func() {
+		s.rmu.Lock()
+		if s.sub == w {
+			s.sub = nil
+		}
+		s.rmu.Unlock()
+	}
+}
+
+// appendRing appends p to ring, keeping only the last scrollbackCap bytes.
+func appendRing(ring, p []byte) []byte {
+	ring = append(ring, p...)
+	if len(ring) > scrollbackCap {
+		trimmed := make([]byte, scrollbackCap)
+		copy(trimmed, ring[len(ring)-scrollbackCap:])
+		ring = trimmed
+	}
+	return ring
 }
 
 // Write types a message into the session, then submits it with Enter. The Enter
