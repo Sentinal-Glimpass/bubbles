@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -27,9 +28,48 @@ type LocalRunner struct {
 	MCPConfig     func(addr.Address) string // inline JSON for --mcp-config (nil = none)
 	InterruptByte byte                      // optional byte before a delivered message (0 = none; default 0 so urgent messages are queued, not interrupting)
 	AllowAll      *bool                     // shared toggle: true => --dangerously-skip-permissions
+	MemMaxMB      int                       // default per-bubble RAM ceiling (0 = uncapped); each bubble runs in its own memory-capped cgroup so a runaway dies alone
 
 	mu       sync.Mutex
 	sessions map[addr.Address]*ptySession
+}
+
+// wrapWithMemCap wraps a launch in a memory-capped transient cgroup scope
+// (systemd-run --user --scope) so the process is OOM-killed alone at memMB. When
+// capping is unsupported or memMB<=0 it returns the command unchanged.
+func wrapWithMemCap(bin string, args []string, memMB int, supported bool) (string, []string) {
+	if memMB <= 0 || !supported {
+		return bin, args
+	}
+	wrap := []string{
+		"--user", "--scope", "--quiet", "--collect",
+		"-p", fmt.Sprintf("MemoryMax=%dM", memMB),
+		"-p", "MemorySwapMax=0", // no swap crawl: die cleanly at the RAM ceiling
+		"--", bin,
+	}
+	return "systemd-run", append(wrap, args...)
+}
+
+var (
+	memCapOnce sync.Once
+	memCapOK   bool
+)
+
+// memCapSupported reports (once, cached) whether this host can enforce a
+// per-process RAM cap rootless: Linux + systemd --user + a delegated cgroup v2
+// memory controller. Elsewhere (macOS, no systemd) launches run uncapped.
+func memCapSupported() bool {
+	memCapOnce.Do(func() {
+		if runtime.GOOS != "linux" {
+			return
+		}
+		if _, err := exec.LookPath("systemd-run"); err != nil {
+			return
+		}
+		probe := exec.Command("systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=64M", "--", "true")
+		memCapOK = probe.Run() == nil
+	})
+	return memCapOK
 }
 
 // NewLocal returns a LocalRunner with claude defaults. InterruptByte is 0:
@@ -80,7 +120,12 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 		args = append(args, initialPrompt(opts)) // positional prompt stays last
 	}
 
-	cmd := exec.Command(r.Bin, args...)
+	memMB := opts.MemMaxMB
+	if memMB == 0 {
+		memMB = r.MemMaxMB // fleet default
+	}
+	name, fullArgs := wrapWithMemCap(r.Bin, args, memMB, memCapSupported())
+	cmd := exec.Command(name, fullArgs...)
 	cmd.Dir = dir
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -160,7 +205,11 @@ func (s *ptySession) Write(p []byte) (int, error) {
 func (s *ptySession) Close() error {
 	_ = s.ptmx.Close()
 	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+		// pty.Start puts the child in its own session, so a negative-PID signal
+		// kills the whole group — including claude under a systemd-run scope.
+		if err := syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			_ = s.cmd.Process.Kill()
+		}
 	}
 	return nil
 }

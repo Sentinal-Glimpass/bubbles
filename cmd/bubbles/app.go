@@ -60,6 +60,7 @@ func runApp() {
 	lr.CitizenPrompt = citizenPrompt
 	allowAll := true // default: launch bubbles with --dangerously-skip-permissions
 	lr.AllowAll = &allowAll
+	lr.MemMaxMB = 8192 // per-bubble RAM ceiling: a runaway is OOM-killed alone (state persists; self-heal resumes it)
 	k := kernel.New(lr)
 	lr.MCPConfig = func(a addr.Address) string {
 		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a))

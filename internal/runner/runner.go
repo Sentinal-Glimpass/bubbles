@@ -10,6 +10,7 @@ type SpawnOpts struct {
 	Goal       string
 	Model      string // claude --model alias ("sonnet"/"opus"/"fable"); "" => sonnet
 	GrantSpawn bool   // root grants this bubble the spawn ability (depth 1: it can spawn, but its children cannot)
+	MemMaxMB   int    // per-bubble RAM ceiling in MiB (0 => runner default); the runaway dies alone at this cap
 	SessionID  string // claude --session-id (new) / --resume target (restore)
 	Resume     bool   // restored bubble: resume its conversation, no initial prompt
 }
