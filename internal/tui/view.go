@@ -60,19 +60,6 @@ func descendantCountExcl(reg *registry.Registry, a addr.Address, skip map[addr.A
 	return n
 }
 
-func dot(s registry.Status) string {
-	switch s {
-	case registry.Working:
-		return "●"
-	case registry.Waiting:
-		return "◐"
-	case registry.Done:
-		return "✓"
-	default:
-		return "○"
-	}
-}
-
 // cursorLabel describes the highlighted bubble: "addr (role)".
 func cursorLabel(m Model) string {
 	a := m.curAddr()
@@ -142,9 +129,13 @@ func (m Model) View() string {
 		}
 
 		a := r.addr
-		persona, status := "", "○"
+		persona := ""
 		if bub, ok := m.k.Reg.Get(a); ok {
-			persona, status = bub.Persona, dot(bub.Status)
+			persona = bub.Persona
+		}
+		status := "○" // cold: no live session (paged out / never launched)
+		if m.k.IsHot(a) {
+			status = "●" // hot: resident, running
 		}
 		mark := ""
 		if m.introStage > 0 || m.groupStage == 1 || m.groupEdit {
@@ -167,9 +158,6 @@ func (m Model) View() string {
 		line := fmt.Sprintf("%s%s%s%s %s %s %s%s", cursor, mark, strings.Repeat("  ", r.depth), toggle, status, a, persona, count)
 		if !a.IsRoot() && m.k.Caps.CanSpawn(a) {
 			line += " ⚡" // has the spawn grant
-		}
-		if !a.IsRoot() && !m.k.IsHot(a) {
-			line += helpStyle.Render(" ⏸") // paged out (cold) — resumes on next message/dive
 		}
 		if slot, ok := slotOf[a]; ok {
 			line += fmt.Sprintf(" [%d]", slot)

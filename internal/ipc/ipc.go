@@ -20,6 +20,7 @@ type Request struct {
 	Urgent  bool   `json:"urgent,omitempty"`
 	Persona string `json:"persona,omitempty"`
 	Dir     string `json:"dir,omitempty"`
+	Model   string `json:"model,omitempty"`
 }
 
 // Reply is the result of handling a Request.

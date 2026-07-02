@@ -123,8 +123,8 @@ func (b *ipcBackend) Status(owner string) []string {
 	return rep.Messages
 }
 
-func (b *ipcBackend) Spawn(by, persona, dir string) (string, error) {
-	rep, err := b.c.Do(ipc.Request{Op: "spawn", From: by, Persona: persona, Dir: dir})
+func (b *ipcBackend) Spawn(by, persona, dir, model string) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "spawn", From: by, Persona: persona, Dir: dir, Model: model})
 	if err != nil {
 		return "", err
 	}

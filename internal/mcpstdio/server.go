@@ -138,7 +138,7 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 		if !s.Spawnable {
 			return errResp(msg.ID, -32601, "tool not available: spawn")
 		}
-		a, err := s.B.Spawn(s.Self, arg("persona"), arg("dir"))
+		a, err := s.B.Spawn(s.Self, arg("persona"), arg("dir"), arg("model"))
 		if err != nil {
 			return toolErr(msg.ID, err.Error())
 		}

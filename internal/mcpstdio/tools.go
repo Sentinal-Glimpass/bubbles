@@ -10,7 +10,7 @@ type Backend interface {
 	Contacts(owner string) []string
 	Inbox(owner string) []string
 	Status(owner string) []string
-	Spawn(by, persona, dir string) (string, error)
+	Spawn(by, persona, dir, model string) (string, error)
 }
 
 // Tool is an MCP tool definition advertised by tools/list.
@@ -66,12 +66,17 @@ func (s *Server) tools() []Tool {
 		},
 	}
 	if s.Spawnable {
+		spawnProps := strProp("persona", "dir")
+		spawnProps["model"] = map[string]any{
+			"type":        "string",
+			"description": "Optional model for the child: \"sonnet\" (default), \"opus\", or \"fable\".",
+		}
 		ts = append(ts, Tool{
 			Name:        "spawn",
 			Description: "Spawn a child bubble (only if you were granted this).",
 			InputSchema: map[string]any{
 				"type":       "object",
-				"properties": strProp("persona", "dir"),
+				"properties": spawnProps,
 				"required":   []string{"persona"},
 			},
 		})

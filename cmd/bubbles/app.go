@@ -161,7 +161,7 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 			dir = filepath.Join(defaultWorkspace(), r.Persona) // downstream of launch dir
 			_ = os.MkdirAll(dir, 0o755)
 		}
-		a, err := k.Spawn(from, r.Persona, dir, runner.SpawnOpts{Persona: r.Persona})
+		a, err := k.Spawn(from, r.Persona, dir, runner.SpawnOpts{Persona: r.Persona, Model: r.Model})
 		if err != nil {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}
