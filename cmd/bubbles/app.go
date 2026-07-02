@@ -330,6 +330,10 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (nex
 	if !ok || ps == nil {
 		return "", false // launch failed (bad dir/args, crashed on boot) — caller surfaces it
 	}
+	// Mark this bubble focused so incoming messages don't type into (and submit)
+	// what the operator is writing; they're flushed when we leave.
+	k.SetFocus(a)
+	defer k.UnsetFocus(a)
 	f := ps.PTY()
 
 	// Size the bubble's PTY to fill the real terminal, and keep it synced on

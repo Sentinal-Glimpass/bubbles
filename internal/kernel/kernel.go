@@ -60,6 +60,41 @@ type Kernel struct {
 	sessions map[addr.Address]runner.Session
 	lastUsed map[addr.Address]int64 // logical-clock LRU stamp per bubble
 	clock    int64
+
+	focusMu sync.Mutex
+	focused addr.Address // the bubble the operator is dived into; its notifications are held so they don't interrupt typing
+}
+
+// SetFocus marks the bubble the operator is actively dived into. While a bubble
+// is focused, incoming-message notifications are NOT typed into its input (that
+// would collide with what the operator is typing and submit it); the messages
+// still land in the inbox and are flushed by UnsetFocus.
+func (k *Kernel) SetFocus(a addr.Address) {
+	k.focusMu.Lock()
+	k.focused = a
+	k.focusMu.Unlock()
+}
+
+// UnsetFocus clears focus and, if the just-left bubble accrued unread mail while
+// it was focused (suppressed), nudges it once so the agent picks the backlog up.
+func (k *Kernel) UnsetFocus(a addr.Address) {
+	k.focusMu.Lock()
+	if k.focused == a {
+		k.focused = ""
+	}
+	k.focusMu.Unlock()
+	if n := k.Store.UnreadCount(a); n > 0 {
+		if s := k.session(a); s != nil && s.Alive() {
+			_, _ = s.Write([]byte(formatDrain(n)))
+		}
+	}
+}
+
+// isFocused reports whether a is the currently dived-into bubble.
+func (k *Kernel) isFocused(a addr.Address) bool {
+	k.focusMu.Lock()
+	defer k.focusMu.Unlock()
+	return a != "" && a == k.focused
 }
 
 // New builds a Kernel over the given runner, with root seeded.
@@ -256,6 +291,12 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 	//     pooled for the periodic DrainInboxes, so we don't wake a whole sleeping
 	//     fleet on every message.
 	// Either way the message is already safely in the inbox.
+	// While the operator is dived into the recipient, hold the notification: typing
+	// it in would interrupt what they're writing. It stays in the inbox and is
+	// flushed by UnsetFocus when they leave.
+	if k.isFocused(to) {
+		return id, nil
+	}
 	if urgent {
 		if s := k.EnsureAlive(to); s != nil {
 			_, _ = s.Write(notify)
@@ -282,7 +323,7 @@ func (k *Kernel) DrainInboxes() {
 	}
 	var jobs []job
 	for _, b := range k.Reg.All() {
-		if b.Addr.IsRoot() {
+		if b.Addr.IsRoot() || k.isFocused(b.Addr) { // don't nudge the bubble the operator is typing in
 			continue
 		}
 		if n := k.Store.UnreadCount(b.Addr); n > 0 {

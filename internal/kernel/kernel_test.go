@@ -270,6 +270,63 @@ func TestSendHealsWithFreshFallback(t *testing.T) {
 	}
 }
 
+// TestFocusHoldsNotifications: while a bubble is focused (the operator is dived
+// in and typing), incoming messages are NOT injected into it (that would submit
+// the operator's half-typed line); they stay in the inbox and are flushed when
+// the operator leaves. DrainInboxes also skips the focused bubble.
+func TestFocusHoldsNotifications(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	k.EnsureAlive(a) // hot
+	k.SetFocus(a)
+
+	// even an URGENT message must not type into the focused bubble
+	if _, err := k.Send(addr.Root, a, "urgent!", "body", 0, true); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if strings.Contains(fr.Session(a).Written(), "New message") {
+		t.Fatalf("must not inject into the focused bubble, got %q", fr.Session(a).Written())
+	}
+	if k.Store.UnreadCount(a) != 1 {
+		t.Fatal("the message should still be filed in the inbox")
+	}
+	// the periodic drain also leaves the focused bubble alone
+	k.DrainInboxes()
+	if strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatal("DrainInboxes should skip the focused bubble")
+	}
+
+	// leaving the bubble flushes a single nudge so the agent reads the backlog
+	k.UnsetFocus(a)
+	if !strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatalf("leaving the bubble should nudge it to read, got %q", fr.Session(a).Written())
+	}
+}
+
+// TestUnfocusedStillDelivers: a message to a bubble the operator is NOT in is
+// delivered immediately (the focus hold is specific to the focused bubble).
+func TestUnfocusedStillDelivers(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	b, _ := k.Spawn(addr.Root, "", "/tmp/b", runner.SpawnOpts{Name: "b"})
+	k.EnsureAlive(a)
+	k.EnsureAlive(b)
+	k.SetFocus(a) // operator is in a, not b
+
+	if _, err := k.Send(addr.Root, b, "hi", "body", 0, true); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !strings.Contains(fr.Session(b).Written(), "New message") {
+		t.Fatal("a message to a non-focused bubble should be delivered immediately")
+	}
+}
+
 // TestResumeFallbackOnLostSession: when --resume comes back alive but claude has
 // no record of the id ("No conversation found"), EnsureAlive falls back to a
 // FRESH session with a new id instead of leaving the bubble stuck on the error.
