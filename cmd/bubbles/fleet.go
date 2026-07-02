@@ -19,8 +19,9 @@ type bubbleRec struct {
 	Dir        string   `json:"dir"`
 	Parent     string   `json:"parent"`
 	Model      string   `json:"model,omitempty"`
+	Goal       string   `json:"goal,omitempty"`
 	SpawnDepth int      `json:"spawnDepth,omitempty"` // spawn-grant depth (0 = none)
-	SessionID  string   `json:"sessionId"`
+	SessionID  string   `json:"sessionId"`            // "" if never launched (lazy)
 	Contacts   []string `json:"contacts"`
 }
 
@@ -58,7 +59,7 @@ func saveFleet(baseDir string, k *kernel.Kernel, marks map[int]addr.Address) err
 		}
 		recs = append(recs, bubbleRec{
 			Addr: b.Addr.String(), Persona: b.Persona, Dir: b.Dir,
-			Parent: b.Parent.String(), Model: b.Model, SpawnDepth: k.Caps.SpawnDepth(b.Addr),
+			Parent: b.Parent.String(), Model: b.Model, Goal: b.Goal, SpawnDepth: k.Caps.SpawnDepth(b.Addr),
 			SessionID: b.SessionID, Contacts: cs,
 		})
 	}
@@ -117,7 +118,7 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 		}
 		k.Reg.Restore(registry.Bubble{
 			Addr: addr.Address(r.Addr), Persona: r.Persona, Dir: r.Dir,
-			Parent: addr.Address(r.Parent), Status: registry.Idle, Model: r.Model, SessionID: r.SessionID,
+			Parent: addr.Address(r.Parent), Status: registry.Idle, Model: r.Model, Goal: r.Goal, SessionID: r.SessionID,
 		})
 		if r.SpawnDepth > 0 {
 			k.Caps.GrantSpawnDepth(addr.Address(r.Addr), r.SpawnDepth) // restore the spawn grant
@@ -134,9 +135,9 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 			k.Caps.AddContact(p, a)
 		}
 	}
-	for _, r := range m.Bubbles { // relaunch sessions (resume conversations)
-		_ = k.Relaunch(addr.Address(r.Addr), r.Dir, r.Persona, r.SessionID)
-	}
+	// Lazy: restored bubbles stay COLD (0 RAM). Each keeps its saved SessionID, so
+	// the first message/dive resumes its conversation (history intact); a bubble
+	// that never launched has an empty SessionID and starts fresh on first use.
 	// load number-slots, deduped: at most one slot per bubble (lowest slot wins),
 	// so a stale multi-binding from an older save can't flicker.
 	var slots []int

@@ -206,9 +206,9 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 			_ = sess.Close() // resume failed (session id gone) -> fall through to fresh
 		}
 	}
-	// Fresh session with a new id, seeded with the persona.
+	// Fresh session with a new id, seeded with the persona and its charter/goal.
 	b.SessionID = newSessionID()
-	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, Model: b.Model, SessionID: b.SessionID, Resume: false})
+	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, Goal: b.Goal, Model: b.Model, SessionID: b.SessionID, Resume: false})
 	if err != nil {
 		return nil
 	}
@@ -286,8 +286,11 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 		return "", err
 	}
 	b := k.Reg.Add(parent, persona, dir)
-	b.SessionID = newSessionID()
 	b.Model = opts.Model
+	b.Goal = opts.Goal
+	// Lazy launch: NO session id and NO process yet. The bubble is a cold record
+	// (0 RAM) until first used — a dive, a message, or a loop trigger pages it in
+	// via EnsureAlive. So you can spawn hundreds and only the touched ones run.
 	k.Caps.AddContact(b.Addr, addr.Root) // every bubble can reach root
 	k.Caps.AddContact(parent, b.Addr)    // the parent can reach its child (one-directional: no vice versa, no siblings, no ancestors)
 
@@ -302,14 +305,6 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 	} else if d := k.Caps.SpawnDepth(by); d > 1 {
 		k.Caps.GrantSpawnDepth(b.Addr, d-1)
 	}
-	opts.SessionID = b.SessionID
-	sess, err := k.runner.Launch(b.Addr, dir, opts)
-	if err != nil {
-		return "", err
-	}
-	k.setSession(b.Addr, sess)
-	k.touch(b.Addr)
-	k.EnforceBudget() // keep the hot set bounded
 	return b.Addr, nil
 }
 
@@ -424,22 +419,6 @@ func (k *Kernel) StartRoot(dir string) error {
 		return err
 	}
 	k.setSession(addr.Root, sess)
-	return nil
-}
-
-// Relaunch starts a session for an already-registered (restored) bubble and
-// wires delivery, without assigning a new address. Used when rehydrating a saved
-// fleet; the session resumes its prior conversation with its saved model.
-func (k *Kernel) Relaunch(a addr.Address, dir, persona, sessionID string) error {
-	model := ""
-	if b, ok := k.Reg.Get(a); ok {
-		model = b.Model
-	}
-	sess, err := k.runner.Launch(a, dir, runner.SpawnOpts{Persona: persona, Model: model, SessionID: sessionID, Resume: true})
-	if err != nil {
-		return err
-	}
-	k.setSession(a, sess)
 	return nil
 }
 

@@ -20,6 +20,7 @@ func TestFleetSaveRestore(t *testing.T) {
 	a1, _ := k1.Spawn(addr.Root, "alice", filepath.Join(base, "alice"), runner.SpawnOpts{Persona: "alice"})
 	a2, _ := k1.Spawn(addr.Root, "bob", filepath.Join(base, "bob"), runner.SpawnOpts{Persona: "bob"})
 	_ = k1.Introduce(addr.Root, a1, a2)
+	k1.EnsureAlive(a1) // launch a1 so it has a session id (lazy: spawn alone assigns none)
 	if err := saveFleet(base, k1, map[int]addr.Address{2: a1}); err != nil {
 		t.Fatalf("save: %v", err)
 	}

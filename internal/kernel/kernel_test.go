@@ -199,6 +199,7 @@ func TestSendHealsResumableBubble(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
+	k.EnsureAlive(a) // lazy: first use launches it
 	b, _ := k.Reg.Get(a)
 	origID := b.SessionID
 	orig := fr.Session(a)
@@ -235,6 +236,7 @@ func TestSendHealsWithFreshFallback(t *testing.T) {
 	k.RelaunchProbe = 0
 
 	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a) // lazy: first (fresh) launch; FailResume only affects --resume
 	b, _ := k.Reg.Get(a)
 	origID := b.SessionID
 	fr.Session(a).Die()
@@ -264,6 +266,7 @@ func TestSendLiveBubbleNoRelaunch(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
 	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a) // page in first
 	n0 := len(fr.Launches)
 	if _, err := k.Send(addr.Root, a, "ping", "body", 0); err != nil {
 		t.Fatalf("send: %v", err)
@@ -307,9 +310,11 @@ func TestSpawnGrantDepthOne(t *testing.T) {
 func TestSpawnPassesModel(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
-	if _, err := k.SpawnUnder(addr.Root, addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w", Model: "opus"}); err != nil {
+	a, err := k.SpawnUnder(addr.Root, addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w", Model: "opus"})
+	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
+	k.EnsureAlive(a) // lazy: the launch happens on first use
 	last := fr.Launches[len(fr.Launches)-1]
 	if last.Opts.Model != "opus" {
 		t.Fatalf("model = %q want opus", last.Opts.Model)
@@ -325,6 +330,8 @@ func TestDeleteBubbleSubtree(t *testing.T) {
 	child, _ := k.SpawnUnder(addr.Root, parent, "child", "/tmp/c", runner.SpawnOpts{Persona: "c"}) // 0.1.1
 	other, _ := k.Spawn(addr.Root, "other", "/tmp/o", runner.SpawnOpts{Persona: "other"})          // 0.2
 	k.CreateGroup("team", []addr.Address{parent, other}, false)
+	k.EnsureAlive(parent) // launch so there are sessions to kill
+	k.EnsureAlive(child)
 
 	removed := k.DeleteBubble(parent)
 	if len(removed) != 2 {
@@ -383,6 +390,9 @@ func TestMemBudgetEviction(t *testing.T) {
 	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Persona: "a"})
 	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Persona: "b"})
 	c, _ := k.Spawn(addr.Root, "c", "/tmp/c", runner.SpawnOpts{Persona: "c"})
+	k.EnsureAlive(a) // lazy: page each in so they have a session to measure
+	k.EnsureAlive(b)
+	k.EnsureAlive(c)
 	fr.Session(a).SetMem(300)
 	fr.Session(b).SetMem(300)
 	fr.Session(c).SetMem(300) // total 900 <= 1000: all fit, nothing evicted
@@ -413,5 +423,40 @@ func TestMemBudgetEviction(t *testing.T) {
 	k.EnforceBudget()
 	if k.IsHot(c) && k.IsHot(b) {
 		t.Fatal("1100 exceeds budget 1000: one of them must page out")
+	}
+}
+
+// TestLazySpawnColdUntilUsed: spawning creates a cold record (0 RAM, no process,
+// no session id). First use (a message) launches it fresh with its goal.
+func TestLazySpawnColdUntilUsed(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w", Goal: "do the thing"})
+	if k.IsHot(a) {
+		t.Fatal("spawn must NOT launch (lazy) — the bubble should be cold")
+	}
+	if len(fr.Launches) != 0 {
+		t.Fatalf("no launch should happen at spawn, got %d", len(fr.Launches))
+	}
+	if b, _ := k.Reg.Get(a); b.SessionID != "" {
+		t.Fatal("no session id should be assigned until first launch")
+	}
+
+	// A message pages it in — launched fresh, with its goal as the initial prompt.
+	if _, err := k.Send(addr.Root, a, "hi", "", 0); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !k.IsHot(a) {
+		t.Fatal("a message should have paged the bubble in")
+	}
+	if len(fr.Launches) != 1 {
+		t.Fatalf("first use should launch exactly once, got %d", len(fr.Launches))
+	}
+	if last := fr.Launches[0]; last.Opts.Resume || last.Opts.Goal != "do the thing" {
+		t.Fatalf("first launch should be fresh with the goal, got %+v", last.Opts)
+	}
+	if b, _ := k.Reg.Get(a); b.SessionID == "" {
+		t.Fatal("session id should be assigned on first launch (so later use resumes)")
 	}
 }

@@ -26,7 +26,8 @@ type Bubble struct {
 	Parent    addr.Address
 	Dir       string
 	Model     string // claude --model alias ("" => default); persisted so a restart keeps it
-	SessionID string // claude session id, so same-folder bubbles resume distinctly
+	Goal      string // initial prompt/charter, used on the bubble's first (lazy) launch
+	SessionID string // claude session id; "" until first launched (lazy), then set so it resumes
 }
 
 // Registry is the in-memory fleet state.
