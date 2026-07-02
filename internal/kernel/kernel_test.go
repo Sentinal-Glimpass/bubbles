@@ -370,55 +370,48 @@ func TestDeleteGroupWithMembers(t *testing.T) {
 	}
 }
 
-// TestKeepLimitedHot: the resident set is bounded to MaxHot; the coldest bubble
-// pages out (process killed, state kept) when a launch would exceed it.
-func TestKeepLimitedHot(t *testing.T) {
+
+// TestMemBudgetEviction: sessions are packed by ACTUAL memory against MemBudget;
+// the coldest page out (state preserved) only when the sum exceeds the budget —
+// small sessions don't reserve a fixed slot.
+func TestMemBudgetEviction(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
-	k.MaxHot = 2
+	k.MemBudget = 1000 // bytes (tiny, for the test)
 	k.RelaunchProbe = 0
 
-	a1, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Persona: "a"})
-	a2, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Persona: "b"})
-	a3, _ := k.Spawn(addr.Root, "c", "/tmp/c", runner.SpawnOpts{Persona: "c"}) // 3rd launch -> evict coldest (a1)
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Persona: "a"})
+	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Persona: "b"})
+	c, _ := k.Spawn(addr.Root, "c", "/tmp/c", runner.SpawnOpts{Persona: "c"})
+	fr.Session(a).SetMem(300)
+	fr.Session(b).SetMem(300)
+	fr.Session(c).SetMem(300) // total 900 <= 1000: all fit, nothing evicted
 
-	if k.IsHot(a1) {
-		t.Fatal("coldest a1 should have been paged out")
-	}
-	if !fr.Session(a1).Closed() {
-		t.Fatal("paged-out a1's process should be killed")
-	}
-	if !k.IsHot(a2) || !k.IsHot(a3) {
-		t.Fatal("a2 and a3 should stay hot")
-	}
-	// a1's record survives (resumes on use)
-	if _, ok := k.Reg.Get(a1); !ok {
-		t.Fatal("paged-out bubble must keep its registry record")
+	k.EnforceBudget()
+	if !k.IsHot(a) || !k.IsHot(b) || !k.IsHot(c) {
+		t.Fatal("three small sessions (900) should all fit under budget 1000")
 	}
 
-	// touch a2 (message it) so a3 becomes the coldest, then spawn a4 -> a3 evicts
-	if _, err := k.Send(addr.Root, a2, "ping", "", 0); err != nil {
-		t.Fatalf("send: %v", err)
+	// one balloons -> total 1400 > 1000 -> evict coldest (a, then b) until it fits
+	fr.Session(c).SetMem(800) // 300 + 300 + 800 = 1400
+	k.EnforceBudget()
+	if k.IsHot(a) || k.IsHot(b) {
+		t.Fatal("coldest sessions should page out until the sum fits the budget")
 	}
-	a4, _ := k.Spawn(addr.Root, "d", "/tmp/d", runner.SpawnOpts{Persona: "d"})
-	if k.IsHot(a3) {
-		t.Fatal("a3 should be evicted (a2 was just used, a3 coldest)")
+	if !k.IsHot(c) {
+		t.Fatal("the recently-used session should stay resident")
 	}
-	if !k.IsHot(a2) || !k.IsHot(a4) {
-		t.Fatal("a2 (recently used) and a4 (new) should be hot")
+	if _, ok := k.Reg.Get(a); !ok {
+		t.Fatal("paged-out bubble keeps its record (resumes on use)")
 	}
 
-	// paging a1 back in resumes it (self-heal) and stays within MaxHot
-	if s := k.EnsureAlive(a1); s == nil || !s.Alive() {
-		t.Fatal("a1 should page back in")
+	// used-recency wins: touch b back in, and it should outlive an idle one
+	if s := k.EnsureAlive(b); s == nil {
+		t.Fatal("b should page back in on use")
 	}
-	hot := 0
-	for _, b := range []addr.Address{a1, a2, a3, a4} {
-		if k.IsHot(b) {
-			hot++
-		}
-	}
-	if hot > k.MaxHot {
-		t.Fatalf("hot set = %d exceeds MaxHot %d", hot, k.MaxHot)
+	fr.Session(b).SetMem(300) // now hot: b(300) + c(800) = 1100 > 1000 -> evict coldest
+	k.EnforceBudget()
+	if k.IsHot(c) && k.IsHot(b) {
+		t.Fatal("1100 exceeds budget 1000: one of them must page out")
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -221,6 +223,58 @@ func (s *ptySession) Alive() bool {
 		return false
 	}
 	return s.cmd.Process.Signal(syscall.Signal(0)) == nil
+}
+
+// MemBytes reports the session's resident memory. When the bubble runs in its
+// own cgroup scope (the default, memory-capped launch), memory.current is exact
+// and includes claude's child processes. Otherwise it falls back to the main
+// process's RSS.
+func (s *ptySession) MemBytes() uint64 {
+	if s.cmd == nil || s.cmd.Process == nil {
+		return 0
+	}
+	pid := s.cmd.Process.Pid
+	if v, ok := cgroupMemCurrent(pid); ok {
+		return v
+	}
+	return procRSS(pid)
+}
+
+// cgroupMemCurrent reads memory.current for pid's cgroup v2 (0::<path> in
+// /proc/<pid>/cgroup).
+func cgroupMemCurrent(pid int) (uint64, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		return 0, false
+	}
+	line := strings.TrimSpace(string(data))
+	i := strings.Index(line, "::")
+	if i < 0 {
+		return 0, false
+	}
+	b, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", line[i+2:], "memory.current"))
+	if err != nil {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// procRSS reads a process's resident set size from /proc/<pid>/statm (pages).
+func procRSS(pid int) uint64 {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/statm", pid))
+	if err != nil {
+		return 0
+	}
+	f := strings.Fields(string(b))
+	if len(f) < 2 {
+		return 0
+	}
+	pages, _ := strconv.ParseUint(f[1], 10, 64)
+	return pages * uint64(os.Getpagesize())
 }
 
 // PTY returns the master file for dive-in terminal handoff.

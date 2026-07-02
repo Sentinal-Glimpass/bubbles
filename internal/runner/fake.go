@@ -11,7 +11,22 @@ type FakeSession struct {
 	mu      sync.Mutex
 	written []byte
 	closed  bool
-	dead    bool // simulate a crashed process (Alive() -> false)
+	dead    bool   // simulate a crashed process (Alive() -> false)
+	mem     uint64 // simulated resident memory (tests set it)
+}
+
+// MemBytes returns the simulated resident memory.
+func (s *FakeSession) MemBytes() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mem
+}
+
+// SetMem sets the simulated resident memory (test helper).
+func (s *FakeSession) SetMem(n uint64) {
+	s.mu.Lock()
+	s.mem = n
+	s.mu.Unlock()
 }
 
 func (s *FakeSession) Write(p []byte) (int, error) {

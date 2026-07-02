@@ -23,7 +23,8 @@ const DefaultModel = "sonnet"
 type Session interface {
 	Write(p []byte) (int, error)
 	Close() error
-	Alive() bool // false once the underlying process has exited (for lazy self-heal)
+	Alive() bool     // false once the underlying process has exited (for lazy self-heal)
+	MemBytes() uint64 // current resident memory of this session (0 = unknown); drives budget packing
 }
 
 // Runner launches and kills sessions by address.

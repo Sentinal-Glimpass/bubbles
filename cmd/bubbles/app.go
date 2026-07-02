@@ -62,10 +62,17 @@ func runApp() {
 	lr.AllowAll = &allowAll
 	lr.MemMaxMB = 8192 // per-bubble RAM ceiling: a runaway is OOM-killed alone (state persists; self-heal resumes it)
 	k := kernel.New(lr)
-	k.MaxHot = 6 // keep at most ~6 worker sessions resident (≈ 50 GB budget / 8 GB cap); the rest page out and resume on use
+	k.MemBudget = 45 << 30 // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
 	lr.MCPConfig = func(a addr.Address) string {
 		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a))
 	}
+	go func() { // periodic memory sweep: catch sessions that grow past the budget over time
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			k.EnforceBudget()
+		}
+	}()
 
 	ln, err := ipc.Serve(sock, func(r ipc.Request) ipc.Reply { return handleIPC(k, r) })
 	if err != nil {
