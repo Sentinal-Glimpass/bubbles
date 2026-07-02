@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,9 +32,45 @@ type LocalRunner struct {
 	InterruptByte byte                      // optional byte before a delivered message (0 = none; default 0 so urgent messages are queued, not interrupting)
 	AllowAll      *bool                     // shared toggle: true => --dangerously-skip-permissions
 	MemMaxMB      int                       // default per-bubble RAM ceiling (0 = uncapped); each bubble runs in its own memory-capped cgroup so a runaway dies alone
+	SessionFile   func(addr.Address) string // per-bubble file where a hook records the live session id (nil = no session-id tracking)
 
 	mu       sync.Mutex
 	sessions map[addr.Address]*ptySession
+}
+
+// writeSettings generates a claude --settings file wiring a hook (on several
+// events) that records the live session id to SessionFile(a), so bubbles learns
+// the CURRENT conversation id even after an in-session /resume. Returns "" if no
+// SessionFile is configured.
+func (r *LocalRunner) writeSettings(a addr.Address) string {
+	if r.SessionFile == nil {
+		return ""
+	}
+	sf := r.SessionFile(a)
+	if sf == "" {
+		return ""
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	hook := []any{map[string]any{"hooks": []any{
+		map[string]any{"type": "command", "command": fmt.Sprintf("%q session-hook %q", self, sf)},
+	}}}
+	cfg := map[string]any{"hooks": map[string]any{
+		"SessionStart":     hook, // fires on start / resume / clear
+		"UserPromptSubmit": hook, // fires on every user turn
+		"Stop":             hook, // fires at the end of every assistant turn
+	}}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	p := filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-settings-%d-%s.json", os.Getpid(), a))
+	if os.WriteFile(p, b, 0o600) != nil {
+		return ""
+	}
+	return p
 }
 
 // wrapWithMemCap wraps a launch in a memory-capped transient cgroup scope
@@ -95,6 +132,9 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 			return nil, err
 		}
 		args = append(args, "--mcp-config", cfgPath)
+	}
+	if sp := r.writeSettings(a); sp != "" {
+		args = append(args, "--settings", sp) // hook that tracks the live session id
 	}
 	if r.CitizenPrompt != "" {
 		args = append(args, "--append-system-prompt", r.citizen(a))

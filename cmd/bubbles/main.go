@@ -4,9 +4,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/ipc"
@@ -33,6 +36,11 @@ func main() {
 			return
 		case "stop":
 			runStop()
+			return
+		case "session-hook":
+			if len(os.Args) > 2 {
+				runSessionHook(os.Args[2])
+			}
 			return
 		case "--hosted":
 			hostedMode = true
@@ -69,6 +77,22 @@ func messagePollMinutes() int {
 		}
 	}
 	return 10
+}
+
+// runSessionHook is a Claude Code hook helper: it reads the hook JSON on stdin
+// and writes the live session_id to `file`. Wired into a bubble's session as a
+// hook so bubbles always knows the CURRENT conversation id — even after an
+// in-session /resume — and resumes that (not the stale launch id) next time.
+func runSessionHook(file string) {
+	data, _ := io.ReadAll(os.Stdin)
+	var p struct {
+		SessionID string `json:"session_id"`
+	}
+	if json.Unmarshal(data, &p) == nil && p.SessionID != "" {
+		_ = os.MkdirAll(filepath.Dir(file), 0o755)
+		_ = os.WriteFile(file, []byte(p.SessionID), 0o644)
+	}
+	// hooks must exit 0 and emit nothing to avoid interfering with the session.
 }
 
 // runMCPStdio is the MCP server claude spawns for one bubble. It relays tool

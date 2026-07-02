@@ -38,6 +38,11 @@ type Kernel struct {
 	// Tests set it to 0; real use gives claude a moment to fail.
 	RelaunchProbe time.Duration
 
+	// CurrentSessionID, if set, returns the LIVE session id a bubble is on now
+	// (recorded by its session hook), which can differ from the launch id after an
+	// in-session /resume. nil = just use the stored id.
+	CurrentSessionID func(addr.Address) string
+
 	// MemBudget is the total resident-RAM budget (bytes) for live worker
 	// sessions. Sessions are packed by their ACTUAL memory — a 200 MB session
 	// costs 200 MB, not a fixed slot — and when the sum exceeds the budget the
@@ -224,6 +229,13 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	if cur != nil {
 		_ = cur.Close()
 	}
+	// If the session switched conversations (/resume) while it was running, resume
+	// the one it's actually on now, not the id we launched with.
+	if k.CurrentSessionID != nil {
+		if cur := k.CurrentSessionID(a); cur != "" {
+			b.SessionID = cur
+		}
+	}
 	// Try to resume the existing conversation.
 	if b.SessionID != "" {
 		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
@@ -289,6 +301,20 @@ func (k *Kernel) Inbox(owner addr.Address) []string {
 // Contacts returns who owner may message.
 func (k *Kernel) Contacts(owner addr.Address) []addr.Address {
 	return k.Caps.Contacts(owner)
+}
+
+// SyncSessionIDs refreshes each bubble's stored SessionID from its live session
+// hook, so a conversation switched via /resume in a still-running session is
+// captured before the fleet is persisted. No-op without CurrentSessionID.
+func (k *Kernel) SyncSessionIDs() {
+	if k.CurrentSessionID == nil {
+		return
+	}
+	for _, b := range k.Reg.All() {
+		if cur := k.CurrentSessionID(b.Addr); cur != "" {
+			b.SessionID = cur
+		}
+	}
 }
 
 // Introduce makes a and b mutual contacts. Root only.
@@ -442,6 +468,11 @@ func (k *Kernel) StartRoot(dir string) error {
 	}
 	if b.Dir == "" {
 		b.Dir = dir
+	}
+	if k.CurrentSessionID != nil { // resume the conversation root is actually on now
+		if cur := k.CurrentSessionID(addr.Root); cur != "" {
+			b.SessionID = cur
+		}
 	}
 	resume := b.SessionID != "" // set => restored, resume its conversation
 	if b.SessionID == "" {

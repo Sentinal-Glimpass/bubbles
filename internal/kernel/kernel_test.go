@@ -510,3 +510,38 @@ func TestNonUrgentDeliversToHotBubble(t *testing.T) {
 		t.Fatal("a non-urgent message to a HOT bubble should be delivered immediately, not deferred to the drain")
 	}
 }
+
+// TestResumeUsesCurrentSessionID: if the session switched conversations (/resume)
+// while running, a later relaunch resumes the CURRENT id (from the hook), not the
+// stale launch id, and the registry is updated.
+func TestResumeUsesCurrentSessionID(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	current := ""
+	k.CurrentSessionID = func(a addr.Address) string { return current } // stands in for the session hook
+
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a) // fresh launch assigns an id
+
+	current = "resumed-abc" // user /resumes another conversation inside the session
+	fr.Session(a).Die()     // it goes cold/crashes
+
+	if s := k.EnsureAlive(a); s == nil || !s.Alive() {
+		t.Fatal("should relaunch")
+	}
+	last := fr.Launches[len(fr.Launches)-1]
+	if !last.Opts.Resume || last.Opts.SessionID != "resumed-abc" {
+		t.Fatalf("should resume the current (resumed) id, got %+v", last.Opts)
+	}
+	if b, _ := k.Reg.Get(a); b.SessionID != "resumed-abc" {
+		t.Fatalf("registry should be updated to the resumed id, got %q", b.SessionID)
+	}
+
+	// SyncSessionIDs also pulls the current id (for persistence of a hot bubble)
+	current = "resumed-xyz"
+	k.SyncSessionIDs()
+	if b, _ := k.Reg.Get(a); b.SessionID != "resumed-xyz" {
+		t.Fatalf("SyncSessionIDs should refresh to %q, got %q", "resumed-xyz", b.SessionID)
+	}
+}

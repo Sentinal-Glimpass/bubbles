@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -66,6 +67,10 @@ func runApp() {
 	lr.MCPConfig = func(a addr.Address) string {
 		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a))
 	}
+	// Session-id tracking: a hook records each session's live id to this file; the
+	// kernel reads it so an in-session /resume is what resumes next time.
+	lr.SessionFile = func(a addr.Address) string { return sessionFile(baseDir, a) }
+	k.CurrentSessionID = func(a addr.Address) string { return readSessionFile(baseDir, a) }
 	go func() { // periodic memory sweep: catch sessions that grow past the budget over time
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
@@ -104,6 +109,7 @@ func runApp() {
 		if err != nil {
 			fatal(err)
 		}
+		k.SyncSessionIDs()               // capture any in-session /resume before persisting
 		_ = saveFleet(baseDir, k, marks) // persist fleet-view changes (spawn/introduce/marks)
 		sel := final.(tui.Model).Selected
 		if sel == "" { // q / ctrl-c
@@ -121,6 +127,7 @@ func runApp() {
 		for sel != "" {
 			sel = diveInto(k, sel, marks)
 		}
+		k.SyncSessionIDs()               // capture any in-session /resume before persisting
 		_ = saveFleet(baseDir, k, marks) // persist anything spawned during the dive
 		m = tui.New(k)                   // refresh rows, clear selection
 		m.BaseDir = baseDir
@@ -169,6 +176,20 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 	default:
 		return ipc.Reply{OK: false, Err: "unknown op: " + r.Op}
 	}
+}
+
+// sessionFile is where a bubble's session hook records its live conversation id.
+func sessionFile(baseDir string, a addr.Address) string {
+	return filepath.Join(baseDir, ".bubbles", "sessions", a.String())
+}
+
+// readSessionFile returns the live session id recorded for a (empty if none).
+func readSessionFile(baseDir string, a addr.Address) string {
+	data, err := os.ReadFile(sessionFile(baseDir, a))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // mcpConfigJSON builds the inline --mcp-config JSON pointing claude at our own
