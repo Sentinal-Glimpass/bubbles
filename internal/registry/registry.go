@@ -45,6 +45,16 @@ type Registry struct {
 	mu      sync.Mutex
 	bubbles map[addr.Address]*Bubble
 	nextSeq map[addr.Address]int
+	version int64 // bumped on every structural/persisted change (add/remove/rename/remodel/regoal/restore)
+}
+
+// Version returns a counter that increments on every persisted change to the
+// fleet. Callers snapshot it and re-save only when it moves, so agent-driven
+// spawns/edits/deletes get persisted without polling the whole registry.
+func (r *Registry) Version() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.version
 }
 
 // New returns a Registry pre-seeded with the root bubble.
@@ -65,6 +75,7 @@ func (r *Registry) Add(parent addr.Address, persona, dir string) *Bubble {
 	child := parent.Child(strconv.Itoa(r.nextSeq[parent]))
 	b := &Bubble{Addr: child, Persona: persona, Status: Working, Parent: parent, Dir: dir}
 	r.bubbles[child] = b
+	r.version++
 	return b
 }
 
@@ -72,7 +83,10 @@ func (r *Registry) Add(parent addr.Address, persona, dir string) *Bubble {
 func (r *Registry) Remove(a addr.Address) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.bubbles, a)
+	if _, ok := r.bubbles[a]; ok {
+		delete(r.bubbles, a)
+		r.version++
+	}
 }
 
 func (r *Registry) Get(a addr.Address) (*Bubble, bool) {
@@ -96,6 +110,7 @@ func (r *Registry) SetName(a addr.Address, name string) {
 	defer r.mu.Unlock()
 	if b, ok := r.bubbles[a]; ok {
 		b.Name = name
+		r.version++
 	}
 }
 
@@ -105,6 +120,17 @@ func (r *Registry) SetModel(a addr.Address, model string) {
 	defer r.mu.Unlock()
 	if b, ok := r.bubbles[a]; ok {
 		b.Model = model
+		r.version++
+	}
+}
+
+// SetGoal changes a bubble's initial instruction (used on its next fresh launch).
+func (r *Registry) SetGoal(a addr.Address, goal string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.Goal = goal
+		r.version++
 	}
 }
 
@@ -130,6 +156,7 @@ func (r *Registry) Restore(b Bubble) {
 	if i := lastSegInt(b.Addr); i > r.nextSeq[b.Parent] {
 		r.nextSeq[b.Parent] = i
 	}
+	r.version++
 }
 
 // lastSegInt returns the integer value of an address's final segment ("0.1.2"->2).

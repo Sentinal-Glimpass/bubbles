@@ -44,6 +44,30 @@ func (s *Store) Introduce(a, b addr.Address) {
 	s.AddContact(b, a)
 }
 
+// RemoveContact drops one directed edge: owner can no longer send to contact.
+// The reverse edge (contact -> owner) is untouched.
+func (s *Store) RemoveContact(owner, contact addr.Address) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cs := s.contacts[owner]; cs != nil {
+		delete(cs, contact)
+	}
+}
+
+// Purge removes a bubble entirely from the capability store: its own contact
+// set, every edge that pointed AT it, and its spawn/depth grants. Called when a
+// bubble is deleted so it can't linger as a ghost contact of anyone else.
+func (s *Store) Purge(a addr.Address) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.contacts, a)
+	for _, cs := range s.contacts {
+		delete(cs, a)
+	}
+	delete(s.spawn, a)
+	delete(s.depth, a)
+}
+
 // CanSend reports whether from may send to to. Root may send to anyone.
 func (s *Store) CanSend(from, to addr.Address) bool {
 	if from == addr.Root {

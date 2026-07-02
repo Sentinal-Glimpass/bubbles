@@ -22,6 +22,22 @@ type PingMsg struct {
 	Subject string
 }
 
+// UsageRow is one bubble's live resource use for the dashboard panel.
+type UsageRow struct {
+	Name string
+	Mem  uint64  // resident bytes
+	CPU  float64 // percent of one core
+}
+
+// UsageMsg is pushed periodically by the app's resource sampler and rendered in
+// the top-right dashboard panel.
+type UsageMsg struct {
+	TotalMem uint64
+	TotalCPU float64 // summed percent across live sessions
+	Hot      int     // number of live sessions
+	Top      []UsageRow
+}
+
 type blinkTickMsg struct{}
 
 // Model is the fleet tree.
@@ -74,6 +90,16 @@ type Model struct {
 	groupEdit     bool   // group-membership editor open
 	groupEditName string // group being edited
 
+	// OnPersist, if set, is called (on the tea goroutine, so it's race-free with
+	// marks) whenever the registry changes, to save the fleet promptly — this is
+	// what makes agent-driven spawn/edit/delete survive a daemon restart.
+	OnPersist func()
+	lastVer   int64 // last registry version we persisted at
+
+	width int      // terminal width (from WindowSizeMsg), for the top-right panel
+	usage UsageMsg // latest resource snapshot from the sampler
+	Flash string   // transient notice (e.g. a failed dive), shown until the next key
+
 	// Selected is set to the address the user dived into, then the program
 	// quits so the caller (cmd/bubbles) can hand over the terminal.
 	Selected addr.Address
@@ -97,6 +123,7 @@ func New(k *kernel.Kernel) Model {
 		pings:         map[addr.Address]string{},
 		expanded:      map[addr.Address]bool{}, // root collapsed by default
 		groupExpanded: map[string]bool{},
+		lastVer:       k.Reg.Version(), // don't trigger a spurious save on the first tick
 	}
 	m.rows = m.fleetRows()
 	return m
@@ -206,7 +233,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor < 0 {
 			m.cursor = 0
 		}
+		// Persist promptly if the fleet structure changed (agent spawn/edit/delete).
+		// Runs on this (tea) goroutine, which owns marks -> no data race with saves.
+		if m.OnPersist != nil {
+			if v := m.k.Reg.Version(); v != m.lastVer {
+				m.lastVer = v
+				m.OnPersist()
+			}
+		}
 		return m, blinkTick()
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
+	case UsageMsg:
+		m.usage = msg
+		return m, nil
 	case PingMsg:
 		m.pings[msg.From] = msg.Subject
 		return m, nil
@@ -220,6 +261,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.Flash = "" // any key dismisses a transient notice
 	if m.introStage > 0 {
 		return m.updateIntroducing(msg)
 	}

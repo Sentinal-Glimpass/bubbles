@@ -15,11 +15,32 @@ import (
 	"golang.org/x/term"
 )
 
-const clientStopByte = 0x1d // Ctrl-] stops the whole fleet
+const (
+	clientLeaderByte = 0x1c // Ctrl-\ : arms the stop chord (also the in-bubble leader)
+	clientStopByte   = 0x1d // Ctrl-] : completes Ctrl-\ Ctrl-] to stop the fleet
+)
+
+// chordStep advances the fleet-stop chord for one input byte. A lone Ctrl-\
+// arms; Ctrl-\ then Ctrl-] stops the fleet; Ctrl-\ then ANY other key forwards
+// both bytes (so the in-bubble Ctrl-\ leader — e.g. Ctrl-\ Ctrl-\ to pop to the
+// fleet, Ctrl-\ digit to jump — still works). A bare Ctrl-] no longer stops
+// anything, so it can't tear down the fleet by accident.
+func chordStep(armed bool, b byte) (forward []byte, stop, nowArmed bool) {
+	if armed {
+		if b == clientStopByte {
+			return nil, true, false
+		}
+		return []byte{clientLeaderByte, b}, false, false
+	}
+	if b == clientLeaderByte {
+		return nil, false, true
+	}
+	return []byte{b}, false, false
+}
 
 // runClient attaches the terminal to the workspace daemon (starting it detached
-// if it isn't running) and relays bytes both ways. Pressing Ctrl-] detaches and
-// leaves the fleet running; quitting from inside (q) stops the whole fleet.
+// if it isn't running) and relays bytes both ways. Quitting from inside (q)
+// detaches (fleet keeps running); Ctrl-\ then Ctrl-] stops the whole fleet.
 func runClient() {
 	baseDir := defaultWorkspace()
 	sock := controlSock(baseDir)
@@ -66,7 +87,8 @@ func runClient() {
 			}
 		}
 	}()
-	go func() { // our keys -> app; Ctrl-] stops the fleet
+	go func() { // our keys -> app; Ctrl-\ Ctrl-] stops the fleet (a bare Ctrl-] does not)
+		armed := false
 		buf := make([]byte, 1)
 		for {
 			n, rerr := os.Stdin.Read(buf)
@@ -74,13 +96,18 @@ func runClient() {
 				done <- "stopped"
 				return
 			}
-			if buf[0] == clientStopByte {
+			var forward []byte
+			var stop bool
+			forward, stop, armed = chordStep(armed, buf[0])
+			if stop {
 				done <- "stop"
 				return
 			}
-			if _, werr := conn.Write(buf[:n]); werr != nil {
-				done <- "stopped"
-				return
+			if len(forward) > 0 {
+				if _, werr := conn.Write(forward); werr != nil {
+					done <- "stopped"
+					return
+				}
 			}
 		}
 	}()

@@ -12,6 +12,7 @@ type fakeBackend struct {
 	urgent  []bool
 	edits   [][5]string // by, addr, name, description, model
 	deletes [][2]string // by, addr
+	forgets [][2]string // by, addr
 }
 
 func (f *fakeBackend) Send(from, to, subject, body string, replyTo int, urgent bool) (int, error) {
@@ -30,6 +31,10 @@ func (f *fakeBackend) Edit(by, addr, name, desc, model string) error {
 func (f *fakeBackend) Delete(by, addr string) (int, error) {
 	f.deletes = append(f.deletes, [2]string{by, addr})
 	return 2, nil
+}
+func (f *fakeBackend) Forget(by, addr string) error {
+	f.forgets = append(f.forgets, [2]string{by, addr})
+	return nil
 }
 
 func TestServeFlow(t *testing.T) {
@@ -86,8 +91,8 @@ func TestServeFlow(t *testing.T) {
 	for _, tdef := range listR.Tools {
 		names = append(names, tdef.Name)
 	}
-	if strings.Join(names, ",") != "send,contacts,inbox,status" {
-		t.Fatalf("tools = %v want [send contacts inbox status]", names)
+	if strings.Join(names, ",") != "send,contacts,inbox,status,forget" {
+		t.Fatalf("tools = %v want [send contacts inbox status forget]", names)
 	}
 
 	// id3: send succeeded and recorded identity = Self.
@@ -109,9 +114,28 @@ func TestServeFlow(t *testing.T) {
 }
 
 func TestSpawnGated(t *testing.T) {
+	base := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: false}
+	if len(base.tools()) != 5 { // send, contacts, inbox, status, forget
+		t.Fatalf("base server should advertise 5 tools, got %d", len(base.tools()))
+	}
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 7 {
-		t.Fatalf("spawnable server should advertise 7 tools (send, contacts, inbox, status, spawn, edit, delete), got %d", len(s.tools()))
+	if len(s.tools()) != 8 { // + spawn, edit, delete
+		t.Fatalf("spawnable server should advertise 8 tools, got %d", len(s.tools()))
+	}
+}
+
+// TestForgetTool: forget is available to every bubble and relays with the
+// caller's own identity.
+func TestForgetTool(t *testing.T) {
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"forget","arguments":{"addr":"0.2"}}}`)
+	fb := &fakeBackend{}
+	s := &Server{Self: "0.1", B: fb, Spawnable: false} // NOT spawnable, still has forget
+	var out bytes.Buffer
+	if err := s.Serve(in, &out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if len(fb.forgets) != 1 || fb.forgets[0] != [2]string{"0.1", "0.2"} {
+		t.Fatalf("forget relay = %v", fb.forgets)
 	}
 }
 

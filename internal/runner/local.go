@@ -179,12 +179,15 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	}
 	name, fullArgs := wrapInScope(r.Bin, args, memMB, memCapSupported())
 	cmd := exec.Command(name, fullArgs...)
+	if dir != "" {
+		_ = os.MkdirAll(dir, 0o755) // a missing working dir would otherwise fail the launch (chdir)
+	}
 	cmd.Dir = dir
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return nil, err
 	}
-	s := &ptySession{cmd: cmd, ptmx: ptmx, interrupt: r.InterruptByte}
+	s := &ptySession{cmd: cmd, ptmx: ptmx, interrupt: r.InterruptByte, created: time.Now()}
 	go s.drain() // start reading immediately so claude never blocks on a full PTY buffer
 	r.mu.Lock()
 	if r.sessions == nil {
@@ -240,9 +243,11 @@ type ptySession struct {
 	interrupt byte
 	wmu       sync.Mutex // serialize deliveries so text and Enter don't interleave
 
-	rmu  sync.Mutex // guards ring + sub
-	ring []byte     // recent output, capped at scrollbackCap (for dive-in replay)
-	sub  io.Writer  // live viewer (dive-in), or nil when nobody is attached
+	rmu     sync.Mutex // guards ring + sub + lastOut
+	ring    []byte     // recent output, capped at scrollbackCap (for dive-in replay)
+	sub     io.Writer  // live viewer (dive-in), or nil when nobody is attached
+	lastOut time.Time  // when the session last produced output (idle detection)
+	created time.Time  // launch time (fallback activity stamp before any output)
 }
 
 // drain is the persistent reader: it never stops until the PTY closes, so the
@@ -255,6 +260,7 @@ func (s *ptySession) drain() {
 		if n > 0 {
 			s.rmu.Lock()
 			s.ring = appendRing(s.ring, buf[:n])
+			s.lastOut = time.Now() // output = the session is doing work (not idle)
 			if s.sub != nil {
 				_, _ = s.sub.Write(buf[:n])
 			}
@@ -352,19 +358,96 @@ func (s *ptySession) MemBytes() uint64 {
 	return procRSS(pid)
 }
 
-// cgroupMemCurrent reads memory.current for pid's cgroup v2 (0::<path> in
-// /proc/<pid>/cgroup).
-func cgroupMemCurrent(pid int) (uint64, bool) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+// LastActivity reports when the session last produced output — the signal for
+// idle page-out. Falls back to launch time before any output has arrived.
+func (s *ptySession) LastActivity() time.Time {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	if s.lastOut.IsZero() {
+		return s.created
+	}
+	return s.lastOut
+}
+
+// CPUTime reports cumulative CPU consumed by the session. When it runs in its
+// own cgroup scope (the default) cpu.stat/usage_usec is exact and includes child
+// processes; otherwise it falls back to the main process's utime+stime.
+func (s *ptySession) CPUTime() time.Duration {
+	if s.cmd == nil || s.cmd.Process == nil {
+		return 0
+	}
+	pid := s.cmd.Process.Pid
+	if d, ok := cgroupCPUUsage(pid); ok {
+		return d
+	}
+	return procCPU(pid)
+}
+
+// cgroupCPUUsage reads usage_usec from cpu.stat for pid's cgroup v2.
+func cgroupCPUUsage(pid int) (time.Duration, bool) {
+	line, ok := cgroupPath(pid)
+	if !ok {
+		return 0, false
+	}
+	b, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", line, "cpu.stat"))
 	if err != nil {
 		return 0, false
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(ln, "usage_usec ") {
+			v, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(ln, "usage_usec ")), 10, 64)
+			if err != nil {
+				return 0, false
+			}
+			return time.Duration(v) * time.Microsecond, true
+		}
+	}
+	return 0, false
+}
+
+// procCPU reads a process's own CPU time (utime+stime) from /proc/<pid>/stat.
+func procCPU(pid int) time.Duration {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	// fields 14 (utime) and 15 (stime) are in clock ticks; skip past comm in parens
+	s := string(b)
+	if i := strings.LastIndex(s, ") "); i >= 0 {
+		s = s[i+2:]
+	}
+	f := strings.Fields(s)
+	if len(f) < 13 {
+		return 0
+	}
+	utime, _ := strconv.ParseUint(f[11], 10, 64)
+	stime, _ := strconv.ParseUint(f[12], 10, 64)
+	hz := uint64(100) // USER_HZ is 100 on Linux/amd64
+	return time.Duration((utime+stime)*1e9/hz) * time.Nanosecond
+}
+
+// cgroupPath returns pid's cgroup v2 relative path (from 0::<path>).
+func cgroupPath(pid int) (string, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		return "", false
 	}
 	line := strings.TrimSpace(string(data))
 	i := strings.Index(line, "::")
 	if i < 0 {
+		return "", false
+	}
+	return line[i+2:], true
+}
+
+// cgroupMemCurrent reads memory.current for pid's cgroup v2 (0::<path> in
+// /proc/<pid>/cgroup).
+func cgroupMemCurrent(pid int) (uint64, bool) {
+	line, ok := cgroupPath(pid)
+	if !ok {
 		return 0, false
 	}
-	b, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", line[i+2:], "memory.current"))
+	b, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", line, "memory.current"))
 	if err != nil {
 		return 0, false
 	}

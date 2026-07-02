@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/bus"
@@ -14,6 +15,7 @@ import (
 func TestFleetEndToEnd(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 
 	// Root's inbox captures pings.
 	var pings []bus.Message
@@ -69,6 +71,7 @@ func TestFleetEndToEnd(t *testing.T) {
 
 func TestNestedSpawnParentReachesChildren(t *testing.T) {
 	k := New(runner.NewFake())
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	p, _ := k.Spawn(addr.Root, "p", "/tmp/p", runner.SpawnOpts{Persona: "p"}) // 0.1 under root
 	c1, _ := k.SpawnUnder(addr.Root, p, "c1", "/tmp/c1", runner.SpawnOpts{Persona: "c1"})
 	c2, _ := k.SpawnUnder(addr.Root, p, "c2", "/tmp/c2", runner.SpawnOpts{Persona: "c2"})
@@ -92,6 +95,7 @@ func TestNestedSpawnParentReachesChildren(t *testing.T) {
 
 func TestReplyGrant(t *testing.T) {
 	k := New(runner.NewFake())
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	p, _ := k.Spawn(addr.Root, "p", "/tmp/p", runner.SpawnOpts{Persona: "p"})
 	c, _ := k.SpawnUnder(addr.Root, p, "c", "/tmp/c", runner.SpawnOpts{Persona: "c"})
 
@@ -117,6 +121,7 @@ func TestReplyGrant(t *testing.T) {
 
 func TestGroups(t *testing.T) {
 	k := New(runner.NewFake())
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Persona: "a"})
 	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Persona: "b"})
 
@@ -156,6 +161,7 @@ func TestGroups(t *testing.T) {
 
 func TestGroupIntroduceAll(t *testing.T) {
 	k := New(runner.NewFake())
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Persona: "a"})
 	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Persona: "b"})
 	k.CreateGroup("team", []addr.Address{a, b}, true) // introduce all
@@ -167,6 +173,7 @@ func TestGroupIntroduceAll(t *testing.T) {
 func TestStartRoot(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	if err := k.StartRoot("/tmp/x"); err != nil {
 		t.Fatalf("StartRoot: %v", err)
 	}
@@ -184,6 +191,7 @@ func TestStartRoot(t *testing.T) {
 
 func TestIntroduceRootOnly(t *testing.T) {
 	k := New(runner.NewFake())
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	if err := k.Introduce("0.1", "0.2", "0.3"); !errors.Is(err, ErrNotAllowed) {
 		t.Fatalf("got %v want ErrNotAllowed", err)
 	}
@@ -266,6 +274,7 @@ func TestSendHealsWithFreshFallback(t *testing.T) {
 func TestSendLiveBubbleNoRelaunch(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
 	k.EnsureAlive(a) // page in first
 	n0 := len(fr.Launches)
@@ -282,6 +291,7 @@ func TestSendLiveBubbleNoRelaunch(t *testing.T) {
 func TestSpawnGrantDepthOne(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 
 	// root spawns a manager WITH the grant
 	mgr, err := k.SpawnUnder(addr.Root, addr.Root, "mgr", "/tmp/mgr", runner.SpawnOpts{Persona: "mgr", GrantSpawn: true})
@@ -311,6 +321,7 @@ func TestSpawnGrantDepthOne(t *testing.T) {
 func TestSpawnPassesModel(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	a, err := k.SpawnUnder(addr.Root, addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w", Model: "opus"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
@@ -327,6 +338,7 @@ func TestSpawnPassesModel(t *testing.T) {
 func TestDeleteBubbleSubtree(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	parent, _ := k.Spawn(addr.Root, "parent", "/tmp/p", runner.SpawnOpts{Persona: "parent"})       // 0.1
 	child, _ := k.SpawnUnder(addr.Root, parent, "child", "/tmp/c", runner.SpawnOpts{Persona: "c"}) // 0.1.1
 	other, _ := k.Spawn(addr.Root, "other", "/tmp/o", runner.SpawnOpts{Persona: "other"})          // 0.2
@@ -362,6 +374,7 @@ func TestDeleteBubbleSubtree(t *testing.T) {
 // TestDeleteGroupWithMembers: deleteMembers=true removes the member bubbles too.
 func TestDeleteGroupWithMembers(t *testing.T) {
 	k := New(runner.NewFake())
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Persona: "a"})
 	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Persona: "b"})
 	k.CreateGroup("team", []addr.Address{a, b}, false)
@@ -385,6 +398,7 @@ func TestDeleteGroupWithMembers(t *testing.T) {
 func TestMemBudgetEviction(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 	k.MemBudget = 1000 // bytes (tiny, for the test)
 	k.RelaunchProbe = 0
 
@@ -432,6 +446,7 @@ func TestMemBudgetEviction(t *testing.T) {
 func TestLazySpawnColdUntilUsed(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 
 	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w", Goal: "do the thing"})
 	if k.IsHot(a) {
@@ -468,6 +483,7 @@ func TestLazySpawnColdUntilUsed(t *testing.T) {
 func TestNonUrgentBootsFreshBubble(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 
 	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Name: "w", Goal: "do the thing"})
 
@@ -528,6 +544,7 @@ func TestNonUrgentPoolsPagedOutBubble(t *testing.T) {
 func TestNonUrgentDeliversToHotBubble(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 
 	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
 	k.EnsureAlive(a) // it's hot (running)
@@ -580,6 +597,7 @@ func TestResumeUsesCurrentSessionID(t *testing.T) {
 func TestEditDeleteBySubtreeOnly(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 
 	mgr, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/m", runner.SpawnOpts{Name: "mgr", GrantSpawn: true}) // 0.1
 	w1, _ := k.Spawn(mgr, "", "/tmp/w1", runner.SpawnOpts{Name: "w1"})                                          // 0.1.1
@@ -641,11 +659,119 @@ func TestEditDeleteBySubtreeOnly(t *testing.T) {
 	}
 }
 
+// TestDeletePurgesContacts: deleting a bubble removes it from EVERY other
+// bubble's contacts, so it can't linger as a nameless ghost (the zombie-contacts
+// bug). Also verifies Contacts filters out any address with no registry entry.
+func TestDeletePurgesContacts(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
+
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Name: "b"})
+	k.Introduce(addr.Root, a, b) // a<->b mutual contacts
+
+	if !contains(k.Contacts(a), b) {
+		t.Fatal("a should have b as a contact after introduce")
+	}
+	k.DeleteBubble(b)
+	if contains(k.Contacts(a), b) {
+		t.Fatalf("deleted bubble must be purged from a's contacts, got %v", k.Contacts(a))
+	}
+	// even a hand-injected stale cap edge is filtered because b has no registry entry
+	k.Caps.AddContact(a, b)
+	if contains(k.Contacts(a), b) {
+		t.Fatal("Contacts must filter addresses with no registry entry (ghost)")
+	}
+}
+
+// TestForget: a bubble can drop a contact from its own list; root is never
+// forgettable.
+func TestForget(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Name: "b"})
+	k.Introduce(addr.Root, a, b)
+
+	if err := k.Forget(a, b); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if contains(k.Contacts(a), b) {
+		t.Fatal("forgotten contact should be gone from a")
+	}
+	if !contains(k.Contacts(b), a) { // one-directional: b still keeps a
+		t.Fatal("forget should only drop the caller's edge, not the reverse")
+	}
+	if err := k.Forget(a, addr.Root); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("root must not be forgettable, got %v", err)
+	}
+}
+
+// TestEvictIdle: a session with no output past IdleTimeout is paged out; an
+// actively-working one (recent output) stays hot.
+func TestEvictIdle(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
+	k.IdleTimeout = 10 * time.Minute
+	k.RelaunchProbe = 0
+
+	idle, _ := k.Spawn(addr.Root, "idle", "/tmp/i", runner.SpawnOpts{Name: "idle"})
+	busy, _ := k.Spawn(addr.Root, "busy", "/tmp/b", runner.SpawnOpts{Name: "busy"})
+	k.EnsureAlive(idle)
+	k.EnsureAlive(busy)
+	fr.Session(idle).SetLastActivity(time.Now().Add(-30 * time.Minute)) // silent for 30m
+	fr.Session(busy).SetLastActivity(time.Now())                        // just produced output
+
+	k.EvictIdle()
+	if k.IsHot(idle) {
+		t.Fatal("an idle session (no output for 30m) should page out")
+	}
+	if !k.IsHot(busy) {
+		t.Fatal("an actively-working session should stay hot")
+	}
+	if _, ok := k.Reg.Get(idle); !ok {
+		t.Fatal("paged-out idle bubble keeps its record (resumes on use)")
+	}
+}
+
+// TestSampleUsage: reports mem + CPU for live workers, excludes root and cold.
+func TestSampleUsage(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Name: "worker-a"})
+	k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Name: "b"}) // stays cold
+	k.EnsureAlive(a)
+	fr.Session(a).SetMem(500)
+	fr.Session(a).SetCPU(3 * time.Second)
+
+	u := k.SampleUsage()
+	if len(u) != 1 {
+		t.Fatalf("only the live worker should be sampled, got %d", len(u))
+	}
+	if u[0].Addr != a || u[0].Name != "worker-a" || u[0].Mem != 500 || u[0].CPU != 3*time.Second {
+		t.Fatalf("usage = %+v", u[0])
+	}
+}
+
+func contains(xs []addr.Address, x addr.Address) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
+}
+
 // TestSpawnNameDescription: the new spawn sets Name + Goal (initial instruction);
 // Label() prefers Name; a legacy bubble with only Persona falls back to Persona.
 func TestSpawnNameDescription(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
+	k.RelaunchProbe = 0 // keep fresh-launch probe out of the test path
 
 	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "support", Goal: "triage the tickets"})
 	b, _ := k.Reg.Get(a)

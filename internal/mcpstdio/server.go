@@ -134,6 +134,11 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolOK(msg.ID, "(no sent messages)")
 		}
 		return toolOK(msg.ID, strings.Join(st, "\n"))
+	case "forget":
+		if err := s.B.Forget(s.Self, arg("addr")); err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "forgot "+arg("addr"))
 	case "spawn":
 		if !s.Spawnable {
 			return errResp(msg.ID, -32601, "tool not available: spawn")

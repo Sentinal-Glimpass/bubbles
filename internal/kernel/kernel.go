@@ -49,6 +49,11 @@ type Kernel struct {
 	// least-recently-used bubbles page out until it fits. 0 = unlimited.
 	MemBudget int64
 
+	// IdleTimeout pages out a session that has produced no output for this long
+	// (it's genuinely idle, not mid-work). Its state survives via --resume, so it
+	// wakes on next use. 0 = never page out on idleness alone (budget only).
+	IdleTimeout time.Duration
+
 	runner   runner.Runner
 	smu      sync.Mutex
 	sessions map[addr.Address]runner.Session
@@ -139,6 +144,76 @@ func (k *Kernel) EnforceBudget() {
 	}
 }
 
+// EvictIdle pages out live worker sessions that have produced no output for
+// longer than IdleTimeout — genuinely idle sessions (sitting at a prompt), as
+// opposed to ones actively working (which stream output). Their conversation
+// survives via --resume, so they wake on next use. Root is never touched. This
+// keeps the resident set to sessions that are actually doing something, instead
+// of holding every session hot until the memory budget forces eviction.
+func (k *Kernel) EvictIdle() {
+	if k.IdleTimeout <= 0 {
+		return
+	}
+	cutoff := k.clockNow().Add(-k.IdleTimeout)
+	k.smu.Lock()
+	var idle []addr.Address
+	for a, s := range k.sessions {
+		if a == addr.Root || s == nil || !s.Alive() {
+			continue
+		}
+		if s.LastActivity().Before(cutoff) {
+			idle = append(idle, a)
+		}
+	}
+	for _, a := range idle {
+		delete(k.sessions, a)
+	}
+	k.smu.Unlock()
+	for _, a := range idle {
+		_ = k.runner.Kill(a) // page out; registry + session id persist -> resumes on use
+	}
+}
+
+// Usage is a per-session resource snapshot for the dashboard.
+type Usage struct {
+	Addr addr.Address
+	Name string
+	Mem  uint64        // resident bytes
+	CPU  time.Duration // cumulative CPU consumed
+}
+
+// SampleUsage returns a resource snapshot of every live worker session (root
+// excluded). CPU is cumulative; the caller diffs successive samples over wall
+// time to get a percentage. Measuring is done outside the session lock.
+func (k *Kernel) SampleUsage() []Usage {
+	k.smu.Lock()
+	type ent struct {
+		a addr.Address
+		s runner.Session
+	}
+	var live []ent
+	for a, s := range k.sessions {
+		if a == addr.Root || s == nil || !s.Alive() {
+			continue
+		}
+		live = append(live, ent{a, s})
+	}
+	k.smu.Unlock()
+
+	out := make([]Usage, 0, len(live))
+	for _, e := range live {
+		name := e.a.String()
+		if b, ok := k.Reg.Get(e.a); ok {
+			name = b.Label()
+		}
+		out = append(out, Usage{Addr: e.a, Name: name, Mem: e.s.MemBytes(), CPU: e.s.CPUTime()})
+	}
+	return out
+}
+
+// clockNow returns the wall clock (indirected so tests could stub it if needed).
+func (k *Kernel) clockNow() time.Time { return time.Now() }
+
 func (k *Kernel) setSession(a addr.Address, s runner.Session) {
 	k.smu.Lock()
 	k.sessions[a] = s
@@ -200,18 +275,40 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 // pooled message goes unanswered. The memory budget keeps the resident set
 // bounded as bubbles rotate through to drain.
 func (k *Kernel) DrainInboxes() {
+	type job struct {
+		a addr.Address
+		n int
+	}
+	var jobs []job
 	for _, b := range k.Reg.All() {
 		if b.Addr.IsRoot() {
 			continue
 		}
-		n := k.Store.UnreadCount(b.Addr)
-		if n == 0 {
-			continue
-		}
-		if s := k.EnsureAlive(b.Addr); s != nil {
-			_, _ = s.Write([]byte(formatDrain(n)))
+		if n := k.Store.UnreadCount(b.Addr); n > 0 {
+			jobs = append(jobs, job{b.Addr, n})
 		}
 	}
+	if len(jobs) == 0 {
+		return
+	}
+	// Wake mailed bubbles with bounded concurrency, so a large fleet's drain
+	// finishes in seconds rather than paging bubbles in one-at-a-time (each cold
+	// resume costs the relaunch probe + claude startup).
+	const workers = 4
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j job) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if s := k.EnsureAlive(j.a); s != nil {
+				_, _ = s.Write([]byte(formatDrain(j.n)))
+			}
+		}(j)
+	}
+	wg.Wait()
 }
 
 func formatDrain(n int) string {
@@ -267,6 +364,13 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	if err != nil {
 		return nil
 	}
+	if k.RelaunchProbe > 0 {
+		time.Sleep(k.RelaunchProbe) // a launch that dies at once (bad dir/args) shouldn't be handed back as a live PTY
+		if !sess.Alive() {
+			_ = sess.Close()
+			return nil
+		}
+	}
 	k.setSession(a, sess)
 	k.touch(a)
 	k.EnforceBudget()
@@ -308,9 +412,31 @@ func (k *Kernel) Inbox(owner addr.Address) []string {
 	return out
 }
 
-// Contacts returns who owner may message.
+// Contacts returns who owner may message, filtered to bubbles that still exist
+// (root always qualifies). This is belt-and-suspenders against a stale capability
+// edge ever surfacing a deleted bubble as a ghost contact.
 func (k *Kernel) Contacts(owner addr.Address) []addr.Address {
-	return k.Caps.Contacts(owner)
+	var out []addr.Address
+	for _, c := range k.Caps.Contacts(owner) {
+		if c.IsRoot() {
+			out = append(out, c)
+			continue
+		}
+		if _, ok := k.Reg.Get(c); ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Forget drops one of owner's contacts so it can no longer send to it (root is
+// never removable). Used by the forget() tool for contact-list hygiene.
+func (k *Kernel) Forget(owner, contact addr.Address) error {
+	if contact.IsRoot() {
+		return ErrNotAllowed
+	}
+	k.Caps.RemoveContact(owner, contact)
+	return nil
 }
 
 // SyncSessionIDs refreshes each bubble's stored SessionID from its live session
@@ -441,8 +567,10 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 		k.Reg.Remove(v)
 		k.smu.Lock()
 		delete(k.sessions, v)
+		delete(k.lastUsed, v)
 		k.smu.Unlock()
 		k.Groups.PurgeMember(v)
+		k.Caps.Purge(v) // drop it from EVERY bubble's contacts, so no ghost lingers
 	}
 	return victims
 }
@@ -472,8 +600,7 @@ func (k *Kernel) EditBy(by, a addr.Address, name, model, description string) err
 	if by != addr.Root && !by.IsAncestorOf(a) {
 		return ErrNotAllowed
 	}
-	b, ok := k.Reg.Get(a)
-	if !ok {
+	if _, ok := k.Reg.Get(a); !ok {
 		return fmt.Errorf("kernel: no bubble at %s", a)
 	}
 	if name != "" {
@@ -483,7 +610,7 @@ func (k *Kernel) EditBy(by, a addr.Address, name, model, description string) err
 		k.Reg.SetModel(a, model)
 	}
 	if description != "" {
-		b.Goal = description
+		k.Reg.SetGoal(a, description)
 	}
 	return nil
 }

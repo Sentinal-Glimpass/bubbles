@@ -563,3 +563,38 @@ func TestEditGroupMembership(t *testing.T) {
 		t.Fatalf("team members = %v want both 0.1 and 0.2", g.Members)
 	}
 }
+
+func TestHumanBytes(t *testing.T) {
+	cases := map[uint64]string{
+		512:              "512B",
+		2048:             "2K",
+		5 * 1024 * 1024:  "5M",
+		3 << 30:          "3.0G",
+	}
+	for in, want := range cases {
+		if got := humanBytes(in); got != want {
+			t.Errorf("humanBytes(%d) = %q want %q", in, got, want)
+		}
+	}
+}
+
+func TestUsagePanelAndFlashRender(t *testing.T) {
+	k := newKernelWith(t, "scout")
+	m := New(k)
+	m.BaseDir = t.TempDir()
+	m.width = 120
+	m.usage = UsageMsg{TotalMem: 3 << 30, TotalCPU: 145, Hot: 2, Top: []UsageRow{
+		{Name: "builder", Mem: 1 << 30, CPU: 82},
+		{Name: "scout", Mem: 600 << 20, CPU: 40},
+	}}
+	m.Flash = "couldn't launch 0.1.4"
+
+	out := m.View()
+	for _, want := range []string{"RESOURCES", "CPU 145%", "builder", "82%", "couldn't launch 0.1.4"} {
+		if !bytesContains(out, want) {
+			t.Fatalf("view missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func bytesContains(s, sub string) bool { return bytes.Contains([]byte(s), []byte(sub)) }

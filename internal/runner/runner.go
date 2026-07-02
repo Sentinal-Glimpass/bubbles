@@ -2,7 +2,11 @@
 // kernel never depends on real claude. LocalRunner/SSHRunner come in Plan 2.
 package runner
 
-import "github.com/Sentinal-Glimpass/bubbles/internal/addr"
+import (
+	"time"
+
+	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
+)
 
 // SpawnOpts configures a launched session.
 type SpawnOpts struct {
@@ -24,8 +28,10 @@ const DefaultModel = "sonnet"
 type Session interface {
 	Write(p []byte) (int, error)
 	Close() error
-	Alive() bool     // false once the underlying process has exited (for lazy self-heal)
-	MemBytes() uint64 // current resident memory of this session (0 = unknown); drives budget packing
+	Alive() bool         // false once the underlying process has exited (for lazy self-heal)
+	MemBytes() uint64    // current resident memory of this session (0 = unknown); drives budget packing
+	CPUTime() time.Duration // cumulative CPU consumed by this session (for the usage dashboard)
+	LastActivity() time.Time // when this session last produced output (idle detection); zero = unknown
 }
 
 // Runner launches and kills sessions by address.

@@ -13,6 +13,7 @@ type Backend interface {
 	Spawn(by, name, description, dir, model string) (string, error)
 	Edit(by, addr, name, description, model string) error
 	Delete(by, addr string) (int, error) // returns how many bubbles were removed (target + subtree)
+	Forget(by, addr string) error        // drop a contact from the caller's own list
 }
 
 // Tool is an MCP tool definition advertised by tools/list.
@@ -65,6 +66,18 @@ func (s *Server) tools() []Tool {
 			Name:        "status",
 			Description: "Check the messages you've SENT: delivered / read, no reply / replied. Use before re-sending so you don't nag someone who already saw it.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "forget",
+			Description: "Remove an address from YOUR contacts (you'll no longer be able to message it). Use to tidy up contacts you no longer need. You can't forget root (\"0\").",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"addr": map[string]any{
+					"type":        "string",
+					"description": "The contact address to drop, e.g. \"0.2\".",
+				}},
+				"required": []string{"addr"},
+			},
 		},
 	}
 	if s.Spawnable {

@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -62,7 +64,8 @@ func runApp() {
 	lr.AllowAll = &allowAll
 	lr.MemMaxMB = 0 // no per-session hard cap (it was killing legit busy sessions); each runs in its own cgroup scope for measurement, bounded only by the global budget below
 	k := kernel.New(lr)
-	k.MemBudget = 45 << 30 // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
+	k.MemBudget = 45 << 30       // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
+	k.IdleTimeout = 30 * time.Minute // page out sessions silent (no output) this long; they resume on next use
 	lr.MCPConfig = func(a addr.Address) string {
 		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a))
 	}
@@ -77,6 +80,13 @@ func runApp() {
 			k.EnforceBudget()
 		}
 	}()
+	go func() { // periodic idle sweep: page out sessions that have gone quiet
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			k.EvictIdle()
+		}
+	}()
 	go func() { // periodic inbox drain: deliver pooled (non-urgent) messages so none go unanswered
 		t := time.NewTicker(time.Duration(messagePollMinutes()) * time.Minute)
 		defer t.Stop()
@@ -84,6 +94,11 @@ func runApp() {
 			k.DrainInboxes()
 		}
 	}()
+
+	// Resource sampler: feeds the dashboard's top-right panel. It sends to
+	// whichever TUI program is currently running (nil while diving into a bubble).
+	var curProg atomic.Pointer[tea.Program]
+	go runSampler(k, &curProg)
 
 	ln, err := ipc.Serve(sock, func(r ipc.Request) ipc.Reply { return handleIPC(k, r) })
 	if err != nil {
@@ -99,12 +114,17 @@ func runApp() {
 	m.BaseDir = baseDir
 	m.Marks = marks
 	m.AllowAll = &allowAll
+	// Persist promptly whenever the fleet changes (incl. agent-driven spawn/edit/
+	// delete over IPC), so nothing is lost if the daemon dies before the next dive.
+	m.OnPersist = func() { k.SyncSessionIDs(); _ = saveFleet(baseDir, k, marks) }
 	for {
 		p := tea.NewProgram(m, tea.WithAltScreen())
+		curProg.Store(p)
 		k.Bus.Subscribe(addr.Root, func(msg bus.Message) {
 			p.Send(tui.PingMsg{From: msg.From, Subject: msg.Subject})
 		})
 		final, err := p.Run()
+		curProg.Store(nil)
 		if err != nil {
 			fatal(err)
 		}
@@ -121,12 +141,71 @@ func runApp() {
 			return // --local: actually quit
 		}
 		// Dive loop: keep switching bubble-to-bubble until we return to fleet.
+		flash := ""
 		for sel != "" {
-			sel = diveInto(k, sel, marks)
+			next, launched := diveInto(k, sel, marks)
+			if !launched {
+				flash = "⚠ couldn't launch " + sel.String() + " — its folder may be missing; check .bubbles/daemon.log"
+			}
+			sel = next
 		}
 		k.SyncSessionIDs()               // capture any in-session /resume before persisting
 		_ = saveFleet(baseDir, k, marks) // persist anything spawned during the dive
 		m = prev.Refreshed()             // back to fleet: same expand state + cursor where we left
+		m.Flash = flash
+	}
+}
+
+// runSampler polls per-session resource use every couple of seconds, turns the
+// cumulative CPU counters into a live percentage (delta over wall time), ranks
+// the busiest bubbles, and pushes a snapshot to the current TUI program.
+func runSampler(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program]) {
+	type prevSample struct {
+		cpu time.Duration
+		at  time.Time
+	}
+	prev := map[addr.Address]prevSample{}
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		prog := curProg.Load()
+		samples := k.SampleUsage()
+		now := time.Now()
+		var totalMem uint64
+		var totalCPU float64
+		seen := map[addr.Address]bool{}
+		rows := make([]tui.UsageRow, 0, len(samples))
+		for _, s := range samples {
+			seen[s.Addr] = true
+			totalMem += s.Mem
+			pct := 0.0
+			if p, ok := prev[s.Addr]; ok {
+				if dt := now.Sub(p.at).Seconds(); dt > 0 {
+					pct = (s.CPU - p.cpu).Seconds() / dt * 100
+				}
+			}
+			prev[s.Addr] = prevSample{s.CPU, now}
+			totalCPU += pct
+			rows = append(rows, tui.UsageRow{Name: s.Name, Mem: s.Mem, CPU: pct})
+		}
+		for a := range prev { // forget dead sessions so the map doesn't grow
+			if !seen[a] {
+				delete(prev, a)
+			}
+		}
+		if prog == nil {
+			continue // nobody viewing (mid-dive): still refresh prev, just don't send
+		}
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].CPU != rows[j].CPU {
+				return rows[i].CPU > rows[j].CPU
+			}
+			return rows[i].Mem > rows[j].Mem
+		})
+		if len(rows) > 5 {
+			rows = rows[:5]
+		}
+		prog.Send(tui.UsageMsg{TotalMem: totalMem, TotalCPU: totalCPU, Hot: len(samples), Top: rows})
 	}
 }
 
@@ -160,7 +239,14 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 		dir := r.Dir
 		if dir == "" {
 			dir = filepath.Join(defaultWorkspace(), r.Name) // downstream of launch dir
-			_ = os.MkdirAll(dir, 0o755)
+		} else if !filepath.IsAbs(dir) {
+			dir = filepath.Join(defaultWorkspace(), dir) // resolve a relative dir against the workspace
+		}
+		// ALWAYS ensure the dir exists — a spawn whose folder was never created
+		// would fail to launch (claude can't chdir), which shows up as a bubble
+		// that silently won't open on Enter.
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return ipc.Reply{OK: false, Err: "cannot create dir " + dir + ": " + err.Error()}
 		}
 		a, err := k.Spawn(from, "", dir, runner.SpawnOpts{Name: r.Name, Goal: r.Description, Model: r.Model})
 		if err != nil {
@@ -178,6 +264,11 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}
 		return ipc.Reply{OK: true, Addr: r.Addr, ID: len(victims)} // ID = removed count
+	case "forget":
+		if err := k.Forget(from, addr.Address(r.Addr)); err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: r.Addr}
 	default:
 		return ipc.Reply{OK: false, Err: "unknown op: " + r.Op}
 	}
@@ -226,11 +317,11 @@ func mcpConfigJSON(exe, sock string, a addr.Address, spawnable bool) string {
 // fleet, or the address of another bubble to switch directly into (Ctrl-Q num).
 // EnsureAlive heals a dead session first, so diving into a crashed bubble (or
 // one whose resume id vanished) transparently relaunches it.
-func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) addr.Address {
+func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (next addr.Address, launched bool) {
 	sess := k.EnsureAlive(a)
 	ps, ok := sess.(runner.PTYSession)
 	if !ok || ps == nil {
-		return ""
+		return "", false // launch failed (bad dir/args, crashed on boot) — caller surfaces it
 	}
 	f := ps.PTY()
 
@@ -281,17 +372,17 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) addr
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil || n == 0 {
-			return ""
+			return "", true
 		}
 		b := buf[0]
 		if armed {
 			armed = false
 			switch {
 			case b == leaderByte: // Ctrl-\ Ctrl-\ -> fleet
-				return ""
+				return "", true
 			case b >= '0' && b <= '9':
 				if dest := markAction(marks, int(b-'0'), a); dest != "" {
-					return dest // switch into the bound bubble
+					return dest, true // switch into the bound bubble
 				}
 			default:
 				f.Write([]byte{b}) // leader + other key: just send the key

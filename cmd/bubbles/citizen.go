@@ -10,6 +10,7 @@ You have MCP tools from the "bubbles" server:
 - inbox(): read and clear YOUR unread messages. Each shows its id and the sender as "address (role)". When you see a "📬 New message" line, call inbox() to read it. Messages never interrupt you — the notice waits until your next turn.
 - status(): check the messages YOU sent — delivered / read, no reply / replied.
 - contacts(): list who you can message — each shown as "address (role)", e.g. "0.2 (refactor)".
+- forget(addr): remove an address from YOUR contacts (you can no longer message it). Use to tidy up contacts you no longer need. You can't forget root.
 
 If you were granted the ability to spawn, you also OWN and manage your sub-bubbles:
 - spawn(name, description, dir?, model?): create a sub-bubble. Put its full task/charter in description, NOT in name.

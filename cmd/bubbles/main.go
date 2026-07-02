@@ -179,3 +179,14 @@ func (b *ipcBackend) Delete(by, addr string) (int, error) {
 	}
 	return rep.ID, nil // ID doubles as the removed-count for delete
 }
+
+func (b *ipcBackend) Forget(by, addr string) error {
+	rep, err := b.c.Do(ipc.Request{Op: "forget", From: by, Addr: addr})
+	if err != nil {
+		return err
+	}
+	if !rep.OK {
+		return errors.New(rep.Err)
+	}
+	return nil
+}

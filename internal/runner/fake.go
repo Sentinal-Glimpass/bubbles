@@ -2,6 +2,7 @@ package runner
 
 import (
 	"sync"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 )
@@ -11,8 +12,38 @@ type FakeSession struct {
 	mu      sync.Mutex
 	written []byte
 	closed  bool
-	dead    bool   // simulate a crashed process (Alive() -> false)
-	mem     uint64 // simulated resident memory (tests set it)
+	dead    bool          // simulate a crashed process (Alive() -> false)
+	mem     uint64        // simulated resident memory (tests set it)
+	cpu     time.Duration // simulated cumulative CPU (tests set it)
+	lastAct time.Time     // simulated last-activity stamp (tests set it)
+}
+
+// CPUTime returns the simulated cumulative CPU.
+func (s *FakeSession) CPUTime() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cpu
+}
+
+// SetCPU sets the simulated cumulative CPU (test helper).
+func (s *FakeSession) SetCPU(d time.Duration) {
+	s.mu.Lock()
+	s.cpu = d
+	s.mu.Unlock()
+}
+
+// LastActivity returns the simulated last-activity time (defaults to now).
+func (s *FakeSession) LastActivity() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastAct
+}
+
+// SetLastActivity sets the simulated last-activity time (test helper).
+func (s *FakeSession) SetLastActivity(t time.Time) {
+	s.mu.Lock()
+	s.lastAct = t
+	s.mu.Unlock()
 }
 
 // MemBytes returns the simulated resident memory.
@@ -92,7 +123,7 @@ func (r *FakeRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Launches = append(r.Launches, FakeLaunch{Addr: a, Dir: dir, Opts: opts})
-	s := &FakeSession{}
+	s := &FakeSession{lastAct: time.Now()} // fresh sessions look active until a test ages them
 	if opts.Resume && r.FailResume {
 		s.dead = true // the resumed conversation no longer exists -> process exits at once
 	}

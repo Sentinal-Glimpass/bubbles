@@ -16,11 +16,74 @@ var (
 	pingBlink  = lipgloss.NewStyle().Reverse(true).Bold(true)
 )
 
+var (
+	panelStyle = lipgloss.NewStyle().Faint(true)
+	panelHead  = lipgloss.NewStyle().Bold(true)
+	flashStyle = lipgloss.NewStyle().Reverse(true).Bold(true)
+)
+
 func onOff(b bool) string {
 	if b {
 		return "ON"
 	}
 	return "OFF"
+}
+
+// humanBytes renders a byte count compactly: 900K, 4.2M, 1.1G.
+func humanBytes(b uint64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1fG", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.0fM", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.0fK", float64(b)/(1<<10))
+	default:
+		return fmt.Sprintf("%dB", b)
+	}
+}
+
+// usagePanel builds the right-hand resource block: totals plus the top few
+// bubbles by CPU. Empty when there's nothing live to show.
+func usagePanel(u Model) []string {
+	if u.usage.Hot == 0 {
+		return nil
+	}
+	lines := []string{
+		panelHead.Render(fmt.Sprintf("RESOURCES · %d hot", u.usage.Hot)),
+		panelStyle.Render(fmt.Sprintf("RAM %s · CPU %.0f%%", humanBytes(u.usage.TotalMem), u.usage.TotalCPU)),
+	}
+	for _, r := range u.usage.Top {
+		name := r.Name
+		if len(name) > 12 {
+			name = name[:12]
+		}
+		lines = append(lines, panelStyle.Render(fmt.Sprintf("%-12s %6s %4.0f%%", name, humanBytes(r.Mem), r.CPU)))
+	}
+	return lines
+}
+
+// overlayTopRight places panel lines flush-right over the top lines of body,
+// extending body if it has fewer lines than the panel. Widths are measured with
+// lipgloss so ANSI styling doesn't skew alignment.
+func overlayTopRight(body string, panel []string, width int) string {
+	if len(panel) == 0 || width <= 0 {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	for len(lines) < len(panel) {
+		lines = append(lines, "")
+	}
+	for i, p := range panel {
+		pw := lipgloss.Width(p)
+		bw := lipgloss.Width(lines[i])
+		gap := width - pw - bw
+		if gap < 2 { // don't collide with a wide tree row
+			gap = 2
+		}
+		lines[i] = lines[i] + strings.Repeat(" ", gap) + p
+	}
+	return strings.Join(lines, "\n")
 }
 
 // modelChoiceLabel renders the model cycle with the current choice bracketed,
@@ -94,7 +157,11 @@ func (m Model) View() string {
 	if m.AllowAll != nil && *m.AllowAll {
 		mode = "ALLOW-ALL (skip permissions)"
 	}
-	b.WriteString(titleStyle.Render("BUBBLES — fleet") + helpStyle.Render("   permissions: "+mode+" (ctrl+p)") + "\n\n")
+	b.WriteString(titleStyle.Render("BUBBLES — fleet") + helpStyle.Render("   permissions: "+mode+" (ctrl+p)") + "\n")
+	if m.Flash != "" {
+		b.WriteString(flashStyle.Render(" "+m.Flash+" ") + "\n")
+	}
+	b.WriteString("\n")
 
 	slotOf := map[addr.Address]int{}
 	for slot, a := range m.Marks {
@@ -260,5 +327,5 @@ func (m Model) View() string {
 	default:
 		b.WriteString(helpStyle.Render("↑/↓ move · →/← expand · enter dive · 0-9 jump · m+0-9 slot · n new · e edit · d delete · i introduce · g group · G del-group · ctrl+p perms · q quit") + "\n")
 	}
-	return b.String()
+	return overlayTopRight(b.String(), usagePanel(m), m.width)
 }
