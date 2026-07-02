@@ -6,8 +6,9 @@ import "github.com/Sentinal-Glimpass/bubbles/internal/addr"
 
 // SpawnOpts configures a launched session.
 type SpawnOpts struct {
-	Persona    string
-	Goal       string
+	Persona    string // legacy label; Name is preferred
+	Name       string // display name
+	Goal       string // initial instruction / charter (the first prompt)
 	Model      string // claude --model alias ("sonnet"/"opus"/"fable"); "" => sonnet
 	GrantSpawn bool   // root grants this bubble the spawn ability (depth 1: it can spawn, but its children cannot)
 	MemMaxMB   int    // per-bubble RAM ceiling in MiB (0 => runner default); the runaway dies alone at this cap

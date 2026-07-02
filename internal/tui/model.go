@@ -317,7 +317,7 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if a := r.addr; a != "" && !a.IsRoot() {
 			if b, ok := m.k.Reg.Get(a); ok {
 				m.editing, m.editAddr, m.editField = true, a, 0
-				m.editPersona, m.editModel, m.editGrant = b.Persona, b.Model, m.k.Caps.CanSpawn(a)
+				m.editPersona, m.editModel, m.editGrant = b.Label(), b.Model, m.k.Caps.CanSpawn(a)
 				if m.editModel == "" {
 					m.editModel = runner.DefaultModel
 				}
@@ -336,7 +336,7 @@ func (m Model) updateEditBubble(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		if p := strings.TrimSpace(m.editPersona); p != "" {
-			m.k.Reg.SetPersona(m.editAddr, p)
+			m.k.Reg.SetName(m.editAddr, p)
 		}
 		m.k.Reg.SetModel(m.editAddr, m.editModel)
 		if m.editGrant {
@@ -741,8 +741,8 @@ func (m Model) updateSpawnOptions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.spawnGrant = !m.spawnGrant // grant spawn ability (depth 1)
 	case "enter":
 		// root authorizes; the new bubble is attached under the selected parent
-		_, _ = m.k.SpawnUnder(addr.Root, m.pendingParent, m.pendingPersona, m.pendingDir,
-			runner.SpawnOpts{Persona: m.pendingPersona, Model: m.spawnModel, GrantSpawn: m.spawnGrant})
+		_, _ = m.k.SpawnUnder(addr.Root, m.pendingParent, "", m.pendingDir,
+			runner.SpawnOpts{Name: m.pendingPersona, Model: m.spawnModel, GrantSpawn: m.spawnGrant})
 		m.expanded[m.pendingParent] = true // reveal the new child
 		m.rows = m.fleetRows()
 		return m.clearSpawn(), nil

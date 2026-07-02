@@ -15,6 +15,7 @@ import (
 // bubbleRec is a persisted bubble (one entry in the fleet manifest).
 type bubbleRec struct {
 	Addr       string   `json:"addr"`
+	Name       string   `json:"name,omitempty"`
 	Persona    string   `json:"persona"`
 	Dir        string   `json:"dir"`
 	Parent     string   `json:"parent"`
@@ -58,7 +59,7 @@ func saveFleet(baseDir string, k *kernel.Kernel, marks map[int]addr.Address) err
 			cs = append(cs, c.String())
 		}
 		recs = append(recs, bubbleRec{
-			Addr: b.Addr.String(), Persona: b.Persona, Dir: b.Dir,
+			Addr: b.Addr.String(), Name: b.Name, Persona: b.Persona, Dir: b.Dir,
 			Parent: b.Parent.String(), Model: b.Model, Goal: b.Goal, SpawnDepth: k.Caps.SpawnDepth(b.Addr),
 			SessionID: b.SessionID, Contacts: cs,
 		})
@@ -117,7 +118,7 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 			continue
 		}
 		k.Reg.Restore(registry.Bubble{
-			Addr: addr.Address(r.Addr), Persona: r.Persona, Dir: r.Dir,
+			Addr: addr.Address(r.Addr), Name: r.Name, Persona: r.Persona, Dir: r.Dir,
 			Parent: addr.Address(r.Parent), Status: registry.Idle, Model: r.Model, Goal: r.Goal, SessionID: r.SessionID,
 		})
 		if r.SpawnDepth > 0 {

@@ -21,13 +21,23 @@ const (
 // Bubble is the live state of one agent in the fleet.
 type Bubble struct {
 	Addr      addr.Address
-	Persona   string
+	Name      string // display name (preferred); falls back to Persona when empty
+	Persona   string // legacy label (pre-Name); kept for backward compatibility
 	Status    Status
 	Parent    addr.Address
 	Dir       string
 	Model     string // claude --model alias ("" => default); persisted so a restart keeps it
-	Goal      string // initial prompt/charter, used on the bubble's first (lazy) launch
+	Goal      string // initial prompt/instruction, used on the bubble's first (lazy) launch
 	SessionID string // claude session id; "" until first launched (lazy), then set so it resumes
+}
+
+// Label is what to show for a bubble: its Name, or its legacy Persona if Name is
+// unset (so bubbles saved before the rename still display correctly).
+func (b *Bubble) Label() string {
+	if b.Name != "" {
+		return b.Name
+	}
+	return b.Persona
 }
 
 // Registry is the in-memory fleet state.
@@ -80,12 +90,12 @@ func (r *Registry) SetStatus(a addr.Address, s Status) {
 	}
 }
 
-// SetPersona renames a bubble (display + future launches).
-func (r *Registry) SetPersona(a addr.Address, persona string) {
+// SetName renames a bubble (display + future launches).
+func (r *Registry) SetName(a addr.Address, name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if b, ok := r.bubbles[a]; ok {
-		b.Persona = persona
+		b.Name = name
 	}
 }
 

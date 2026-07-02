@@ -20,7 +20,7 @@ func (f *fakeBackend) Send(from, to, subject, body string, replyTo int, urgent b
 func (f *fakeBackend) Contacts(owner string) []string        { return []string{"0", "0.2"} }
 func (f *fakeBackend) Inbox(owner string) []string           { return nil }
 func (f *fakeBackend) Status(owner string) []string          { return nil }
-func (f *fakeBackend) Spawn(by, p, d, model string) (string, error) { return "0.1.1", nil }
+func (f *fakeBackend) Spawn(by, n, desc, d, model string) (string, error) { return "0.1.1", nil }
 
 func TestServeFlow(t *testing.T) {
 	in := strings.NewReader(strings.Join([]string{

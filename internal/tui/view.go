@@ -67,8 +67,8 @@ func cursorLabel(m Model) string {
 		return "—"
 	}
 	label := a.String()
-	if b, ok := m.k.Reg.Get(a); ok && b.Persona != "" {
-		label += " (" + b.Persona + ")"
+	if b, ok := m.k.Reg.Get(a); ok && b.Label() != "" {
+		label += " (" + b.Label() + ")"
 	}
 	return label
 }
@@ -79,8 +79,8 @@ func (m Model) parentLabel() string {
 		return "root"
 	}
 	label := m.pendingParent.String()
-	if b, ok := m.k.Reg.Get(m.pendingParent); ok && b.Persona != "" {
-		label += " (" + b.Persona + ")"
+	if b, ok := m.k.Reg.Get(m.pendingParent); ok && b.Label() != "" {
+		label += " (" + b.Label() + ")"
 	}
 	return label
 }
@@ -131,7 +131,7 @@ func (m Model) View() string {
 		a := r.addr
 		persona := ""
 		if bub, ok := m.k.Reg.Get(a); ok {
-			persona = bub.Persona
+			persona = bub.Label()
 		}
 		status := "○" // cold: no live session (paged out / never launched)
 		if m.k.IsHot(a) {
@@ -187,7 +187,7 @@ func (m Model) View() string {
 	b.WriteString("\n")
 	switch {
 	case m.spawnStage == 1:
-		b.WriteString("new bubble under " + m.parentLabel() + " — persona: " + m.input + "▏\n")
+		b.WriteString("new bubble under " + m.parentLabel() + " — name: " + m.input + "▏\n")
 	case m.spawnStage == 2:
 		b.WriteString("bubble '" + m.pendingPersona + "' under " + m.parentLabel() + " — pick a folder (↑/↓, enter):\n")
 		for i, c := range m.folderChoices {
@@ -225,10 +225,10 @@ func (m Model) View() string {
 			return "  "
 		}
 		b.WriteString("edit " + m.editAddr.String() + " — ↑/↓ field · enter save · esc cancel:\n")
-		b.WriteString(sel(0) + "persona: " + m.editPersona + caret + "\n")
+		b.WriteString(sel(0) + "name: " + m.editPersona + caret + "\n")
 		b.WriteString(sel(1) + "model:   " + modelChoiceLabel(m.editModel) + "   (←/→)\n")
 		b.WriteString(sel(2) + "spawn grant (depth 1): " + onOff(m.editGrant) + "   (←/→ toggle)\n")
-		b.WriteString(helpStyle.Render("  persona/grant apply now; model applies on next relaunch") + "\n")
+		b.WriteString(helpStyle.Render("  name/grant apply now; model applies on next relaunch") + "\n")
 	case m.groupEdit:
 		g, _ := m.k.Groups.Get(m.groupEditName)
 		b.WriteString(fmt.Sprintf("edit group '%s' (%d members) — ↑/↓ move · enter add/remove a bubble (✓) · esc done\n",
@@ -236,8 +236,8 @@ func (m Model) View() string {
 	case m.delBubble != "":
 		n := descendantCount(m.k.Reg, m.delBubble)
 		label := m.delBubble.String()
-		if bub, ok := m.k.Reg.Get(m.delBubble); ok && bub.Persona != "" {
-			label += " (" + bub.Persona + ")"
+		if bub, ok := m.k.Reg.Get(m.delBubble); ok && bub.Label() != "" {
+			label += " (" + bub.Label() + ")"
 		}
 		sub := ""
 		if n > 0 {

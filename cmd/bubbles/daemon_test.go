@@ -59,7 +59,7 @@ func TestDaemonRelay(t *testing.T) {
 	if _, err := conn2.Write([]byte("n")); err != nil {
 		t.Fatalf("write keystroke: %v", err)
 	}
-	if !readContains(conn2, "persona", 6*time.Second) {
+	if !readContains(conn2, "name", 6*time.Second) {
 		t.Fatal("keystroke relay failed — app did not react to 'n'")
 	}
 

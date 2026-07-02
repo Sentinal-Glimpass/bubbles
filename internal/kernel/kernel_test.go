@@ -545,3 +545,30 @@ func TestResumeUsesCurrentSessionID(t *testing.T) {
 		t.Fatalf("SyncSessionIDs should refresh to %q, got %q", "resumed-xyz", b.SessionID)
 	}
 }
+
+// TestSpawnNameDescription: the new spawn sets Name + Goal (initial instruction);
+// Label() prefers Name; a legacy bubble with only Persona falls back to Persona.
+func TestSpawnNameDescription(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "support", Goal: "triage the tickets"})
+	b, _ := k.Reg.Get(a)
+	if b.Name != "support" || b.Goal != "triage the tickets" {
+		t.Fatalf("name/goal not set: name=%q goal=%q", b.Name, b.Goal)
+	}
+	if b.Label() != "support" {
+		t.Fatalf("Label should prefer Name, got %q", b.Label())
+	}
+	k.EnsureAlive(a) // first launch uses the description as the initial prompt
+	if last := fr.Launches[len(fr.Launches)-1]; last.Opts.Goal != "triage the tickets" {
+		t.Fatalf("first launch should carry the description as goal, got %+v", last.Opts)
+	}
+
+	// backward compat: a bubble with Persona but no Name shows Persona
+	c, _ := k.Spawn(addr.Root, "legacy", "/tmp/c", runner.SpawnOpts{Persona: "legacy"})
+	cb, _ := k.Reg.Get(c)
+	if cb.Name != "" || cb.Label() != "legacy" {
+		t.Fatalf("legacy bubble should fall back to Persona: Name=%q Label=%q", cb.Name, cb.Label())
+	}
+}

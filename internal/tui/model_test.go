@@ -329,7 +329,7 @@ func TestSpawnUnderSelectedBubble(t *testing.T) {
 	if !ok {
 		t.Fatal("nested bubble 0.1.1 not created")
 	}
-	if b.Parent != addr.Address("0.1") || b.Persona != "child" {
+	if b.Parent != addr.Address("0.1") || b.Label() != "child" {
 		t.Fatalf("0.1.1 = %+v want parent 0.1, persona child", b)
 	}
 }
@@ -519,8 +519,8 @@ func TestEditBubbleSettings(t *testing.T) {
 	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
 
 	b, _ := k.Reg.Get(addr.Address("0.1"))
-	if b.Persona != "boss" {
-		t.Fatalf("persona = %q want boss", b.Persona)
+	if b.Label() != "boss" {
+		t.Fatalf("name = %q want boss", b.Label())
 	}
 	if b.Model != "opus" {
 		t.Fatalf("model = %q want opus", b.Model)

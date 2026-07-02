@@ -156,8 +156,8 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 		out := make([]string, len(cs))
 		for i, c := range cs {
 			label := c.String()
-			if bub, ok := k.Reg.Get(c); ok && bub.Persona != "" {
-				label += " (" + bub.Persona + ")" // attach the persona so peers have names/roles
+			if bub, ok := k.Reg.Get(c); ok && bub.Label() != "" {
+				label += " (" + bub.Label() + ")" // attach the name so peers have names/roles
 			}
 			out[i] = label
 		}
@@ -165,10 +165,10 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 	case "spawn":
 		dir := r.Dir
 		if dir == "" {
-			dir = filepath.Join(defaultWorkspace(), r.Persona) // downstream of launch dir
+			dir = filepath.Join(defaultWorkspace(), r.Name) // downstream of launch dir
 			_ = os.MkdirAll(dir, 0o755)
 		}
-		a, err := k.Spawn(from, r.Persona, dir, runner.SpawnOpts{Persona: r.Persona, Model: r.Model})
+		a, err := k.Spawn(from, "", dir, runner.SpawnOpts{Name: r.Name, Goal: r.Description, Model: r.Model})
 		if err != nil {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}

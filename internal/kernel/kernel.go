@@ -161,7 +161,7 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 	}
 	fromName := ""
 	if b, ok := k.Reg.Get(from); ok {
-		fromName = b.Persona
+		fromName = b.Label()
 	}
 	id := k.Store.Append(inbox.Message{From: from, FromName: fromName, To: to, Subject: subject, Body: body, ReplyTo: replyTo})
 	k.Caps.AddContact(to, from) // reply grant: the recipient can always reply to whoever messaged it
@@ -238,7 +238,7 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	}
 	// Try to resume the existing conversation.
 	if b.SessionID != "" {
-		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
+		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
 			if k.RelaunchProbe > 0 {
 				time.Sleep(k.RelaunchProbe) // give a doomed resume time to exit
 			}
@@ -253,7 +253,7 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	}
 	// Fresh session with a new id, seeded with the persona and its charter/goal.
 	b.SessionID = newSessionID()
-	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Persona, Goal: b.Goal, Model: b.Model, SessionID: b.SessionID, Resume: false})
+	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Goal: b.Goal, Model: b.Model, SessionID: b.SessionID, Resume: false})
 	if err != nil {
 		return nil
 	}
@@ -276,8 +276,8 @@ func (k *Kernel) Status(from addr.Address) []string {
 			state = "replied"
 		}
 		to := m.To.String()
-		if b, ok := k.Reg.Get(m.To); ok && b.Persona != "" {
-			to += " (" + b.Persona + ")"
+		if b, ok := k.Reg.Get(m.To); ok && b.Label() != "" {
+			to += " (" + b.Label() + ")"
 		}
 		out = append(out, fmt.Sprintf("[%d] to %s — %q: %s", m.ID, to, m.Subject, state))
 	}
@@ -345,6 +345,7 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 		return "", err
 	}
 	b := k.Reg.Add(parent, persona, dir)
+	b.Name = opts.Name
 	b.Model = opts.Model
 	b.Goal = opts.Goal
 	// Lazy launch: NO session id and NO process yet. The bubble is a cold record
