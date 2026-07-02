@@ -270,6 +270,37 @@ func TestSendHealsWithFreshFallback(t *testing.T) {
 	}
 }
 
+// TestResumeFallbackOnLostSession: when --resume comes back alive but claude has
+// no record of the id ("No conversation found"), EnsureAlive falls back to a
+// FRESH session with a new id instead of leaving the bubble stuck on the error.
+func TestResumeFallbackOnLostSession(t *testing.T) {
+	fr := runner.NewFake()
+	fr.LostResume = true // any --resume reports "No conversation found" (but stays alive)
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Name: "w", Goal: "carry on"})
+	k.EnsureAlive(a) // first launch is fresh (LostResume only affects --resume)
+	b, _ := k.Reg.Get(a)
+	origID := b.SessionID
+	fr.Session(a).Die() // it pages out / crashes
+
+	s := k.EnsureAlive(a)
+	if s == nil || !s.Alive() {
+		t.Fatal("should have recovered with a live session")
+	}
+	last := fr.Launches[len(fr.Launches)-1]
+	if last.Opts.Resume {
+		t.Fatalf("a lost-session resume should fall back to a FRESH launch, got %+v", last.Opts)
+	}
+	if last.Opts.Goal != "carry on" {
+		t.Fatalf("fresh fallback should re-seed the goal, got %+v", last.Opts)
+	}
+	if b2, _ := k.Reg.Get(a); b2.SessionID == origID {
+		t.Fatalf("fresh fallback should assign a new session id, still %q", origID)
+	}
+}
+
 // TestSendLiveBubbleNoRelaunch: a live recipient is never relaunched.
 func TestSendLiveBubbleNoRelaunch(t *testing.T) {
 	fr := runner.NewFake()

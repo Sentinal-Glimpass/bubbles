@@ -16,6 +16,21 @@ type FakeSession struct {
 	mem     uint64        // simulated resident memory (tests set it)
 	cpu     time.Duration // simulated cumulative CPU (tests set it)
 	lastAct time.Time     // simulated last-activity stamp (tests set it)
+	output  string        // simulated recent output (tests set it)
+}
+
+// RecentOutput returns the simulated recent output.
+func (s *FakeSession) RecentOutput() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.output
+}
+
+// SetOutput sets the simulated recent output (test helper).
+func (s *FakeSession) SetOutput(o string) {
+	s.mu.Lock()
+	s.output = o
+	s.mu.Unlock()
 }
 
 // CPUTime returns the simulated cumulative CPU.
@@ -112,6 +127,7 @@ type FakeRunner struct {
 	mu         sync.Mutex
 	sessions   map[addr.Address]*FakeSession
 	FailResume bool         // when true, a Launch with Resume=true yields a dead session (simulates a missing session id)
+	LostResume bool         // when true, a Launch with Resume=true stays alive but reports "No conversation found" (claude has no record of the id)
 	Launches   []FakeLaunch // every Launch call, in order
 }
 
@@ -126,6 +142,9 @@ func (r *FakeRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session
 	s := &FakeSession{lastAct: time.Now()} // fresh sessions look active until a test ages them
 	if opts.Resume && r.FailResume {
 		s.dead = true // the resumed conversation no longer exists -> process exits at once
+	}
+	if opts.Resume && r.LostResume {
+		s.output = "No conversation found with session ID: " + opts.SessionID // claude has no record of it
 	}
 	r.sessions[a] = s
 	return s, nil

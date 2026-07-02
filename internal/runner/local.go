@@ -369,6 +369,14 @@ func (s *ptySession) LastActivity() time.Time {
 	return s.lastOut
 }
 
+// RecentOutput returns the session's recent output (the scrollback ring), used
+// to detect a --resume that failed with "No conversation found".
+func (s *ptySession) RecentOutput() string {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	return string(s.ring)
+}
+
 // CPUTime reports cumulative CPU consumed by the session. When it runs in its
 // own cgroup scope (the default) cpu.stat/usage_usec is exact and includes child
 // processes; otherwise it falls back to the main process's utime+stime.

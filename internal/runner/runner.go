@@ -28,10 +28,11 @@ const DefaultModel = "sonnet"
 type Session interface {
 	Write(p []byte) (int, error)
 	Close() error
-	Alive() bool         // false once the underlying process has exited (for lazy self-heal)
-	MemBytes() uint64    // current resident memory of this session (0 = unknown); drives budget packing
-	CPUTime() time.Duration // cumulative CPU consumed by this session (for the usage dashboard)
+	Alive() bool             // false once the underlying process has exited (for lazy self-heal)
+	MemBytes() uint64        // current resident memory of this session (0 = unknown); drives budget packing
+	CPUTime() time.Duration  // cumulative CPU consumed by this session (for the usage dashboard)
 	LastActivity() time.Time // when this session last produced output (idle detection); zero = unknown
+	RecentOutput() string    // recent output text (for detecting a failed --resume)
 }
 
 // Runner launches and kills sessions by address.

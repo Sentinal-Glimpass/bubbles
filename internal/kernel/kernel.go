@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -347,15 +348,20 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	if b.SessionID != "" {
 		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
 			if k.RelaunchProbe > 0 {
-				time.Sleep(k.RelaunchProbe) // give a doomed resume time to exit
+				time.Sleep(k.RelaunchProbe) // give a doomed resume time to exit / print its error
 			}
-			if sess.Alive() {
+			// A resume can fail two ways: the process exits (Alive false), or claude
+			// has no record of the id and prints "No conversation found" (e.g. the
+			// session was never persisted because the bubble stalled, or its working
+			// dir changed). Either way, fall through to a fresh session — which keeps
+			// the bubble's pending inbox messages (those live in our store).
+			if sess.Alive() && !resumeLost(sess) {
 				k.setSession(a, sess)
 				k.touch(a)
 				k.EnforceBudget() // page in -> may page out a colder bubble
 				return sess
 			}
-			_ = sess.Close() // resume failed (session id gone) -> fall through to fresh
+			_ = sess.Close()
 		}
 	}
 	// Fresh session with a new id, seeded with the persona and its charter/goal.
@@ -502,6 +508,14 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 		k.Caps.GrantSpawnDepth(b.Addr, d-1)
 	}
 	return b.Addr, nil
+}
+
+// resumeLost reports whether a --resume launch failed because claude has no
+// record of the session id (it prints "No conversation found ..."). Detected
+// from the session's recent output so we can fall back to a fresh session
+// instead of leaving the bubble stuck on the error.
+func resumeLost(s runner.Session) bool {
+	return strings.Contains(s.RecentOutput(), "No conversation found")
 }
 
 // newSessionID returns a random UUIDv4 string for tagging a claude session.
