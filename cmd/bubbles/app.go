@@ -72,7 +72,8 @@ func runApp() {
 	lr.MemMaxMB = 0 // no per-session hard cap (it was killing legit busy sessions); each runs in its own cgroup scope for measurement, bounded only by the global budget below
 	k := kernel.New(lr)
 	k.MemBudget = 45 << 30       // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
-	k.IdleTimeout = 30 * time.Minute // page out sessions silent (no output) this long; they resume on next use
+	k.IdleTimeout = 30 * time.Minute  // page out sessions silent (no output) this long; they resume on next use
+	k.TypingWindow = 10 * time.Second // hold a focused bubble's messages while you're typing; deliver once you pause this long
 	lr.MCPConfig = func(a addr.Address) string {
 		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a))
 	}
@@ -92,6 +93,13 @@ func runApp() {
 		defer t.Stop()
 		for range t.C {
 			k.EvictIdle()
+		}
+	}()
+	go func() { // deliver a held message to the focused bubble as soon as you stop typing
+		t := time.NewTicker(1 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			k.FlushHeldIfIdle()
 		}
 	}()
 	go func() { // periodic inbox drain: deliver pooled (non-urgent) messages so none go unanswered
@@ -386,6 +394,7 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (nex
 			return "", true
 		}
 		b := buf[0]
+		k.NoteKeystroke() // mark active typing so messages hold until you pause
 		if armed {
 			armed = false
 			switch {

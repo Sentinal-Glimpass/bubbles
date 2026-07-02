@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
@@ -61,22 +62,43 @@ type Kernel struct {
 	lastUsed map[addr.Address]int64 // logical-clock LRU stamp per bubble
 	clock    int64
 
-	focusMu sync.Mutex
-	focused addr.Address // the bubble the operator is dived into; its notifications are held so they don't interrupt typing
+	// TypingWindow is how long after a keystroke the operator counts as "actively
+	// typing" in the focused bubble (messages held so they don't submit a
+	// half-typed line). 0 => 10s default.
+	TypingWindow time.Duration
+
+	focusMu     sync.Mutex
+	focused     addr.Address // the bubble the operator is dived into
+	heldFlushed bool         // whether the current idle backlog has already been flushed
+	lastKey     atomic.Int64 // unixnano of the operator's last keystroke in the focused bubble
 }
 
-// SetFocus marks the bubble the operator is actively dived into. While a bubble
-// is focused, incoming-message notifications are NOT typed into its input (that
-// would collide with what the operator is typing and submit it); the messages
-// still land in the inbox and are flushed by UnsetFocus.
+// SetFocus marks the bubble the operator is actively dived into, and treats the
+// entry as a keystroke so an immediate arrival isn't dumped the instant you dive
+// in (it waits to see whether you start typing).
 func (k *Kernel) SetFocus(a addr.Address) {
+	k.lastKey.Store(time.Now().UnixNano())
 	k.focusMu.Lock()
-	k.focused = a
+	k.focused, k.heldFlushed = a, false
 	k.focusMu.Unlock()
 }
 
-// UnsetFocus clears focus and, if the just-left bubble accrued unread mail while
-// it was focused (suppressed), nudges it once so the agent picks the backlog up.
+// NoteKeystroke records an operator keystroke in the focused bubble (called per
+// key by the dive-in loop) so we can tell active typing from idle viewing.
+func (k *Kernel) NoteKeystroke() { k.lastKey.Store(time.Now().UnixNano()) }
+
+// typingActive reports whether the operator has typed within TypingWindow.
+func (k *Kernel) typingActive() bool {
+	w := k.TypingWindow
+	if w <= 0 {
+		w = 10 * time.Second
+	}
+	last := k.lastKey.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) < w
+}
+
+// UnsetFocus clears focus and, if the just-left bubble has unread mail, nudges it
+// once so the agent picks the backlog up.
 func (k *Kernel) UnsetFocus(a addr.Address) {
 	k.focusMu.Lock()
 	if k.focused == a {
@@ -85,6 +107,32 @@ func (k *Kernel) UnsetFocus(a addr.Address) {
 	k.focusMu.Unlock()
 	if n := k.Store.UnreadCount(a); n > 0 {
 		if s := k.session(a); s != nil && s.Alive() {
+			_, _ = s.Write([]byte(formatDrain(n)))
+		}
+	}
+}
+
+// FlushHeldIfIdle delivers the focused bubble's backlog once the operator stops
+// typing — so a message that arrived mid-keystroke shows up as soon as you pause,
+// not only when you leave. Called on a short ticker. It nudges at most once per
+// typing pause (heldFlushed), and does nothing while typing is active.
+func (k *Kernel) FlushHeldIfIdle() {
+	if k.typingActive() {
+		k.focusMu.Lock()
+		k.heldFlushed = false // typing resumed; a later pause may flush again
+		k.focusMu.Unlock()
+		return
+	}
+	k.focusMu.Lock()
+	foc := k.focused
+	if foc == "" || k.heldFlushed {
+		k.focusMu.Unlock()
+		return
+	}
+	k.heldFlushed = true
+	k.focusMu.Unlock()
+	if n := k.Store.UnreadCount(foc); n > 0 {
+		if s := k.session(foc); s != nil && s.Alive() {
 			_, _ = s.Write([]byte(formatDrain(n)))
 		}
 	}
@@ -291,10 +339,11 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 	//     pooled for the periodic DrainInboxes, so we don't wake a whole sleeping
 	//     fleet on every message.
 	// Either way the message is already safely in the inbox.
-	// While the operator is dived into the recipient, hold the notification: typing
-	// it in would interrupt what they're writing. It stays in the inbox and is
-	// flushed by UnsetFocus when they leave.
-	if k.isFocused(to) {
+	// While the operator is ACTIVELY TYPING in the recipient, hold the notification:
+	// typing it in would submit their half-written line. It stays in the inbox and
+	// is delivered as soon as they pause (FlushHeldIfIdle) or leave (UnsetFocus).
+	// If they're just idle-viewing the bubble, deliver normally so they see it.
+	if k.isFocused(to) && k.typingActive() {
 		return id, nil
 	}
 	if urgent {

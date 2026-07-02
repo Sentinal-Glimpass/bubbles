@@ -270,39 +270,60 @@ func TestSendHealsWithFreshFallback(t *testing.T) {
 	}
 }
 
-// TestFocusHoldsNotifications: while a bubble is focused (the operator is dived
-// in and typing), incoming messages are NOT injected into it (that would submit
-// the operator's half-typed line); they stay in the inbox and are flushed when
-// the operator leaves. DrainInboxes also skips the focused bubble.
-func TestFocusHoldsNotifications(t *testing.T) {
+// TestFocusHoldsWhileTyping: while the operator is ACTIVELY TYPING in a bubble,
+// incoming messages are NOT injected (that would submit their half-typed line);
+// they stay in the inbox and are flushed once typing pauses (FlushHeldIfIdle).
+func TestFocusHoldsWhileTyping(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
 	k.RelaunchProbe = 0
+	k.TypingWindow = time.Hour // treat the operator as continuously typing
 
 	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
 	k.EnsureAlive(a) // hot
-	k.SetFocus(a)
+	k.SetFocus(a)    // stamps a keystroke; with the huge window, typing stays "active"
 
-	// even an URGENT message must not type into the focused bubble
+	// even an URGENT message must not type into the bubble mid-keystroke
 	if _, err := k.Send(addr.Root, a, "urgent!", "body", 0, true); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if strings.Contains(fr.Session(a).Written(), "New message") {
-		t.Fatalf("must not inject into the focused bubble, got %q", fr.Session(a).Written())
+		t.Fatalf("must not inject while typing, got %q", fr.Session(a).Written())
 	}
 	if k.Store.UnreadCount(a) != 1 {
 		t.Fatal("the message should still be filed in the inbox")
 	}
-	// the periodic drain also leaves the focused bubble alone
-	k.DrainInboxes()
+	// still typing -> the idle flush does nothing
+	k.FlushHeldIfIdle()
 	if strings.Contains(fr.Session(a).Written(), "unread") {
-		t.Fatal("DrainInboxes should skip the focused bubble")
+		t.Fatal("must not flush while still typing")
 	}
 
-	// leaving the bubble flushes a single nudge so the agent reads the backlog
-	k.UnsetFocus(a)
+	// operator pauses -> the backlog is delivered
+	k.TypingWindow = time.Nanosecond // now idle
+	k.FlushHeldIfIdle()
 	if !strings.Contains(fr.Session(a).Written(), "unread") {
-		t.Fatalf("leaving the bubble should nudge it to read, got %q", fr.Session(a).Written())
+		t.Fatalf("pausing should flush the held backlog, got %q", fr.Session(a).Written())
+	}
+}
+
+// TestFocusDeliversWhenIdle: if the operator is on the bubble but NOT typing,
+// messages are delivered immediately so they see them arrive.
+func TestFocusDeliversWhenIdle(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	k.TypingWindow = time.Nanosecond // idle: any keystroke instantly counts as stale
+
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	k.EnsureAlive(a)
+	k.SetFocus(a)
+
+	if _, err := k.Send(addr.Root, a, "fyi", "body", 0, true); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !strings.Contains(fr.Session(a).Written(), "New message") {
+		t.Fatal("an idle operator should see the message delivered to the focused bubble")
 	}
 }
 
