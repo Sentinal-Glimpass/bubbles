@@ -39,3 +39,23 @@ func TestIsRoot(t *testing.T) {
 		t.Fatal("child IsRoot() = true")
 	}
 }
+
+func TestIsAncestorOf(t *testing.T) {
+	cases := []struct {
+		a, d Address
+		want bool
+	}{
+		{"0.1", "0.1.2", true},
+		{"0.1", "0.1.2.3", true},
+		{"0", "0.1", true},
+		{"0.1", "0.1", false},   // not its own ancestor
+		{"0.1", "0.10", false},  // prefix trap
+		{"0.1", "0.2", false},   // sibling
+		{"0.1.2", "0.1", false}, // reversed
+	}
+	for _, c := range cases {
+		if got := c.a.IsAncestorOf(c.d); got != c.want {
+			t.Errorf("%s.IsAncestorOf(%s) = %v want %v", c.a, c.d, got, c.want)
+		}
+	}
+}

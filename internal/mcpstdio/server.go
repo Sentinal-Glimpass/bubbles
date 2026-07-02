@@ -143,6 +143,23 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolErr(msg.ID, err.Error())
 		}
 		return toolOK(msg.ID, "spawned "+a)
+	case "edit":
+		if !s.Spawnable {
+			return errResp(msg.ID, -32601, "tool not available: edit")
+		}
+		if err := s.B.Edit(s.Self, arg("addr"), arg("name"), arg("description"), arg("model")); err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "edited "+arg("addr"))
+	case "delete":
+		if !s.Spawnable {
+			return errResp(msg.ID, -32601, "tool not available: delete")
+		}
+		n, err := s.B.Delete(s.Self, arg("addr"))
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, fmt.Sprintf("deleted %s (%d bubble(s) removed)", arg("addr"), n))
 	default:
 		return errResp(msg.ID, -32602, "unknown tool: "+p.Name)
 	}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/bus"
+	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 )
 
@@ -571,6 +572,72 @@ func TestResumeUsesCurrentSessionID(t *testing.T) {
 	k.SyncSessionIDs()
 	if b, _ := k.Reg.Get(a); b.SessionID != "resumed-xyz" {
 		t.Fatalf("SyncSessionIDs should refresh to %q, got %q", "resumed-xyz", b.SessionID)
+	}
+}
+
+// TestEditDeleteBySubtreeOnly: a bubble may edit/delete only bubbles in its OWN
+// subtree (its spawned descendants) — not siblings, not its parent, not root.
+func TestEditDeleteBySubtreeOnly(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+
+	mgr, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/m", runner.SpawnOpts{Name: "mgr", GrantSpawn: true}) // 0.1
+	w1, _ := k.Spawn(mgr, "", "/tmp/w1", runner.SpawnOpts{Name: "w1"})                                          // 0.1.1
+	w2, _ := k.Spawn(mgr, "", "/tmp/w2", runner.SpawnOpts{Name: "w2"})                                          // 0.1.2
+	other, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/o", runner.SpawnOpts{Name: "other"})               // 0.2
+
+	// edit own child: allowed, fields update (empty ones unchanged)
+	if err := k.EditBy(mgr, w1, "worker-one", "opus", "new charter"); err != nil {
+		t.Fatalf("mgr edit own child: %v", err)
+	}
+	b, _ := k.Reg.Get(w1)
+	if b.Name != "worker-one" || b.Model != "opus" || b.Goal != "new charter" {
+		t.Fatalf("edit not applied: %+v", b)
+	}
+	if err := k.EditBy(mgr, w1, "", "", ""); err != nil || b.Name != "worker-one" {
+		t.Fatalf("empty fields must be unchanged: err=%v name=%q", err, b.Name)
+	}
+
+	// edit outside the subtree: denied
+	if err := k.EditBy(mgr, other, "hijack", "", ""); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("edit of a non-descendant should be ErrNotAllowed, got %v", err)
+	}
+	if err := k.EditBy(w1, mgr, "revolt", "", ""); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("a child must not edit its parent, got %v", err)
+	}
+
+	// prefix trap: 0.1 must not control 0.10
+	ten := addr.Address("0.10")
+	k.Reg.Restore(registry.Bubble{Addr: ten, Persona: "ten"})
+	if err := k.EditBy(mgr, ten, "x", "", ""); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("0.1 must not edit 0.10 (prefix trap), got %v", err)
+	}
+
+	// delete outside the subtree: denied; own child: allowed (subtree removed)
+	if _, err := k.DeleteBy(mgr, other); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("delete of a non-descendant should be ErrNotAllowed, got %v", err)
+	}
+	if _, err := k.DeleteBy(w1, addr.Root); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("root must never be deletable, got %v", err)
+	}
+	sub, _ := k.SpawnUnder(addr.Root, w2, "", "/tmp/s", runner.SpawnOpts{Name: "sub"}) // 0.1.2.1 (grandchild)
+	victims, err := k.DeleteBy(mgr, w2)
+	if err != nil || len(victims) != 2 {
+		t.Fatalf("mgr should delete its child + grandchild, got victims=%v err=%v", victims, err)
+	}
+	if _, ok := k.Reg.Get(w2); ok {
+		t.Fatal("deleted child should be gone")
+	}
+	if _, ok := k.Reg.Get(sub); ok {
+		t.Fatal("deleted grandchild should be gone")
+	}
+	// root can delete anything
+	if _, err := k.DeleteBy(addr.Root, other); err != nil {
+		t.Fatalf("root delete: %v", err)
+	}
+	// deleting a missing bubble errors cleanly
+	if _, err := k.DeleteBy(mgr, w2); err == nil {
+		t.Fatal("deleting an already-removed bubble should error")
 	}
 }
 

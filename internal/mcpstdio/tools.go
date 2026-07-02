@@ -11,6 +11,8 @@ type Backend interface {
 	Inbox(owner string) []string
 	Status(owner string) []string
 	Spawn(by, name, description, dir, model string) (string, error)
+	Edit(by, addr, name, description, model string) error
+	Delete(by, addr string) (int, error) // returns how many bubbles were removed (target + subtree)
 }
 
 // Tool is an MCP tool definition advertised by tools/list.
@@ -86,6 +88,32 @@ func (s *Server) tools() []Tool {
 				"type":       "object",
 				"properties": spawnProps,
 				"required":   []string{"name"},
+			},
+		})
+		editProps := strProp("name", "description", "model")
+		editProps["addr"] = map[string]any{
+			"type":        "string",
+			"description": "Address of the sub-bubble to edit (must be in YOUR subtree, e.g. one you spawned).",
+		}
+		ts = append(ts, Tool{
+			Name:        "edit",
+			Description: "Edit one of YOUR sub-bubbles: change its name, model, or description (charter). Omitted fields are unchanged. Only works on bubbles you spawned (your subtree).",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": editProps,
+				"required":   []string{"addr"},
+			},
+		})
+		ts = append(ts, Tool{
+			Name:        "delete",
+			Description: "Delete one of YOUR sub-bubbles (and everything under it). Only works on bubbles you spawned (your subtree). This is permanent — its session is killed and its address removed.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"addr": map[string]any{
+					"type":        "string",
+					"description": "Address of the sub-bubble to delete (must be in YOUR subtree).",
+				}},
+				"required": []string{"addr"},
 			},
 		})
 	}

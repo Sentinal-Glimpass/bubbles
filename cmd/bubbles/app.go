@@ -167,6 +167,17 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}
 		return ipc.Reply{OK: true, Addr: a.String()}
+	case "edit":
+		if err := k.EditBy(from, addr.Address(r.Addr), r.Name, r.Model, r.Description); err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: r.Addr}
+	case "delete":
+		victims, err := k.DeleteBy(from, addr.Address(r.Addr))
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: r.Addr, ID: len(victims)} // ID = removed count
 	default:
 		return ipc.Reply{OK: false, Err: "unknown op: " + r.Op}
 	}

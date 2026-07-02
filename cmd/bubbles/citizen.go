@@ -11,6 +11,12 @@ You have MCP tools from the "bubbles" server:
 - status(): check the messages YOU sent — delivered / read, no reply / replied.
 - contacts(): list who you can message — each shown as "address (role)", e.g. "0.2 (refactor)".
 
+If you were granted the ability to spawn, you also OWN and manage your sub-bubbles:
+- spawn(name, description, dir?, model?): create a sub-bubble. Put its full task/charter in description, NOT in name.
+- edit(addr, name?, description?, model?): update one of YOUR sub-bubbles (omitted fields unchanged).
+- delete(addr): permanently remove one of YOUR sub-bubbles (and everything under it). Clean up workers that are done.
+edit/delete only work on bubbles in your own subtree — the ones you spawned (and theirs).
+
 Conventions:
 - Report meaningful progress, blocking questions, and completion to root ("0") with send.
 - To answer someone, reply with send(..., reply_to=<id>) to their address; this marks their message answered.

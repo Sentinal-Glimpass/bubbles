@@ -447,6 +447,47 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 	return victims
 }
 
+// DeleteBy is DeleteBubble with an authority check for agent callers: by may
+// delete only bubbles in its OWN subtree (the ones it spawned, and theirs).
+// Root passes unconditionally (the dashboard). Returns the removed addresses.
+func (k *Kernel) DeleteBy(by, a addr.Address) ([]addr.Address, error) {
+	if by != addr.Root && !by.IsAncestorOf(a) {
+		return nil, ErrNotAllowed
+	}
+	if _, ok := k.Reg.Get(a); !ok {
+		return nil, fmt.Errorf("kernel: no bubble at %s", a)
+	}
+	victims := k.DeleteBubble(a)
+	if victims == nil { // root target
+		return nil, ErrNotAllowed
+	}
+	return victims, nil
+}
+
+// EditBy updates a bubble's settings with the same subtree authority as
+// DeleteBy: by may edit only its own descendants (root may edit any bubble).
+// Empty fields are left unchanged. Name/model apply on the next page-in; a new
+// description (charter) only matters if the bubble hasn't launched yet.
+func (k *Kernel) EditBy(by, a addr.Address, name, model, description string) error {
+	if by != addr.Root && !by.IsAncestorOf(a) {
+		return ErrNotAllowed
+	}
+	b, ok := k.Reg.Get(a)
+	if !ok {
+		return fmt.Errorf("kernel: no bubble at %s", a)
+	}
+	if name != "" {
+		k.Reg.SetName(a, name)
+	}
+	if model != "" {
+		k.Reg.SetModel(a, model)
+	}
+	if description != "" {
+		b.Goal = description
+	}
+	return nil
+}
+
 // DeleteGroup removes a group. If deleteMembers, each member bubble (and its
 // subtree) is deleted too; otherwise only the grouping is removed and members
 // live on. A coordinator session is always killed. Contacts are left intact.

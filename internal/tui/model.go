@@ -197,6 +197,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case blinkTickMsg:
 		m.blinkOn = !m.blinkOn
+		// Refresh rows so fleet changes made by AGENTS (spawn/edit/delete of
+		// sub-bubbles over IPC) appear live, not only after a keypress.
+		m.rows = m.fleetRows()
+		if m.cursor >= len(m.rows) {
+			m.cursor = len(m.rows) - 1
+		}
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
 		return m, blinkTick()
 	case PingMsg:
 		m.pings[msg.From] = msg.Subject

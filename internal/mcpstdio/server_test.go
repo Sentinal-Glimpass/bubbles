@@ -8,8 +8,10 @@ import (
 )
 
 type fakeBackend struct {
-	sends  [][4]string
-	urgent []bool
+	sends   [][4]string
+	urgent  []bool
+	edits   [][5]string // by, addr, name, description, model
+	deletes [][2]string // by, addr
 }
 
 func (f *fakeBackend) Send(from, to, subject, body string, replyTo int, urgent bool) (int, error) {
@@ -17,10 +19,18 @@ func (f *fakeBackend) Send(from, to, subject, body string, replyTo int, urgent b
 	f.urgent = append(f.urgent, urgent)
 	return 7, nil
 }
-func (f *fakeBackend) Contacts(owner string) []string        { return []string{"0", "0.2"} }
-func (f *fakeBackend) Inbox(owner string) []string           { return nil }
-func (f *fakeBackend) Status(owner string) []string          { return nil }
+func (f *fakeBackend) Contacts(owner string) []string                     { return []string{"0", "0.2"} }
+func (f *fakeBackend) Inbox(owner string) []string                        { return nil }
+func (f *fakeBackend) Status(owner string) []string                       { return nil }
 func (f *fakeBackend) Spawn(by, n, desc, d, model string) (string, error) { return "0.1.1", nil }
+func (f *fakeBackend) Edit(by, addr, name, desc, model string) error {
+	f.edits = append(f.edits, [5]string{by, addr, name, desc, model})
+	return nil
+}
+func (f *fakeBackend) Delete(by, addr string) (int, error) {
+	f.deletes = append(f.deletes, [2]string{by, addr})
+	return 2, nil
+}
 
 func TestServeFlow(t *testing.T) {
 	in := strings.NewReader(strings.Join([]string{
@@ -100,7 +110,43 @@ func TestServeFlow(t *testing.T) {
 
 func TestSpawnGated(t *testing.T) {
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 5 {
-		t.Fatalf("spawnable server should advertise 5 tools (send, contacts, inbox, status, spawn), got %d", len(s.tools()))
+	if len(s.tools()) != 7 {
+		t.Fatalf("spawnable server should advertise 7 tools (send, contacts, inbox, status, spawn, edit, delete), got %d", len(s.tools()))
+	}
+}
+
+// TestEditDeleteTools: a spawnable server relays edit/delete with its own
+// identity; a non-spawnable server doesn't offer them at all.
+func TestEditDeleteTools(t *testing.T) {
+	in := strings.NewReader(strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edit","arguments":{"addr":"0.1.2","name":"tester","model":"opus"}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delete","arguments":{"addr":"0.1.3"}}}`,
+	}, "\n"))
+	fb := &fakeBackend{}
+	s := &Server{Self: "0.1", B: fb, Spawnable: true}
+	var out bytes.Buffer
+	if err := s.Serve(in, &out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if len(fb.edits) != 1 || fb.edits[0] != [5]string{"0.1", "0.1.2", "tester", "", "opus"} {
+		t.Fatalf("edit relay = %v", fb.edits)
+	}
+	if len(fb.deletes) != 1 || fb.deletes[0] != [2]string{"0.1", "0.1.3"} {
+		t.Fatalf("delete relay = %v", fb.deletes)
+	}
+	if !strings.Contains(out.String(), "2 bubble(s) removed") {
+		t.Fatalf("delete result should report the removed count, got %s", out.String())
+	}
+
+	// not spawnable -> the tools are refused
+	in2 := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete","arguments":{"addr":"0.1.3"}}}`)
+	fb2 := &fakeBackend{}
+	var out2 bytes.Buffer
+	s2 := &Server{Self: "0.1", B: fb2, Spawnable: false}
+	if err := s2.Serve(in2, &out2); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if len(fb2.deletes) != 0 || !strings.Contains(out2.String(), "not available") {
+		t.Fatalf("non-spawnable server must refuse delete: deletes=%v out=%s", fb2.deletes, out2.String())
 	}
 }

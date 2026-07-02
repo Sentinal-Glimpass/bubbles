@@ -157,3 +157,25 @@ func (b *ipcBackend) Spawn(by, name, description, dir, model string) (string, er
 	}
 	return rep.Addr, nil
 }
+
+func (b *ipcBackend) Edit(by, addr, name, description, model string) error {
+	rep, err := b.c.Do(ipc.Request{Op: "edit", From: by, Addr: addr, Name: name, Description: description, Model: model})
+	if err != nil {
+		return err
+	}
+	if !rep.OK {
+		return errors.New(rep.Err)
+	}
+	return nil
+}
+
+func (b *ipcBackend) Delete(by, addr string) (int, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "delete", From: by, Addr: addr})
+	if err != nil {
+		return 0, err
+	}
+	if !rep.OK {
+		return 0, errors.New(rep.Err)
+	}
+	return rep.ID, nil // ID doubles as the removed-count for delete
+}

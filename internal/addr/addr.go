@@ -48,3 +48,10 @@ func (a Address) Parent() (Address, bool) {
 
 // IsRoot reports whether a is the root address.
 func (a Address) IsRoot() bool { return a == Root }
+
+// IsAncestorOf reports whether d is a STRICT descendant of a (in a's subtree,
+// not a itself). "0.1" is an ancestor of "0.1.2" and "0.1.2.3", but not of
+// "0.10" or of "0.1".
+func (a Address) IsAncestorOf(d Address) bool {
+	return strings.HasPrefix(string(d), string(a)+".")
+}
