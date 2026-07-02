@@ -24,13 +24,20 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/tui"
 )
 
-// leaderByte (Ctrl-\) is the in-bubble leader prefix:
+// leaderByte (Ctrl-\) and leaderByteAlt (Ctrl-/) are the in-bubble leader
+// prefixes — both work identically so you don't have to remember which:
 //
-//	Ctrl-\ Ctrl-\   -> fleet
-//	Ctrl-\ <digit>  -> jump to that slot if bound, else bind the current bubble
+//	<leader> <leader>  -> fleet
+//	<leader> <digit>   -> jump to that slot if bound, else bind the current bubble
 //
 // Everything else (incl. Esc, arrows) goes straight to claude.
-const leaderByte = 0x1c // Ctrl-\
+const (
+	leaderByte    = 0x1c // Ctrl-\
+	leaderByteAlt = 0x1f // Ctrl-/ (sends US, 0x1f) — an easier-to-reach alias
+)
+
+// isLeader reports whether b is one of the interchangeable leader keys.
+func isLeader(b byte) bool { return b == leaderByte || b == leaderByteAlt }
 
 // markAction handles a digit pressed after the Ctrl-Left leader: jump to a bound
 // slot, or bind the current bubble to a free one. Returns the address to switch
@@ -365,9 +372,9 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (nex
 		_ = pty.InheritSize(os.Stdin, f)
 	}
 
-	// Input loop. Esc and everything else go straight to claude; the Ctrl-Q
-	// leader (and Ctrl-\) are intercepted by the state machine.
-	armed := false // true after a leader (Ctrl-\) press
+	// Input loop. Esc and everything else go straight to claude; the leader keys
+	// (Ctrl-\ or Ctrl-/) are intercepted by the state machine.
+	armed := false // true after a leader press
 	buf := make([]byte, 1)
 	for {
 		n, err := os.Stdin.Read(buf)
@@ -378,7 +385,7 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (nex
 		if armed {
 			armed = false
 			switch {
-			case b == leaderByte: // Ctrl-\ Ctrl-\ -> fleet
+			case isLeader(b): // leader leader -> fleet
 				return "", true
 			case b >= '0' && b <= '9':
 				if dest := markAction(marks, int(b-'0'), a); dest != "" {
@@ -389,7 +396,7 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (nex
 			}
 			continue
 		}
-		if b == leaderByte {
+		if isLeader(b) {
 			armed = true
 			continue
 		}

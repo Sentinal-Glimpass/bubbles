@@ -17,30 +17,36 @@ import (
 
 const (
 	clientLeaderByte = 0x1c // Ctrl-\ : arms the stop chord (also the in-bubble leader)
-	clientStopByte   = 0x1d // Ctrl-] : completes Ctrl-\ Ctrl-] to stop the fleet
+	clientLeaderAlt  = 0x1f // Ctrl-/ : an interchangeable leader (sends US, 0x1f)
+	clientStopByte   = 0x1d // Ctrl-] : completes <leader> Ctrl-] to stop the fleet
 )
 
-// chordStep advances the fleet-stop chord for one input byte. A lone Ctrl-\
-// arms; Ctrl-\ then Ctrl-] stops the fleet; Ctrl-\ then ANY other key forwards
-// both bytes (so the in-bubble Ctrl-\ leader — e.g. Ctrl-\ Ctrl-\ to pop to the
-// fleet, Ctrl-\ digit to jump — still works). A bare Ctrl-] no longer stops
-// anything, so it can't tear down the fleet by accident.
-func chordStep(armed bool, b byte) (forward []byte, stop, nowArmed bool) {
-	if armed {
+func isClientLeader(b byte) bool { return b == clientLeaderByte || b == clientLeaderAlt }
+
+// chordStep advances the fleet-stop chord for one input byte. armedWith is 0
+// when not armed, else the leader byte that armed it. A lone leader (Ctrl-\ or
+// Ctrl-/) arms; leader then Ctrl-] stops the fleet; leader then ANY other key
+// forwards BOTH bytes (so the in-bubble leader — <leader><leader> to pop to the
+// fleet, <leader> digit to jump — still works, and with the actual leader the
+// user pressed). A bare Ctrl-] no longer stops anything, so it can't tear down
+// the fleet by accident.
+func chordStep(armedWith, b byte) (forward []byte, stop bool, nowArmedWith byte) {
+	if armedWith != 0 {
 		if b == clientStopByte {
-			return nil, true, false
+			return nil, true, 0
 		}
-		return []byte{clientLeaderByte, b}, false, false
+		return []byte{armedWith, b}, false, 0
 	}
-	if b == clientLeaderByte {
-		return nil, false, true
+	if isClientLeader(b) {
+		return nil, false, b
 	}
-	return []byte{b}, false, false
+	return []byte{b}, false, 0
 }
 
 // runClient attaches the terminal to the workspace daemon (starting it detached
 // if it isn't running) and relays bytes both ways. Quitting from inside (q)
-// detaches (fleet keeps running); Ctrl-\ then Ctrl-] stops the whole fleet.
+// detaches (fleet keeps running); a leader (Ctrl-\ or Ctrl-/) then Ctrl-] stops
+// the whole fleet.
 func runClient() {
 	baseDir := defaultWorkspace()
 	sock := controlSock(baseDir)
@@ -87,8 +93,8 @@ func runClient() {
 			}
 		}
 	}()
-	go func() { // our keys -> app; Ctrl-\ Ctrl-] stops the fleet (a bare Ctrl-] does not)
-		armed := false
+	go func() { // our keys -> app; <leader> Ctrl-] stops the fleet (a bare Ctrl-] does not)
+		var armedWith byte
 		buf := make([]byte, 1)
 		for {
 			n, rerr := os.Stdin.Read(buf)
@@ -98,7 +104,7 @@ func runClient() {
 			}
 			var forward []byte
 			var stop bool
-			forward, stop, armed = chordStep(armed, buf[0])
+			forward, stop, armedWith = chordStep(armedWith, buf[0])
 			if stop {
 				done <- "stop"
 				return
