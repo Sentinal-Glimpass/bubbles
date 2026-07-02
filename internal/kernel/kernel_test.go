@@ -492,3 +492,21 @@ func TestNonUrgentPoolsUntilDrain(t *testing.T) {
 		t.Fatalf("drain should nudge the bubble to read, got %q", w)
 	}
 }
+
+// TestNonUrgentDeliversToHotBubble: a non-urgent message to an already-hot bubble
+// is delivered immediately (no waiting for the drain) — pooling only defers COLD
+// recipients.
+func TestNonUrgentDeliversToHotBubble(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a) // it's hot (running)
+
+	if _, err := k.Send(addr.Root, a, "fyi", "body", 0, false); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !strings.Contains(fr.Session(a).Written(), "📬 New message") {
+		t.Fatal("a non-urgent message to a HOT bubble should be delivered immediately, not deferred to the drain")
+	}
+}

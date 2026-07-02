@@ -163,13 +163,19 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 	if to == addr.Root {
 		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard (root is the human; always notified)
 	}
-	// Urgent messages wake the recipient NOW (page it in if cold, then nudge it).
-	// Non-urgent messages are pooled in the inbox and delivered by the periodic
-	// DrainInboxes, so a cold fleet isn't paged in on every message.
+	// Delivery policy:
+	//   - urgent: wake the recipient now (page it in if cold), then nudge it.
+	//   - non-urgent: deliver immediately IF it's already hot (free — it's running);
+	//     if it's cold, leave it pooled for the periodic DrainInboxes so we don't
+	//     page in a sleeping fleet on every message.
+	// Either way the message is already safely in the inbox.
 	if urgent {
 		if s := k.EnsureAlive(to); s != nil {
 			_, _ = s.Write([]byte(formatNotify(from, fromName, subject, k.Store.UnreadCount(to))))
 		}
+	} else if s := k.session(to); s != nil && s.Alive() {
+		k.touch(to)
+		_, _ = s.Write([]byte(formatNotify(from, fromName, subject, k.Store.UnreadCount(to))))
 	}
 	return id, nil
 }
