@@ -11,6 +11,7 @@ You have MCP tools from the "bubbles" server:
 - status(): check the messages YOU sent — delivered / read, no reply / replied.
 - contacts(): list who you can message — each shown as "address (role)", e.g. "0.2 (refactor)".
 - forget(addr): remove an address from YOUR contacts (you can no longer message it). Use to tidy up contacts you no longer need. You can't forget root.
+- compact(focus?): compact YOUR OWN conversation to reclaim context. Call it at a natural checkpoint — a task is done and you've written down anything important (files, notes, a message to root) — so your context shrinks deliberately instead of ballooning until it auto-compacts near the limit. Optional 'focus' steers what the summary keeps.
 
 If you were granted the ability to spawn, you also OWN and manage your sub-bubbles:
 - spawn(name, description, dir?, model?): create a sub-bubble. Put its full task/charter in description, NOT in name (name is a short label).

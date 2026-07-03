@@ -13,8 +13,9 @@ type fakeBackend struct {
 	edits   [][5]string // by, addr, name, description, model
 	deletes [][2]string // by, addr
 	forgets [][2]string // by, addr
-	intros  [][3]string // by, a, b
-	bcasts  [][3]string // by, subject, body
+	intros   [][3]string // by, a, b
+	bcasts   [][3]string // by, subject, body
+	compacts [][2]string // owner, focus
 }
 
 func (f *fakeBackend) Send(from, to, subject, body string, replyTo int, urgent bool) (int, error) {
@@ -22,9 +23,13 @@ func (f *fakeBackend) Send(from, to, subject, body string, replyTo int, urgent b
 	f.urgent = append(f.urgent, urgent)
 	return 7, nil
 }
-func (f *fakeBackend) Contacts(owner string) []string                     { return []string{"0", "0.2"} }
-func (f *fakeBackend) Inbox(owner string) []string                        { return nil }
-func (f *fakeBackend) Status(owner string) []string                       { return nil }
+func (f *fakeBackend) Contacts(owner string) []string { return []string{"0", "0.2"} }
+func (f *fakeBackend) Inbox(owner string) []string    { return nil }
+func (f *fakeBackend) Status(owner string) []string   { return nil }
+func (f *fakeBackend) Compact(owner, focus string) error {
+	f.compacts = append(f.compacts, [2]string{owner, focus})
+	return nil
+}
 func (f *fakeBackend) Spawn(by, n, desc, d, model string) (string, error) { return "0.1.1", nil }
 func (f *fakeBackend) Edit(by, addr, name, desc, model string) error {
 	f.edits = append(f.edits, [5]string{by, addr, name, desc, model})
@@ -101,8 +106,8 @@ func TestServeFlow(t *testing.T) {
 	for _, tdef := range listR.Tools {
 		names = append(names, tdef.Name)
 	}
-	if strings.Join(names, ",") != "send,contacts,inbox,status,forget" {
-		t.Fatalf("tools = %v want [send contacts inbox status forget]", names)
+	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact" {
+		t.Fatalf("tools = %v want [send contacts inbox status forget compact]", names)
 	}
 
 	// id3: send succeeded and recorded identity = Self.
@@ -125,12 +130,27 @@ func TestServeFlow(t *testing.T) {
 
 func TestSpawnGated(t *testing.T) {
 	base := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: false}
-	if len(base.tools()) != 5 { // send, contacts, inbox, status, forget
-		t.Fatalf("base server should advertise 5 tools, got %d", len(base.tools()))
+	if len(base.tools()) != 6 { // send, contacts, inbox, status, forget, compact
+		t.Fatalf("base server should advertise 6 tools, got %d", len(base.tools()))
 	}
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 10 { // + spawn, edit, delete, introduce, broadcast
-		t.Fatalf("spawnable server should advertise 10 tools, got %d", len(s.tools()))
+	if len(s.tools()) != 11 { // + spawn, edit, delete, introduce, broadcast
+		t.Fatalf("spawnable server should advertise 11 tools, got %d", len(s.tools()))
+	}
+}
+
+// TestCompactTool: compact is available to every bubble and relays with the
+// caller's own identity + focus.
+func TestCompactTool(t *testing.T) {
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"compact","arguments":{"focus":"keep TODOs"}}}`)
+	fb := &fakeBackend{}
+	s := &Server{Self: "0.3", B: fb, Spawnable: false} // NOT spawnable, still has compact
+	var out bytes.Buffer
+	if err := s.Serve(in, &out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if len(fb.compacts) != 1 || fb.compacts[0] != [2]string{"0.3", "keep TODOs"} {
+		t.Fatalf("compact relay = %v", fb.compacts)
 	}
 }
 

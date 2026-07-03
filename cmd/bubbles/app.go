@@ -78,8 +78,9 @@ func runApp() {
 	k.MemBudget = 45 << 30       // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
 	k.IdleTimeout = 30 * time.Minute  // page out sessions silent (no output) this long; they resume on next use
 	k.TypingWindow = 10 * time.Second // hold a focused bubble's messages while you're typing; deliver once you pause this long
+	inheritedMCP := resolveMCPServers(mcpAllowList()) // curated operator servers bubbles inherit (e.g. playwright)
 	lr.MCPConfig = func(a addr.Address) string {
-		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a))
+		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a), inheritedMCP)
 	}
 	// Session-id tracking: a hook records each session's live id to this file; the
 	// kernel reads it so an in-session /resume is what resumes next time.
@@ -323,6 +324,11 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}
 		return ipc.Reply{OK: true, Addr: r.Addr}
+	case "compact":
+		if err := k.Compact(from, r.Body); err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true}
 	default:
 		return ipc.Reply{OK: false, Err: "unknown op: " + r.Op}
 	}
@@ -342,28 +348,105 @@ func readSessionFile(baseDir string, a addr.Address) string {
 	return strings.TrimSpace(string(data))
 }
 
-// mcpConfigJSON builds the inline --mcp-config JSON pointing claude at our own
-// binary in mcp-stdio mode, tagged with this bubble's address.
-func mcpConfigJSON(exe, sock string, a addr.Address, spawnable bool) string {
+// defaultMCPAllow is the curated set of the operator's own MCP servers that
+// bubbles get by default — broadly useful for autonomous work, and replicable
+// (stdio/command-based) so they actually launch headlessly. Any not present in
+// the operator's config are simply skipped. Override with BUBBLES_MCP.
+var defaultMCPAllow = []string{
+	"playwright", "context7", "firecrawl", "web-scraper", "web-scraping",
+	"react-bits-mcp", "github", "googlemaps",
+}
+
+// mcpAllowList returns which of the operator's MCP servers bubbles inherit:
+// BUBBLES_MCP (comma-separated names, or "none") if set, else the curated
+// default.
+func mcpAllowList() []string {
+	v := os.Getenv("BUBBLES_MCP")
+	if v == "" {
+		return defaultMCPAllow
+	}
+	if v == "none" {
+		return nil
+	}
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// resolveMCPServers pulls the named servers' definitions out of the operator's
+// ~/.claude.json (global mcpServers first, then any project's), so bubbles can be
+// given exactly those under --strict-mcp-config. Unknown names are skipped.
+func resolveMCPServers(allow []string) map[string]json.RawMessage {
+	out := map[string]json.RawMessage{}
+	if len(allow) == 0 {
+		return out
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return out
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		return out
+	}
+	var cfg struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+		Projects   map[string]struct {
+			MCPServers map[string]json.RawMessage `json:"mcpServers"`
+		} `json:"projects"`
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return out
+	}
+	want := map[string]bool{}
+	for _, n := range allow {
+		want[n] = true
+	}
+	for name, def := range cfg.MCPServers {
+		if want[name] {
+			out[name] = def
+		}
+	}
+	for _, p := range cfg.Projects {
+		for name, def := range p.MCPServers {
+			if want[name] && out[name] == nil {
+				out[name] = def
+			}
+		}
+	}
+	return out
+}
+
+// mcpConfigJSON builds the inline --mcp-config JSON: our own mcp-stdio server
+// (tagged with this bubble's address) plus the curated set of the operator's
+// servers. With --strict-mcp-config this is EXACTLY what a bubble sees.
+func mcpConfigJSON(exe, sock string, a addr.Address, spawnable bool, extra map[string]json.RawMessage) string {
 	spawn := "0"
 	if spawnable {
 		spawn = "1"
 	}
-	cfg := map[string]any{
-		"mcpServers": map[string]any{
-			"bubbles": map[string]any{
-				"type":    "stdio",
-				"command": exe,
-				"args":    []string{"mcp-stdio"},
-				"env": map[string]string{
-					"BUBBLE_ADDR":      a.String(),
-					"BUBBLE_SOCK":      sock,
-					"BUBBLE_SPAWNABLE": spawn,
-				},
+	servers := map[string]any{
+		"bubbles": map[string]any{
+			"type":    "stdio",
+			"command": exe,
+			"args":    []string{"mcp-stdio"},
+			"env": map[string]string{
+				"BUBBLE_ADDR":      a.String(),
+				"BUBBLE_SOCK":      sock,
+				"BUBBLE_SPAWNABLE": spawn,
 			},
 		},
 	}
-	b, _ := json.Marshal(cfg)
+	for name, def := range extra {
+		if name != "bubbles" { // never let an inherited server shadow ours
+			servers[name] = def
+		}
+	}
+	b, _ := json.Marshal(map[string]any{"mcpServers": servers})
 	return string(b)
 }
 

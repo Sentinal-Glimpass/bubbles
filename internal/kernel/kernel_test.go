@@ -815,6 +815,34 @@ func TestDeletePurgesContacts(t *testing.T) {
 	}
 }
 
+// TestCompact: a running bubble's compact() types the /compact command into its
+// own session; a cold bubble reports it isn't running.
+func TestCompact(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+
+	if err := k.Compact(a, "keep the schema"); err == nil {
+		t.Fatal("compacting a cold bubble should error")
+	}
+	k.EnsureAlive(a) // hot
+	if err := k.Compact(a, "keep the schema"); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	w := fr.Session(a).Written()
+	if !strings.Contains(w, "/compact keep the schema") {
+		t.Fatalf("compact should type the slash command, got %q", w)
+	}
+	// no focus -> bare /compact
+	if err := k.Compact(a, "  "); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if !strings.Contains(fr.Session(a).Written(), "/compact") {
+		t.Fatal("bare compact should still type /compact")
+	}
+}
+
 // TestForget: a bubble can drop a contact from its own list; root is never
 // forgettable.
 func TestForget(t *testing.T) {

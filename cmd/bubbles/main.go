@@ -26,6 +26,7 @@ const detachSentinel = "\x1b]6660;bubbles-detach\x07"
 
 func main() {
 	applyMessagePollingFlag() // --message_polling <minutes> -> env, inherited by the daemon + hosted child
+	applyFlagToEnv("--mcp", "BUBBLES_MCP") // --mcp playwright,github,none -> which operator MCP servers bubbles inherit
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "mcp-stdio":
@@ -69,6 +70,17 @@ func applyMessagePollingFlag() {
 			if n, err := strconv.Atoi(os.Args[i+1]); err == nil && n > 0 {
 				_ = os.Setenv("BUBBLES_MSG_POLL", os.Args[i+1])
 			}
+			return
+		}
+	}
+}
+
+// applyFlagToEnv stashes `flag <value>` into env var so the detached daemon and
+// hosted app inherit it (flags are on the client invocation).
+func applyFlagToEnv(flag, env string) {
+	for i := 0; i+1 < len(os.Args); i++ {
+		if os.Args[i] == flag {
+			_ = os.Setenv(env, os.Args[i+1])
 			return
 		}
 	}
@@ -188,6 +200,17 @@ func (b *ipcBackend) Delete(by, addr string) (int, error) {
 
 func (b *ipcBackend) Forget(by, addr string) error {
 	rep, err := b.c.Do(ipc.Request{Op: "forget", From: by, Addr: addr})
+	if err != nil {
+		return err
+	}
+	if !rep.OK {
+		return errors.New(rep.Err)
+	}
+	return nil
+}
+
+func (b *ipcBackend) Compact(owner, focus string) error {
+	rep, err := b.c.Do(ipc.Request{Op: "compact", From: owner, Body: focus})
 	if err != nil {
 		return err
 	}

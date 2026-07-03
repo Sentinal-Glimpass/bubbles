@@ -621,6 +621,24 @@ func (k *Kernel) SyncSessionIDs() {
 	}
 }
 
+// Compact asks a running bubble to compact its OWN conversation now — typing the
+// `/compact` slash command (with an optional focus) into its session, queued for
+// after its current turn. A bubble calls this at a natural checkpoint (task done,
+// key context written down) so its context is reclaimed deliberately instead of
+// auto-compacting only once it's near the limit. No-op if the bubble is cold.
+func (k *Kernel) Compact(a addr.Address, focus string) error {
+	s := k.session(a)
+	if s == nil || !s.Alive() {
+		return fmt.Errorf("kernel: %s is not running", a)
+	}
+	cmd := "/compact"
+	if focus = strings.TrimSpace(focus); focus != "" {
+		cmd += " " + focus
+	}
+	_, err := s.Write([]byte(cmd)) // Write appends Enter, submitting the command
+	return err
+}
+
 // Introduce makes a and b mutual contacts. Root only.
 func (k *Kernel) Introduce(by, a, b addr.Address) error {
 	if by != addr.Root {

@@ -139,6 +139,11 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolErr(msg.ID, err.Error())
 		}
 		return toolOK(msg.ID, "forgot "+arg("addr"))
+	case "compact":
+		if err := s.B.Compact(s.Self, arg("focus")); err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "compaction scheduled — it runs after this turn; keep going, your context will shrink")
 	case "spawn":
 		if !s.Spawnable {
 			return errResp(msg.ID, -32601, "tool not available: spawn")

@@ -10,6 +10,7 @@ type Backend interface {
 	Contacts(owner string) []string
 	Inbox(owner string) []string
 	Status(owner string) []string
+	Compact(owner, focus string) error // compact the caller's own conversation now
 	Spawn(by, name, description, dir, model string) (string, error)
 	Edit(by, addr, name, description, model string) error
 	Delete(by, addr string) (int, error) // returns how many bubbles were removed (target + subtree)
@@ -79,6 +80,17 @@ func (s *Server) tools() []Tool {
 					"description": "The contact address to drop, e.g. \"0.2\".",
 				}},
 				"required": []string{"addr"},
+			},
+		},
+		{
+			Name:        "compact",
+			Description: "Compact YOUR OWN conversation now to reclaim context. Call this at a natural checkpoint — a task is finished and you've written down anything important — instead of letting the context grow until it auto-compacts near the limit. Optionally pass 'focus' to steer what the summary keeps.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"focus": map[string]any{
+					"type":        "string",
+					"description": "Optional: what the summary should preserve, e.g. \"keep the API schema and open TODOs\".",
+				}},
 			},
 		},
 	}
