@@ -685,6 +685,24 @@ func (k *Kernel) RotateWebhook(a addr.Address) (string, error) {
 	return k.WebhookURL(a)
 }
 
+// WebhookURLBy is WebhookURL with the fleet's ownership rule: `by` may fetch the
+// webhook URL of itself or any bubble in its own subtree (root: anyone) — the
+// same authority as edit/delete/schedule.
+func (k *Kernel) WebhookURLBy(by, target addr.Address) (string, error) {
+	if !k.canManage(by, target) {
+		return "", ErrNotAllowed
+	}
+	return k.WebhookURL(target)
+}
+
+// RotateWebhookBy applies the same ownership rule to rotation.
+func (k *Kernel) RotateWebhookBy(by, target addr.Address) (string, error) {
+	if !k.canManage(by, target) {
+		return "", ErrNotAllowed
+	}
+	return k.RotateWebhook(target)
+}
+
 // ResolveWebhookToken maps an incoming /w/<token> hit to its bubble.
 func (k *Kernel) ResolveWebhookToken(tok string) (addr.Address, bool) {
 	if b, ok := k.Reg.ByWebhookToken(tok); ok {

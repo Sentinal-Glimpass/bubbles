@@ -42,12 +42,12 @@ func (f *fakeBackend) Unschedule(by, id string) error {
 	return nil
 }
 func (f *fakeBackend) Schedules(by string) []string { return []string{"[s-1] -> 0.2"} }
-func (f *fakeBackend) Webhook(owner string) (string, error) {
-	f.webhooks = append(f.webhooks, owner)
-	return "http://127.0.0.1:8899/w/tok-" + owner, nil
+func (f *fakeBackend) Webhook(by, target string) (string, error) {
+	f.webhooks = append(f.webhooks, by+"->"+target)
+	return "http://127.0.0.1:8899/w/tok-" + target, nil
 }
-func (f *fakeBackend) WebhookRotate(owner string) (string, error) {
-	return "http://127.0.0.1:8899/w/new-" + owner, nil
+func (f *fakeBackend) WebhookRotate(by, target string) (string, error) {
+	return "http://127.0.0.1:8899/w/new-" + target, nil
 }
 func (f *fakeBackend) Spawn(by, n, desc, d, model string) (string, error) { return "0.1.1", nil }
 func (f *fakeBackend) Edit(by, addr, name, desc, model string) error {

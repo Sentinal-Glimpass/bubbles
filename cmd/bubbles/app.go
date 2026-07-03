@@ -387,13 +387,21 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 	case "schedules":
 		return ipc.Reply{OK: true, Messages: k.SchedulesFor(from)}
 	case "webhook":
-		url, err := k.WebhookURL(from)
+		target := addr.Address(r.To)
+		if r.To == "" {
+			target = from
+		}
+		url, err := k.WebhookURLBy(from, target)
 		if err != nil {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}
 		return ipc.Reply{OK: true, Addr: url}
 	case "webhook_rotate":
-		url, err := k.RotateWebhook(from)
+		target := addr.Address(r.To)
+		if r.To == "" {
+			target = from
+		}
+		url, err := k.RotateWebhookBy(from, target)
 		if err != nil {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}

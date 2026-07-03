@@ -915,6 +915,46 @@ func TestWebhook(t *testing.T) {
 	}
 }
 
+// TestWebhookOwnership: webhook URLs follow the subtree rule — a bubble sees its
+// own and its descendants'; siblings/outsiders are denied; root sees all.
+func TestWebhookOwnership(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	k.WebhookBase = "http://127.0.0.1:8899"
+
+	mgr, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/m", runner.SpawnOpts{Name: "mgr", GrantSpawn: true}) // 0.1
+	worker, _ := k.Spawn(mgr, "", "/tmp/w", runner.SpawnOpts{Name: "w"})                                        // 0.1.1
+	other, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/o", runner.SpawnOpts{Name: "other"})               // 0.2
+
+	// self and own subtree: allowed
+	if _, err := k.WebhookURLBy(worker, worker); err != nil {
+		t.Fatalf("self: %v", err)
+	}
+	wu, err := k.WebhookURLBy(mgr, worker)
+	if err != nil {
+		t.Fatalf("spawner should see its worker's webhook: %v", err)
+	}
+	// outside the subtree: denied (fetch and rotate)
+	if _, err := k.WebhookURLBy(other, worker); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("outsider should be denied, got %v", err)
+	}
+	if _, err := k.WebhookURLBy(worker, mgr); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("child must not see its parent's webhook, got %v", err)
+	}
+	if _, err := k.RotateWebhookBy(other, worker); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("outsider rotate should be denied, got %v", err)
+	}
+	// root: anyone; and owner rotation invalidates the old URL
+	if _, err := k.WebhookURLBy(addr.Root, other); err != nil {
+		t.Fatalf("root: %v", err)
+	}
+	nu, err := k.RotateWebhookBy(mgr, worker)
+	if err != nil || nu == wu {
+		t.Fatalf("owner rotate: %q -> %q (%v)", wu, nu, err)
+	}
+}
+
 // TestCompact: a running bubble's compact() types the /compact command into its
 // own session; a cold bubble reports it isn't running.
 func TestCompact(t *testing.T) {

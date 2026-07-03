@@ -260,8 +260,8 @@ func (b *ipcBackend) Schedules(by string) []string {
 	return rep.Messages
 }
 
-func (b *ipcBackend) Webhook(owner string) (string, error) {
-	rep, err := b.c.Do(ipc.Request{Op: "webhook", From: owner})
+func (b *ipcBackend) Webhook(by, target string) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "webhook", From: by, To: target})
 	if err != nil {
 		return "", err
 	}
@@ -271,8 +271,8 @@ func (b *ipcBackend) Webhook(owner string) (string, error) {
 	return rep.Addr, nil // Addr carries the URL
 }
 
-func (b *ipcBackend) WebhookRotate(owner string) (string, error) {
-	rep, err := b.c.Do(ipc.Request{Op: "webhook_rotate", From: owner})
+func (b *ipcBackend) WebhookRotate(by, target string) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "webhook_rotate", From: by, To: target})
 	if err != nil {
 		return "", err
 	}

@@ -14,8 +14,8 @@ type Backend interface {
 	Schedule(by, target, subject, body, every, daily string, urgent bool) (string, error)
 	Unschedule(by, id string) error
 	Schedules(by string) []string
-	Webhook(owner string) (string, error)       // the caller's incoming-webhook URL (minted on first use)
-	WebhookRotate(owner string) (string, error) // revoke + reissue the URL
+	Webhook(by, target string) (string, error)       // incoming-webhook URL for target (self or a bubble in by's subtree)
+	WebhookRotate(by, target string) (string, error) // revoke + reissue target's URL (same authority)
 	Spawn(by, name, description, dir, model string) (string, error)
 	Edit(by, addr, name, description, model string) error
 	Delete(by, addr string) (int, error) // returns how many bubbles were removed (target + subtree)
@@ -130,13 +130,25 @@ func (s *Server) tools() []Tool {
 		},
 		{
 			Name:        "webhook",
-			Description: "Get YOUR incoming-webhook URL (minted on first call, stable afterwards). Anything that can make an HTTP request — a cron, a script, an external service — can POST to it and the payload lands in your inbox as a message from \"webhook\", waking you if asleep. POST JSON {subject, body, from?, urgent?} or a raw body with ?subject=. Give this URL to programs that need to notify you; you cannot reply to webhook messages.",
-			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+			Description: "Get an incoming-webhook URL (minted on first call, stable afterwards) — yours by default, or a sub-bubble's via 'addr' (only bubbles in YOUR subtree). Anything that can make an HTTP request — a cron, a script, an external service — can POST to it and the payload lands in that bubble's inbox as a message from \"webhook\", waking it if asleep. POST JSON {subject, body, from?, urgent?} or a raw body with ?subject=. Webhook messages cannot be replied to.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"addr": map[string]any{
+					"type":        "string",
+					"description": "Optional: which bubble's webhook to fetch — yourself (default) or a bubble you own (your subtree).",
+				}},
+			},
 		},
 		{
 			Name:        "webhook_rotate",
-			Description: "Revoke your current webhook URL and mint a fresh one (use if the old URL leaked or a program should lose access). Anything still POSTing to the old URL gets 404.",
-			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+			Description: "Revoke a webhook URL and mint a fresh one (yours by default, or a sub-bubble's via 'addr'). Use if the URL leaked or a program should lose access; the old URL then gets 404.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"addr": map[string]any{
+					"type":        "string",
+					"description": "Optional: which bubble's webhook to rotate — yourself (default) or a bubble you own.",
+				}},
+			},
 		},
 	}
 	if s.Spawnable {
