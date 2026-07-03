@@ -42,6 +42,12 @@ func main() {
 				runSessionHook(os.Args[2])
 			}
 			return
+		case "export":
+			runExport(os.Args[2:])
+			return
+		case "import":
+			runImport(os.Args[2:])
+			return
 		case "--hosted":
 			hostedMode = true
 			runApp() // child of the daemon: q detaches
