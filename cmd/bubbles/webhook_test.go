@@ -115,3 +115,26 @@ func TestWebhookHTTPEndToEnd(t *testing.T) {
 	}
 	r.Body.Close()
 }
+
+func TestRateLimiter(t *testing.T) {
+	rl := newRateLimiter(1, 3) // burst 3, 1/sec
+	now := time.Unix(1000, 0)
+	// burst: first 3 allowed
+	for i := 0; i < 3; i++ {
+		if !rl.allow("tok", now) {
+			t.Fatalf("burst request %d should be allowed", i)
+		}
+	}
+	// 4th within the same instant: denied
+	if rl.allow("tok", now) {
+		t.Fatal("over-burst request should be rate limited")
+	}
+	// after ~1.1s, one token refilled -> allowed again
+	if !rl.allow("tok", now.Add(1100*time.Millisecond)) {
+		t.Fatal("should allow after refill")
+	}
+	// a different token has its own bucket
+	if !rl.allow("other", now) {
+		t.Fatal("a separate token should not share the bucket")
+	}
+}

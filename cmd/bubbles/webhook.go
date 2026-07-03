@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
@@ -54,8 +55,9 @@ func startWebhookServer(k *kernel.Kernel) string {
 	}
 	base = strings.TrimRight(base, "/")
 
+	limiter := newRateLimiter(1, 20) // ~1 req/s sustained, burst 20, per token
 	mux := http.NewServeMux()
-	mux.HandleFunc("/w/", func(w http.ResponseWriter, r *http.Request) { handleWebhook(k, w, r) })
+	mux.HandleFunc("/w/", func(w http.ResponseWriter, r *http.Request) { handleWebhook(k, limiter, w, r) })
 	srv := &http.Server{
 		Handler:           mux,
 		ReadTimeout:       10 * time.Second,
@@ -76,8 +78,9 @@ type webhookPayload struct {
 }
 
 // handleWebhook turns POST /w/<token> into a message delivered to the owning
-// bubble (waking it if cold). The unguessable token IS the auth.
-func handleWebhook(k *kernel.Kernel, w http.ResponseWriter, r *http.Request) {
+// bubble (waking it if cold). The unguessable token IS the auth. Responses never
+// disclose fleet topology (no bubble address, on success or error).
+func handleWebhook(k *kernel.Kernel, limiter *rateLimiter, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"ok":false,"err":"POST only"}`, http.StatusMethodNotAllowed)
 		return
@@ -86,6 +89,10 @@ func handleWebhook(k *kernel.Kernel, w http.ResponseWriter, r *http.Request) {
 	target, ok := k.ResolveWebhookToken(token)
 	if !ok {
 		http.Error(w, `{"ok":false,"err":"unknown webhook"}`, http.StatusNotFound)
+		return
+	}
+	if !limiter.allow(token, time.Now()) {
+		http.Error(w, `{"ok":false,"err":"rate limited"}`, http.StatusTooManyRequests)
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, 256<<10)) // bound hostile payloads
@@ -124,6 +131,48 @@ func handleWebhook(k *kernel.Kernel, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"ok":false,"err":"target gone"}`, http.StatusGone)
 		return
 	}
+	// success carries the inbox message id only — never the bubble address, so a
+	// caller with the token can't map the token to fleet topology.
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"ok":true,"id":%d,"delivered":"%s"}`+"\n", id, target)
+	fmt.Fprintf(w, `{"ok":true,"id":%d}`+"\n", id)
+}
+
+// rateLimiter is a per-token token-bucket, bounding webhook floods (per bubble).
+type rateLimiter struct {
+	mu      sync.Mutex
+	buckets map[string]*bucket
+	rate    float64 // tokens refilled per second
+	burst   float64 // bucket capacity
+}
+
+type bucket struct {
+	tokens float64
+	last   time.Time
+}
+
+func newRateLimiter(ratePerSec, burst float64) *rateLimiter {
+	return &rateLimiter{buckets: map[string]*bucket{}, rate: ratePerSec, burst: burst}
+}
+
+// allow consumes one token for key, refilling by elapsed time. Buckets are
+// created only for already-validated tokens, so the map is bounded by live
+// webhooks (a bad token 404s before reaching here).
+func (rl *rateLimiter) allow(key string, now time.Time) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	b := rl.buckets[key]
+	if b == nil {
+		rl.buckets[key] = &bucket{tokens: rl.burst - 1, last: now}
+		return true
+	}
+	b.tokens += now.Sub(b.last).Seconds() * rl.rate
+	if b.tokens > rl.burst {
+		b.tokens = rl.burst
+	}
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }
