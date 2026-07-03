@@ -36,6 +36,10 @@ const (
 	leaderByteAlt = 0x1f // Ctrl-/ (sends US, 0x1f) — an easier-to-reach alias
 )
 
+// maxBubbleName caps a spawned bubble's display name, so a charter accidentally
+// crammed into the name field fails fast instead of corrupting the fleet view.
+const maxBubbleName = 48
+
 // isLeader reports whether b is one of the interchangeable leader keys.
 func isLeader(b byte) bool { return b == leaderByte || b == leaderByteAlt }
 
@@ -109,6 +113,17 @@ func runApp() {
 			k.DrainInboxes()
 		}
 	}()
+	go func() { // persist the message store shortly after it changes, so mail survives a restart
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		var lastVer int64 = -1
+		for range t.C {
+			if v := k.Store.Version(); v != lastVer {
+				lastVer = v
+				_ = saveInbox(baseDir, k)
+			}
+		}
+	}()
 
 	// Resource sampler: feeds the dashboard's top-right panel. It sends to
 	// whichever TUI program is currently running (nil while diving into a bubble).
@@ -125,13 +140,19 @@ func runApp() {
 	// Quit/relaunch loop: the TUI quits when you dive in; we hand over the
 	// terminal, then relaunch the fleet view.
 	marks := restoreFleet(baseDir, k) // rehydrate a saved fleet (empty if none)
+	inboxExisted, inboxOK := loadInbox(baseDir, k)
+	startupFlash := ""
+	if inboxExisted && !inboxOK {
+		startupFlash = "⚠ saved inbox was unreadable — some messages may have been lost; ask senders to resend"
+	}
 	m := tui.New(k)
 	m.BaseDir = baseDir
 	m.Marks = marks
 	m.AllowAll = &allowAll
+	m.Flash = startupFlash
 	// Persist promptly whenever the fleet changes (incl. agent-driven spawn/edit/
 	// delete over IPC), so nothing is lost if the daemon dies before the next dive.
-	m.OnPersist = func() { k.SyncSessionIDs(); _ = saveFleet(baseDir, k, marks) }
+	m.OnPersist = func() { k.SyncSessionIDs(); _ = saveFleet(baseDir, k, marks); _ = saveInbox(baseDir, k) }
 	for {
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		curProg.Store(p)
@@ -145,6 +166,7 @@ func runApp() {
 		}
 		k.SyncSessionIDs()               // capture any in-session /resume before persisting
 		_ = saveFleet(baseDir, k, marks) // persist fleet-view changes (spawn/introduce/marks)
+		_ = saveInbox(baseDir, k)        // persist mail
 		prev := final.(tui.Model)        // carries view state (expanded nodes, cursor, marks)
 		sel := prev.Selected
 		if sel == "" { // q / ctrl-c
@@ -166,6 +188,7 @@ func runApp() {
 		}
 		k.SyncSessionIDs()               // capture any in-session /resume before persisting
 		_ = saveFleet(baseDir, k, marks) // persist anything spawned during the dive
+		_ = saveInbox(baseDir, k)        // persist mail
 		m = prev.Refreshed()             // back to fleet: same expand state + cursor where we left
 		m.Flash = flash
 	}
@@ -247,10 +270,26 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 			if bub, ok := k.Reg.Get(c); ok && bub.Label() != "" {
 				label += " (" + bub.Label() + ")" // attach the name so peers have names/roles
 			}
+			if c.IsRoot() || k.IsHot(c) {
+				label += " ●awake" // running now: an urgent message wakes it instantly / it's the human
+			} else {
+				label += " ○asleep" // paged out: urgent will page it in
+			}
 			out[i] = label
 		}
 		return ipc.Reply{OK: true, Contacts: out}
+	case "introduce":
+		if err := k.IntroduceBy(from, addr.Address(r.Addr), addr.Address(r.To)); err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true}
+	case "broadcast":
+		n := k.BroadcastBy(from, r.Subject, r.Body, r.Urgent)
+		return ipc.Reply{OK: true, ID: n} // ID = how many bubbles were reached
 	case "spawn":
+		if len(r.Name) > maxBubbleName {
+			return ipc.Reply{OK: false, Err: fmt.Sprintf("name too long (%d > %d chars) — keep 'name' short and put the task in 'description'", len(r.Name), maxBubbleName)}
+		}
 		dir := r.Dir
 		if dir == "" {
 			dir = filepath.Join(defaultWorkspace(), r.Name) // downstream of launch dir

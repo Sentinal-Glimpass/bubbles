@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
+	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 )
@@ -42,6 +43,47 @@ type manifest struct {
 
 func fleetPath(baseDir string) string {
 	return filepath.Join(baseDir, ".bubbles", "fleet.json")
+}
+
+func inboxPath(baseDir string) string {
+	return filepath.Join(baseDir, ".bubbles", "inbox.json")
+}
+
+// inboxManifest is the on-disk message store: every message plus the ID sequence,
+// so unread mail survives a restart and reply_to references still resolve.
+type inboxManifest struct {
+	Seq      int             `json:"seq"`
+	Messages []inbox.Message `json:"messages"`
+}
+
+// saveInbox persists the message store next to the fleet manifest.
+func saveInbox(baseDir string, k *kernel.Kernel) error {
+	msgs, seq := k.Store.Snapshot()
+	data, err := json.MarshalIndent(inboxManifest{Seq: seq, Messages: msgs}, "", "  ")
+	if err != nil {
+		return err
+	}
+	p := inboxPath(baseDir)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0o644)
+}
+
+// loadInbox restores the message store. Returns false if there was no saved
+// inbox (fresh workspace); returns true with ok=false only handled by the caller
+// when the file exists but is corrupt (so it can warn about lost mail).
+func loadInbox(baseDir string, k *kernel.Kernel) (existed bool, ok bool) {
+	data, err := os.ReadFile(inboxPath(baseDir))
+	if err != nil {
+		return false, true // no inbox yet: nothing lost
+	}
+	var m inboxManifest
+	if json.Unmarshal(data, &m) != nil {
+		return true, false // existed but corrupt: mail was lost
+	}
+	k.Store.Load(m.Messages, m.Seq)
+	return true, true
 }
 
 // saveFleet writes the current fleet (bubbles, contacts, number-slots) to disk.

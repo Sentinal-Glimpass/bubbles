@@ -13,6 +13,8 @@ type fakeBackend struct {
 	edits   [][5]string // by, addr, name, description, model
 	deletes [][2]string // by, addr
 	forgets [][2]string // by, addr
+	intros  [][3]string // by, a, b
+	bcasts  [][3]string // by, subject, body
 }
 
 func (f *fakeBackend) Send(from, to, subject, body string, replyTo int, urgent bool) (int, error) {
@@ -35,6 +37,14 @@ func (f *fakeBackend) Delete(by, addr string) (int, error) {
 func (f *fakeBackend) Forget(by, addr string) error {
 	f.forgets = append(f.forgets, [2]string{by, addr})
 	return nil
+}
+func (f *fakeBackend) Introduce(by, a, b string) error {
+	f.intros = append(f.intros, [3]string{by, a, b})
+	return nil
+}
+func (f *fakeBackend) Broadcast(by, subject, body string, urgent bool) (int, error) {
+	f.bcasts = append(f.bcasts, [3]string{by, subject, body})
+	return 3, nil
 }
 
 func TestServeFlow(t *testing.T) {
@@ -119,8 +129,8 @@ func TestSpawnGated(t *testing.T) {
 		t.Fatalf("base server should advertise 5 tools, got %d", len(base.tools()))
 	}
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 8 { // + spawn, edit, delete
-		t.Fatalf("spawnable server should advertise 8 tools, got %d", len(s.tools()))
+	if len(s.tools()) != 10 { // + spawn, edit, delete, introduce, broadcast
+		t.Fatalf("spawnable server should advertise 10 tools, got %d", len(s.tools()))
 	}
 }
 
@@ -172,5 +182,40 @@ func TestEditDeleteTools(t *testing.T) {
 	}
 	if len(fb2.deletes) != 0 || !strings.Contains(out2.String(), "not available") {
 		t.Fatalf("non-spawnable server must refuse delete: deletes=%v out=%s", fb2.deletes, out2.String())
+	}
+}
+
+// TestIntroduceBroadcastTools: introduce/broadcast relay with the caller's own
+// identity and are gated on the spawn grant.
+func TestIntroduceBroadcastTools(t *testing.T) {
+	in := strings.NewReader(strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"introduce","arguments":{"a":"0.1.1","b":"0.1.2"}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"broadcast","arguments":{"subject":"standup","body":"post status"}}}`,
+	}, "\n"))
+	fb := &fakeBackend{}
+	s := &Server{Self: "0.1", B: fb, Spawnable: true}
+	var out bytes.Buffer
+	if err := s.Serve(in, &out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if len(fb.intros) != 1 || fb.intros[0] != [3]string{"0.1", "0.1.1", "0.1.2"} {
+		t.Fatalf("introduce relay = %v", fb.intros)
+	}
+	if len(fb.bcasts) != 1 || fb.bcasts[0] != [3]string{"0.1", "standup", "post status"} {
+		t.Fatalf("broadcast relay = %v", fb.bcasts)
+	}
+	if !strings.Contains(out.String(), "3 bubble(s) in your subtree") {
+		t.Fatalf("broadcast should report the reach, got %s", out.String())
+	}
+
+	// not spawnable -> refused
+	in2 := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"introduce","arguments":{"a":"0.1.1","b":"0.1.2"}}}`)
+	fb2 := &fakeBackend{}
+	var out2 bytes.Buffer
+	if err := (&Server{Self: "0.1", B: fb2, Spawnable: false}).Serve(in2, &out2); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if len(fb2.intros) != 0 || !strings.Contains(out2.String(), "not available") {
+		t.Fatalf("non-spawnable server must refuse introduce: %v %s", fb2.intros, out2.String())
 	}
 }

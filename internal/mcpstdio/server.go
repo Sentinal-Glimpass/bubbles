@@ -165,6 +165,23 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolErr(msg.ID, err.Error())
 		}
 		return toolOK(msg.ID, fmt.Sprintf("deleted %s (%d bubble(s) removed)", arg("addr"), n))
+	case "introduce":
+		if !s.Spawnable {
+			return errResp(msg.ID, -32601, "tool not available: introduce")
+		}
+		if err := s.B.Introduce(s.Self, arg("a"), arg("b")); err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, fmt.Sprintf("introduced %s <-> %s", arg("a"), arg("b")))
+	case "broadcast":
+		if !s.Spawnable {
+			return errResp(msg.ID, -32601, "tool not available: broadcast")
+		}
+		n, err := s.B.Broadcast(s.Self, arg("subject"), arg("body"), argBool("urgent"))
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, fmt.Sprintf("broadcast to %d bubble(s) in your subtree", n))
 	default:
 		return errResp(msg.ID, -32602, "unknown tool: "+p.Name)
 	}

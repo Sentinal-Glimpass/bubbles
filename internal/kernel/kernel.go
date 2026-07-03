@@ -71,6 +71,28 @@ type Kernel struct {
 	focused     addr.Address // the bubble the operator is dived into
 	heldFlushed bool         // whether the current idle backlog has already been flushed
 	lastKey     atomic.Int64 // unixnano of the operator's last keystroke in the focused bubble
+
+	notifyMu sync.Mutex
+	notified map[addr.Address]int // highest unread count already announced per bubble (nudge dedup)
+}
+
+// markNudge reports whether a "you have mail" nudge should be written for a: true
+// only when unread has grown past the level we last announced (so overlapping
+// nudges don't stack). clearNudge resets it when the bubble reads its inbox.
+func (k *Kernel) markNudge(a addr.Address, unread int) bool {
+	k.notifyMu.Lock()
+	defer k.notifyMu.Unlock()
+	if unread <= k.notified[a] {
+		return false
+	}
+	k.notified[a] = unread
+	return true
+}
+
+func (k *Kernel) clearNudge(a addr.Address) {
+	k.notifyMu.Lock()
+	k.notified[a] = 0
+	k.notifyMu.Unlock()
 }
 
 // SetFocus marks the bubble the operator is dived into. Entry starts IDLE (not
@@ -105,7 +127,7 @@ func (k *Kernel) UnsetFocus(a addr.Address) {
 		k.focused = ""
 	}
 	k.focusMu.Unlock()
-	if n := k.Store.UnreadCount(a); n > 0 {
+	if n := k.Store.UnreadCount(a); n > 0 && k.markNudge(a, n) {
 		if s := k.session(a); s != nil && s.Alive() {
 			_, _ = s.Write([]byte(formatDrain(n)))
 		}
@@ -131,7 +153,7 @@ func (k *Kernel) FlushHeldIfIdle() {
 	}
 	k.heldFlushed = true
 	k.focusMu.Unlock()
-	if n := k.Store.UnreadCount(foc); n > 0 {
+	if n := k.Store.UnreadCount(foc); n > 0 && k.markNudge(foc, n) {
 		if s := k.session(foc); s != nil && s.Alive() {
 			_, _ = s.Write([]byte(formatDrain(n)))
 		}
@@ -157,6 +179,7 @@ func New(r runner.Runner) *Kernel {
 		runner:        r,
 		sessions:      map[addr.Address]runner.Session{},
 		lastUsed:      map[addr.Address]int64{},
+		notified:      map[addr.Address]int{},
 	}
 }
 
@@ -318,6 +341,14 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 	if !k.Caps.CanSend(from, to) {
 		return 0, ErrNotContact
 	}
+	return k.fileAndNotify(from, to, subject, body, replyTo, urgent), nil
+}
+
+// fileAndNotify does the actual delivery (files the message, wires the reply
+// grant, and nudges the recipient) WITHOUT a permission check — callers that are
+// already authorized (Send after CanSend, BroadcastBy over its own subtree) use
+// it directly.
+func (k *Kernel) fileAndNotify(from, to addr.Address, subject, body string, replyTo int, urgent bool) int {
 	fromName := ""
 	if b, ok := k.Reg.Get(from); ok {
 		fromName = b.Label()
@@ -327,7 +358,8 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 	if to == addr.Root {
 		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard (root is the human; always notified)
 	}
-	notify := []byte(formatNotify(from, fromName, subject, k.Store.UnreadCount(to)))
+	unread := k.Store.UnreadCount(to)
+	notify := []byte(formatNotify(from, fromName, subject, unread))
 	// Delivery policy:
 	//   - urgent: wake the recipient now (page it in if cold), then nudge it.
 	//   - non-urgent, already hot: deliver immediately (free — it's running).
@@ -344,14 +376,17 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 	// is delivered as soon as they pause (FlushHeldIfIdle) or leave (UnsetFocus).
 	// If they're just idle-viewing the bubble, deliver normally so they see it.
 	if k.isFocused(to) && k.typingActive() {
-		return id, nil
+		return id
 	}
-	// deliver types the notice in — but a freshly-launched real session hasn't
-	// rendered its input yet, so typing now would land in a not-ready TUI and sit
-	// there unsubmitted. In that case wait (off the send path) until it's produced
-	// output, i.e. booted. Already-running sessions (and test fakes) deliver now.
+	// deliver types the notice in — but only when we're actually going to reach
+	// the recipient (a pooled/paged-out message writes nothing here and is left
+	// for DrainInboxes). markNudge dedups: it's true only when unread has grown
+	// past the last announced level (reset when the bubble reads), so overlapping
+	// nudges (send + idle-flush + drain) don't stack up "you have mail" notices.
+	// A freshly-launched real session hasn't rendered its input yet, so typing now
+	// would sit unsubmitted; wait (off the send path) until it's booted.
 	deliver := func(s runner.Session) {
-		if s == nil {
+		if s == nil || !k.markNudge(to, unread) {
 			return
 		}
 		if _, isPTY := s.(runner.PTYSession); isPTY && s.RecentOutput() == "" {
@@ -368,7 +403,7 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 	} else if b, ok := k.Reg.Get(to); ok && b.SessionID == "" && !to.IsRoot() {
 		deliver(k.EnsureAlive(to))
 	}
-	return id, nil
+	return id
 }
 
 // deliverWhenReady waits until a's session has produced output — its TUI is up
@@ -427,6 +462,9 @@ func (k *Kernel) DrainInboxes() {
 		go func(j job) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if !k.markNudge(j.a, j.n) { // already announced this backlog
+				return
+			}
 			if s := k.EnsureAlive(j.a); s != nil {
 				_, _ = s.Write([]byte(formatDrain(j.n)))
 			}
@@ -530,6 +568,7 @@ func (k *Kernel) Status(from addr.Address) []string {
 // Inbox returns owner's unread messages (marking them read), each labeled with
 // the sender's address and role.
 func (k *Kernel) Inbox(owner addr.Address) []string {
+	k.clearNudge(owner) // read -> a future message re-announces
 	var out []string
 	for _, m := range k.Store.Take(owner) {
 		from := m.From.String()
@@ -589,6 +628,45 @@ func (k *Kernel) Introduce(by, a, b addr.Address) error {
 	}
 	k.Caps.Introduce(a, b)
 	return nil
+}
+
+// IntroduceBy lets a bubble introduce two bubbles it OWNS (both in its subtree)
+// to each other, so its sub-workers can hand off directly instead of relaying
+// through it. Root may introduce anyone; a non-root bubble is confined to its own
+// descendants (the human stays the gate for cross-tree links). Both targets must
+// exist.
+func (k *Kernel) IntroduceBy(by, a, b addr.Address) error {
+	if a == b {
+		return ErrNotAllowed
+	}
+	if _, ok := k.Reg.Get(a); !ok {
+		return fmt.Errorf("kernel: no bubble at %s", a)
+	}
+	if _, ok := k.Reg.Get(b); !ok {
+		return fmt.Errorf("kernel: no bubble at %s", b)
+	}
+	if by != addr.Root && (!by.IsAncestorOf(a) || !by.IsAncestorOf(b)) {
+		return ErrNotAllowed
+	}
+	k.Caps.Introduce(a, b)
+	return nil
+}
+
+// BroadcastBy files a message to every descendant of by (its whole subtree) in
+// one call — for fleet-wide notices to the workers you own. Authorized by
+// ownership: no per-recipient contact check (the subtree is yours). Each
+// recipient can reply to you. Returns how many bubbles it reached.
+func (k *Kernel) BroadcastBy(by addr.Address, subject, body string, urgent bool) int {
+	var targets []addr.Address
+	for _, b := range k.Reg.All() {
+		if by.IsAncestorOf(b.Addr) {
+			targets = append(targets, b.Addr)
+		}
+	}
+	for _, t := range targets {
+		k.fileAndNotify(by, t, subject, body, 0, urgent)
+	}
+	return len(targets)
 }
 
 // Spawn creates a child bubble under by, launches its session, and wires

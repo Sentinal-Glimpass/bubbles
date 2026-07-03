@@ -14,6 +14,8 @@ type Backend interface {
 	Edit(by, addr, name, description, model string) error
 	Delete(by, addr string) (int, error) // returns how many bubbles were removed (target + subtree)
 	Forget(by, addr string) error        // drop a contact from the caller's own list
+	Introduce(by, a, b string) error     // make two of the caller's sub-bubbles mutual contacts
+	Broadcast(by, subject, body string, urgent bool) (int, error) // message the caller's whole subtree
 }
 
 // Tool is an MCP tool definition advertised by tools/list.
@@ -127,6 +129,29 @@ func (s *Server) tools() []Tool {
 					"description": "Address of the sub-bubble to delete (must be in YOUR subtree).",
 				}},
 				"required": []string{"addr"},
+			},
+		})
+		introProps := strProp()
+		introProps["a"] = map[string]any{"type": "string", "description": "First sub-bubble address (in YOUR subtree)."}
+		introProps["b"] = map[string]any{"type": "string", "description": "Second sub-bubble address (in YOUR subtree)."}
+		ts = append(ts, Tool{
+			Name:        "introduce",
+			Description: "Introduce two of YOUR sub-bubbles to each other (mutual contacts), so they can hand off directly instead of relaying through you. Both must be in your subtree.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": introProps,
+				"required":   []string{"a", "b"},
+			},
+		})
+		bcProps := strProp("subject", "body")
+		bcProps["urgent"] = map[string]any{"type": "boolean", "description": "Wake every recipient now (default false = pooled)."}
+		ts = append(ts, Tool{
+			Name:        "broadcast",
+			Description: "Send one message to EVERY bubble in your subtree (all your descendants) at once — for fleet-wide notices to the workers you own. Returns how many were reached.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": bcProps,
+				"required":   []string{"subject"},
 			},
 		})
 	}

@@ -13,10 +13,12 @@ You have MCP tools from the "bubbles" server:
 - forget(addr): remove an address from YOUR contacts (you can no longer message it). Use to tidy up contacts you no longer need. You can't forget root.
 
 If you were granted the ability to spawn, you also OWN and manage your sub-bubbles:
-- spawn(name, description, dir?, model?): create a sub-bubble. Put its full task/charter in description, NOT in name.
+- spawn(name, description, dir?, model?): create a sub-bubble. Put its full task/charter in description, NOT in name (name is a short label).
 - edit(addr, name?, description?, model?): update one of YOUR sub-bubbles (omitted fields unchanged).
 - delete(addr): permanently remove one of YOUR sub-bubbles (and everything under it). Clean up workers that are done.
-edit/delete only work on bubbles in your own subtree — the ones you spawned (and theirs).
+- introduce(a, b): make two of YOUR sub-bubbles mutual contacts so they can hand off directly instead of relaying through you.
+- broadcast(subject, body?, urgent?): send one message to EVERY bubble in your subtree at once (fleet-wide notices to workers you own).
+spawn/edit/delete/introduce/broadcast only act on your own subtree — the bubbles you spawned (and theirs).
 
 Conventions:
 - Report meaningful progress, blocking questions, and completion to root ("0") with send.

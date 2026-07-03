@@ -190,3 +190,25 @@ func (b *ipcBackend) Forget(by, addr string) error {
 	}
 	return nil
 }
+
+func (b *ipcBackend) Introduce(by, a, bb string) error {
+	rep, err := b.c.Do(ipc.Request{Op: "introduce", From: by, Addr: a, To: bb})
+	if err != nil {
+		return err
+	}
+	if !rep.OK {
+		return errors.New(rep.Err)
+	}
+	return nil
+}
+
+func (b *ipcBackend) Broadcast(by, subject, body string, urgent bool) (int, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "broadcast", From: by, Subject: subject, Body: body, Urgent: urgent})
+	if err != nil {
+		return 0, err
+	}
+	if !rep.OK {
+		return 0, errors.New(rep.Err)
+	}
+	return rep.ID, nil // ID = number of bubbles reached
+}

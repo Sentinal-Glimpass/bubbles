@@ -896,6 +896,102 @@ func contains(xs []addr.Address, x addr.Address) bool {
 	return false
 }
 
+// TestIntroduceBySubtree: a bubble can introduce two of its OWN descendants, but
+// not bubbles outside its subtree; root can introduce anyone.
+func TestIntroduceBySubtree(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	mgr, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/m", runner.SpawnOpts{Name: "mgr", GrantSpawn: true}) // 0.1
+	w1, _ := k.Spawn(mgr, "", "/tmp/w1", runner.SpawnOpts{Name: "w1"})                                          // 0.1.1
+	w2, _ := k.Spawn(mgr, "", "/tmp/w2", runner.SpawnOpts{Name: "w2"})                                          // 0.1.2
+	other, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/o", runner.SpawnOpts{Name: "other"})               // 0.2
+
+	if err := k.IntroduceBy(mgr, w1, w2); err != nil {
+		t.Fatalf("mgr introduce its own children: %v", err)
+	}
+	if !k.Caps.CanSend(w1, w2) || !k.Caps.CanSend(w2, w1) {
+		t.Fatal("introduced siblings should be mutual contacts")
+	}
+	// can't introduce a bubble outside the subtree
+	if err := k.IntroduceBy(mgr, w1, other); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("introducing outside the subtree should be denied, got %v", err)
+	}
+	// a worker can't introduce its parent's peers
+	if err := k.IntroduceBy(w1, mgr, other); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("non-owner introduce should be denied, got %v", err)
+	}
+	// root may introduce anyone
+	if err := k.IntroduceBy(addr.Root, mgr, other); err != nil {
+		t.Fatalf("root introduce: %v", err)
+	}
+}
+
+// TestBroadcastBy: a broadcast reaches every descendant (not the sender, not
+// peers outside the subtree), and each recipient can reply.
+func TestBroadcastBy(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	mgr, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/m", runner.SpawnOpts{Name: "mgr", GrantSpawn: true}) // 0.1
+	w1, _ := k.Spawn(mgr, "", "/tmp/w1", runner.SpawnOpts{Name: "w1"})                                          // 0.1.1
+	sub, _ := k.SpawnUnder(addr.Root, w1, "", "/tmp/s", runner.SpawnOpts{Name: "sub"})                          // 0.1.1.1 (grandchild)
+	other, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/o", runner.SpawnOpts{Name: "other"})              // 0.2
+
+	n := k.BroadcastBy(mgr, "standup", "post status", false)
+	if n != 2 { // w1 and sub, not mgr itself, not other
+		t.Fatalf("broadcast reached %d want 2", n)
+	}
+	if k.Store.UnreadCount(w1) != 1 || k.Store.UnreadCount(sub) != 1 {
+		t.Fatal("every descendant should have received the broadcast")
+	}
+	if k.Store.UnreadCount(other) != 0 {
+		t.Fatal("a bubble outside the subtree must not receive it")
+	}
+	if k.Store.UnreadCount(mgr) != 0 {
+		t.Fatal("the sender should not message itself")
+	}
+	// recipients can reply to the broadcaster
+	if !k.Caps.CanSend(w1, mgr) {
+		t.Fatal("a broadcast recipient should be able to reply to the sender")
+	}
+}
+
+// TestNudgeDedup: overlapping nudges for the same backlog don't stack; a new
+// message past the announced level nudges again; reading resets it.
+func TestNudgeDedup(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	k.EnsureAlive(a) // hot
+
+	k.Send(addr.Root, a, "m1", "", 0, true)
+	first := strings.Count(fr.Session(a).Written(), "📬 New message")
+	if first != 1 {
+		t.Fatalf("first message should nudge once, got %d", first)
+	}
+	// a redundant drain for the same unread level must NOT add another notice
+	k.DrainInboxes()
+	if strings.Count(fr.Session(a).Written(), "unread message") != 0 {
+		t.Fatal("drain re-announced an already-nudged backlog")
+	}
+	// a second message (unread grows) DOES nudge again
+	k.Send(addr.Root, a, "m2", "", 0, true)
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
+		t.Fatal("a new message past the announced level should nudge again")
+	}
+	// reading resets: the next message nudges even at the same count
+	k.Inbox(a)
+	k.Send(addr.Root, a, "m3", "", 0, true)
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 3 {
+		t.Fatal("after reading, a new message should nudge again")
+	}
+}
+
 // TestSpawnNameDescription: the new spawn sets Name + Goal (initial instruction);
 // Label() prefers Name; a legacy bubble with only Persona falls back to Persona.
 func TestSpawnNameDescription(t *testing.T) {

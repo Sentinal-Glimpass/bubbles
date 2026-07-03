@@ -26,10 +26,49 @@ type Message struct {
 type Store struct {
 	mu  sync.Mutex
 	seq int
+	ver int64 // bumped on every change, so the app persists only when needed
 	all []*Message
 }
 
 func New() *Store { return &Store{} }
+
+// Version returns a counter that increments on every change (append/read/reply),
+// so a periodic saver can skip writing when nothing has moved.
+func (s *Store) Version() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ver
+}
+
+// Snapshot returns a copy of all messages and the current ID sequence, for
+// persistence.
+func (s *Store) Snapshot() ([]Message, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Message, len(s.all))
+	for i, m := range s.all {
+		out[i] = *m
+	}
+	return out, s.seq
+}
+
+// Load replaces the store's contents from a saved snapshot (used on restore), so
+// unread messages survive a restart and the ID sequence continues (reply_to
+// references still resolve).
+func (s *Store) Load(msgs []Message, seq int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.all = make([]*Message, len(msgs))
+	for i := range msgs {
+		cp := msgs[i]
+		s.all[i] = &cp
+		if cp.ID > seq {
+			seq = cp.ID
+		}
+	}
+	s.seq = seq
+	s.ver++
+}
 
 // Append files a message and returns its assigned ID. If it is a reply, the
 // referenced message is marked Replied.
@@ -37,6 +76,7 @@ func (s *Store) Append(m Message) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seq++
+	s.ver++
 	m.ID = s.seq
 	cp := m
 	s.all = append(s.all, &cp)
@@ -60,6 +100,9 @@ func (s *Store) Take(owner addr.Address) []Message {
 			m.Read = true
 			out = append(out, *m)
 		}
+	}
+	if len(out) > 0 {
+		s.ver++
 	}
 	return out
 }

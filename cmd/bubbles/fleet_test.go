@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
+	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
@@ -107,4 +108,39 @@ func TestRestoreNoFile(t *testing.T) {
 	if m := restoreFleet(t.TempDir(), k); len(m) != 0 {
 		t.Fatalf("expected empty marks, got %+v", m)
 	}
+}
+
+func TestInboxPersistRoundTrip(t *testing.T) {
+	base := t.TempDir()
+
+	k1 := kernel.New(runner.NewFake())
+	k1.RelaunchProbe = 0
+	a, _ := k1.Spawn(addr.Root, "a", filepath.Join(base, "a"), runner.SpawnOpts{Name: "a"})
+	b, _ := k1.Spawn(addr.Root, "b", filepath.Join(base, "b"), runner.SpawnOpts{Name: "b"})
+	k1.Introduce(addr.Root, a, b)
+	id := k1.Store.Append(inboxMsg(a, b, "hello", "world", 0))
+	k1.Store.Append(inboxMsg(b, a, "re", "hi", id)) // a reply, so reply_to must resolve after restore
+
+	if err := saveInbox(base, k1); err != nil {
+		t.Fatalf("saveInbox: %v", err)
+	}
+
+	// fresh process restores the mail
+	k2 := kernel.New(runner.NewFake())
+	existed, ok := loadInbox(base, k2)
+	if !existed || !ok {
+		t.Fatalf("loadInbox existed=%v ok=%v", existed, ok)
+	}
+	if k2.Store.UnreadCount(b) != 1 {
+		t.Fatalf("unread mail should survive restart, got %d", k2.Store.UnreadCount(b))
+	}
+	// the ID sequence continues so a new message doesn't collide
+	next := k2.Store.Append(inboxMsg(a, b, "again", "", 0))
+	if next <= id+1 {
+		t.Fatalf("id sequence should continue past restored ids (got %d, had %d)", next, id+1)
+	}
+}
+
+func inboxMsg(from, to addr.Address, subj, body string, replyTo int) inbox.Message {
+	return inbox.Message{From: from, To: to, Subject: subj, Body: body, ReplyTo: replyTo}
 }
