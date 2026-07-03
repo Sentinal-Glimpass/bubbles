@@ -45,15 +45,22 @@ func TestExportImportRoundTrip(t *testing.T) {
 	proj := filepath.Join(home, ".claude", "projects", claudeSlug(scoutDir))
 	os.MkdirAll(proj, 0o755)
 	os.WriteFile(filepath.Join(proj, sid+".jsonl"), []byte(`{"type":"user","text":"transcript"}`), 0o644)
+	// plant working files in scout's dir: one text, one media (dropped in text mode)
+	os.MkdirAll(scoutDir, 0o755)
+	os.WriteFile(filepath.Join(scoutDir, "notes.md"), []byte("# notes"), 0o644)
+	os.WriteFile(filepath.Join(scoutDir, "logo.png"), []byte("PNGDATA"), 0o644)
 
-	// export
+	// export with the text scope: notes.md travels, logo.png does not
 	blob := filepath.Join(t.TempDir(), "fleet.tgz")
-	n, err := exportFleet(src, blob)
+	n, files, _, err := exportFleet(src, blob, "text")
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 conversation bundled, got %d", n)
+	}
+	if files != 1 {
+		t.Fatalf("text scope should bundle only notes.md, got %d files", files)
 	}
 
 	// import onto a DIFFERENT base (simulating another machine, same fake HOME)
@@ -81,6 +88,13 @@ func TestExportImportRoundTrip(t *testing.T) {
 	placed := filepath.Join(home, ".claude", "projects", claudeSlug(newDir), sid+".jsonl")
 	if data, err := os.ReadFile(placed); err != nil || !strings.Contains(string(data), "transcript") {
 		t.Fatalf("conversation not relocated to %q: %v", placed, err)
+	}
+	// the text working file was restored under the rebased dir; the media file was not
+	if data, err := os.ReadFile(filepath.Join(newDir, "notes.md")); err != nil || string(data) != "# notes" {
+		t.Fatalf("notes.md not restored: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(newDir, "logo.png")); !os.IsNotExist(err) {
+		t.Fatal("logo.png should NOT be in a text-scope export")
 	}
 	// inbox came across
 	k2 := kernel.New(runner.NewFake())
