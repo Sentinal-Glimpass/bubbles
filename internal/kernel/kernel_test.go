@@ -10,6 +10,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/bus"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
+	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
 )
 
 func TestFleetEndToEnd(t *testing.T) {
@@ -812,6 +813,52 @@ func TestDeletePurgesContacts(t *testing.T) {
 	k.Caps.AddContact(a, b)
 	if contains(k.Contacts(a), b) {
 		t.Fatal("Contacts must filter addresses with no registry entry (ghost)")
+	}
+}
+
+// TestScheduleWakes: a scheduled wake fires via the daemon path and WAKES a cold
+// bubble (delivering the message); authority is confined to self/subtree; delete
+// purges schedules.
+func TestScheduleWakes(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	mgr, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/m", runner.SpawnOpts{Name: "mgr", GrantSpawn: true}) // 0.1
+	worker, _ := k.Spawn(mgr, "", "/tmp/w", runner.SpawnOpts{Name: "w"})                                         // 0.1.1
+	other, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/o", runner.SpawnOpts{Name: "other"})                // 0.2
+
+	// mgr can schedule a wake for its own worker...
+	id, err := k.ScheduleBy(mgr, worker, "scan", "check the feed", sched.Trigger{Interval: time.Minute}, true)
+	if err != nil {
+		t.Fatalf("schedule own worker: %v", err)
+	}
+	// ...but not for a bubble outside its subtree
+	if _, err := k.ScheduleBy(mgr, other, "x", "", sched.Trigger{Interval: time.Minute}, true); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("scheduling outside subtree should be denied, got %v", err)
+	}
+
+	// force it due and fire: the cold worker is woken and gets the message
+	for _, sc := range k.Sched.All() {
+		if sc.ID == id {
+			k.Sched.Load([]sched.Schedule{{ID: sc.ID, From: sc.From, Target: sc.Target, Subject: sc.Subject, Body: sc.Body, Urgent: true, Trigger: sc.Trigger, NextFire: time.Now().Add(-time.Second)}})
+		}
+	}
+	if k.IsHot(worker) {
+		t.Fatal("worker should be cold before the wake")
+	}
+	k.FireDue()
+	if !k.IsHot(worker) {
+		t.Fatal("FireDue should have woken the cold target")
+	}
+	if !strings.Contains(fr.Session(worker).Written(), "New message") {
+		t.Fatal("the wake message should be delivered to the woken bubble")
+	}
+
+	// deleting the worker purges its schedule
+	k.DeleteBubble(worker)
+	if len(k.Sched.All()) != 0 {
+		t.Fatalf("deleting the target should purge its schedule, got %v", k.Sched.All())
 	}
 }
 

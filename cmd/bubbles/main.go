@@ -220,6 +220,33 @@ func (b *ipcBackend) Compact(owner, focus string) error {
 	return nil
 }
 
+func (b *ipcBackend) Schedule(by, target, subject, body, every, daily string, urgent bool) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "schedule", From: by, To: target, Subject: subject, Body: body, Every: every, Daily: daily, Urgent: urgent})
+	if err != nil {
+		return "", err
+	}
+	if !rep.OK {
+		return "", errors.New(rep.Err)
+	}
+	return rep.Addr, nil // Addr carries the schedule id
+}
+
+func (b *ipcBackend) Unschedule(by, id string) error {
+	rep, err := b.c.Do(ipc.Request{Op: "unschedule", From: by, Addr: id})
+	if err != nil {
+		return err
+	}
+	if !rep.OK {
+		return errors.New(rep.Err)
+	}
+	return nil
+}
+
+func (b *ipcBackend) Schedules(by string) []string {
+	rep, _ := b.c.Do(ipc.Request{Op: "schedules", From: by})
+	return rep.Messages
+}
+
 func (b *ipcBackend) Introduce(by, a, bb string) error {
 	rep, err := b.c.Do(ipc.Request{Op: "introduce", From: by, Addr: a, To: bb})
 	if err != nil {

@@ -11,6 +11,9 @@ type Backend interface {
 	Inbox(owner string) []string
 	Status(owner string) []string
 	Compact(owner, focus string) error // compact the caller's own conversation now
+	Schedule(by, target, subject, body, every, daily string, urgent bool) (string, error)
+	Unschedule(by, id string) error
+	Schedules(by string) []string
 	Spawn(by, name, description, dir, model string) (string, error)
 	Edit(by, addr, name, description, model string) error
 	Delete(by, addr string) (int, error) // returns how many bubbles were removed (target + subtree)
@@ -92,6 +95,36 @@ func (s *Server) tools() []Tool {
 					"description": "Optional: what the summary should preserve, e.g. \"keep the API schema and open TODOs\".",
 				}},
 			},
+		},
+		{
+			Name: "schedule",
+			Description: "Set a DURABLE recurring wake: the daemon delivers a message to a bubble on a timer, waking it even if it (and you) are asleep — so it can be an event-driven worker without a permanently-running session. Target yourself or a bubble you own. Give EITHER every (\"15m\", \"2h\") OR daily (\"08:00\"). Returns a schedule id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target":  map[string]any{"type": "string", "description": "Bubble to wake (yourself or one in your subtree)."},
+					"subject": map[string]any{"type": "string", "description": "Short subject shown on wake."},
+					"body":    map[string]any{"type": "string", "description": "The task/instruction delivered on each wake."},
+					"every":   map[string]any{"type": "string", "description": "Interval like \"15m\" or \"2h\" (min 30s). Use this OR daily."},
+					"daily":   map[string]any{"type": "string", "description": "Local clock time \"HH:MM\" for a once-a-day wake. Use this OR every."},
+					"urgent":  map[string]any{"type": "boolean", "description": "Wake immediately on fire (default true for schedules)."},
+				},
+				"required": []string{"target", "subject"},
+			},
+		},
+		{
+			Name:        "unschedule",
+			Description: "Cancel a wake schedule by its id.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"id": map[string]any{"type": "string", "description": "The schedule id from schedule()/schedules()."}},
+				"required":   []string{"id"},
+			},
+		},
+		{
+			Name:        "schedules",
+			Description: "List the wake schedules you can see (ones you created or that target you / your subtree).",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 	}
 	if s.Spawnable {

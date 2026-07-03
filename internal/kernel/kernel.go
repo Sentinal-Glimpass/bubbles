@@ -19,6 +19,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
+	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
 )
 
 // ErrNotContact is returned by Send when from may not message to.
@@ -34,6 +35,7 @@ type Kernel struct {
 	Reg    *registry.Registry
 	Store  *inbox.Store
 	Groups *groups.Store
+	Sched  *sched.Store
 
 	// RelaunchProbe is how long EnsureAlive waits to see if a *resumed* session
 	// survives before falling back to a fresh one (a doomed --resume exits fast).
@@ -175,6 +177,7 @@ func New(r runner.Runner) *Kernel {
 		Reg:           registry.New(),
 		Store:         inbox.New(),
 		Groups:        groups.New(),
+		Sched:         sched.New(),
 		RelaunchProbe: 800 * time.Millisecond,
 		runner:        r,
 		sessions:      map[addr.Address]runner.Session{},
@@ -639,6 +642,66 @@ func (k *Kernel) Compact(a addr.Address, focus string) error {
 	return err
 }
 
+// canManage reports whether `by` may schedule/manage wakes for target: root
+// anywhere, otherwise only itself or a bubble in its own subtree.
+func (k *Kernel) canManage(by, target addr.Address) bool {
+	return by == addr.Root || by == target || by.IsAncestorOf(target)
+}
+
+// ScheduleBy registers a durable wake: the daemon will deliver {subject, body}
+// to target on the trigger, waking it if cold. `by` may schedule itself or a
+// bubble it owns (root: anyone). Returns the schedule id.
+func (k *Kernel) ScheduleBy(by, target addr.Address, subject, body string, trig sched.Trigger, urgent bool) (string, error) {
+	if !k.canManage(by, target) {
+		return "", ErrNotAllowed
+	}
+	if _, ok := k.Reg.Get(target); !ok {
+		return "", fmt.Errorf("kernel: no bubble at %s", target)
+	}
+	sc := k.Sched.Add(k.clockNow(), by, target, subject, body, trig, urgent)
+	return sc.ID, nil
+}
+
+// UnscheduleBy removes a schedule the caller is allowed to manage (it created it,
+// or it owns/targets the bubble; root: any).
+func (k *Kernel) UnscheduleBy(by addr.Address, id string) error {
+	sc, ok := k.Sched.Get(id)
+	if !ok {
+		return fmt.Errorf("kernel: no schedule %s", id)
+	}
+	if by != sc.From && !k.canManage(by, sc.Target) {
+		return ErrNotAllowed
+	}
+	k.Sched.Remove(id)
+	return nil
+}
+
+// SchedulesFor returns the schedules the caller may see: ones it created or that
+// target its subtree/itself (root sees all), each rendered for display.
+func (k *Kernel) SchedulesFor(by addr.Address) []string {
+	var out []string
+	for _, sc := range k.Sched.All() {
+		if by != sc.From && !k.canManage(by, sc.Target) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("[%s] -> %s %q (%s) next %s", sc.ID, sc.Target, sc.Subject, sc.Trigger.String(), sc.NextFire.Format("Jan 2 15:04")))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// FireDue delivers every schedule that has come due — waking each target via the
+// normal delivery path (cold bubbles page in). Called on a short daemon tick.
+func (k *Kernel) FireDue() {
+	for _, sc := range k.Sched.Due(k.clockNow()) {
+		if _, ok := k.Reg.Get(sc.Target); !ok {
+			k.Sched.Remove(sc.ID) // target vanished — drop it
+			continue
+		}
+		k.fileAndNotify(sc.From, sc.Target, sc.Subject, sc.Body, 0, sc.Urgent)
+	}
+}
+
 // Introduce makes a and b mutual contacts. Root only.
 func (k *Kernel) Introduce(by, a, b addr.Address) error {
 	if by != addr.Root {
@@ -803,7 +866,8 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 		delete(k.lastUsed, v)
 		k.smu.Unlock()
 		k.Groups.PurgeMember(v)
-		k.Caps.Purge(v) // drop it from EVERY bubble's contacts, so no ghost lingers
+		k.Caps.Purge(v)      // drop it from EVERY bubble's contacts, so no ghost lingers
+		k.Sched.PurgeBubble(v) // drop any wake schedules for/by it
 	}
 	return victims
 }

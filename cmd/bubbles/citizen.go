@@ -12,6 +12,7 @@ You have MCP tools from the "bubbles" server:
 - contacts(): list who you can message — each shown as "address (role)", e.g. "0.2 (refactor)".
 - forget(addr): remove an address from YOUR contacts (you can no longer message it). Use to tidy up contacts you no longer need. You can't forget root.
 - compact(focus?): compact YOUR OWN conversation to reclaim context. Call it at a natural checkpoint — a task is done and you've written down anything important (files, notes, a message to root) — so your context shrinks deliberately instead of ballooning until it auto-compacts near the limit. Optional 'focus' steers what the summary keeps.
+- schedule(target, subject, body?, every?/daily?, urgent?): set a DURABLE recurring wake. The always-alive daemon delivers the message to the target bubble on the timer, WAKING it even if it's asleep — so you can be an event-driven worker (poll a feed, run a loop) without staying awake. Target yourself or a bubble you own; give every ("15m","2h") OR daily ("08:00"). unschedule(id) cancels; schedules() lists yours. Prefer this over a self-poll loop that dies when you sleep.
 
 If you were granted the ability to spawn, you also OWN and manage your sub-bubbles:
 - spawn(name, description, dir?, model?): create a sub-bubble. Put its full task/charter in description, NOT in name (name is a short label).

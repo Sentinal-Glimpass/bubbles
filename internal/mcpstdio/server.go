@@ -144,6 +144,31 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolErr(msg.ID, err.Error())
 		}
 		return toolOK(msg.ID, "compaction scheduled — it runs after this turn; keep going, your context will shrink")
+	case "schedule":
+		target := arg("target")
+		if target == "" {
+			target = s.Self // default: wake myself
+		}
+		urgent := true // a scheduled wake fires the bubble now by default
+		if _, present := p.Arguments["urgent"]; present {
+			urgent = argBool("urgent")
+		}
+		id, err := s.B.Schedule(s.Self, target, arg("subject"), arg("body"), arg("every"), arg("daily"), urgent)
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "scheduled "+id+" — the daemon will wake "+target+" on this trigger, even while asleep")
+	case "unschedule":
+		if err := s.B.Unschedule(s.Self, arg("id")); err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "cancelled "+arg("id"))
+	case "schedules":
+		ss := s.B.Schedules(s.Self)
+		if len(ss) == 0 {
+			return toolOK(msg.ID, "(no schedules)")
+		}
+		return toolOK(msg.ID, strings.Join(ss, "\n"))
 	case "spawn":
 		if !s.Spawnable {
 			return errResp(msg.ID, -32601, "tool not available: spawn")

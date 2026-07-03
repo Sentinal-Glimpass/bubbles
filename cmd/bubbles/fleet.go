@@ -11,6 +11,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
+	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
 )
 
 // bubbleRec is a persisted bubble (one entry in the fleet manifest).
@@ -54,6 +55,35 @@ func inboxPath(baseDir string) string {
 type inboxManifest struct {
 	Seq      int             `json:"seq"`
 	Messages []inbox.Message `json:"messages"`
+}
+
+func schedPath(baseDir string) string {
+	return filepath.Join(baseDir, ".bubbles", "schedules.json")
+}
+
+// saveSchedules persists durable wake schedules so they survive a restart.
+func saveSchedules(baseDir string, k *kernel.Kernel) error {
+	data, err := json.MarshalIndent(k.Sched.Snapshot(), "", "  ")
+	if err != nil {
+		return err
+	}
+	p := schedPath(baseDir)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0o644)
+}
+
+// loadSchedules restores wake schedules on startup (no-op if none saved).
+func loadSchedules(baseDir string, k *kernel.Kernel) {
+	data, err := os.ReadFile(schedPath(baseDir))
+	if err != nil {
+		return
+	}
+	var scs []sched.Schedule
+	if json.Unmarshal(data, &scs) == nil {
+		k.Sched.Load(scs)
+	}
 }
 
 // saveInbox persists the message store next to the fleet manifest.

@@ -22,6 +22,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/ipc"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
+	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
 	"github.com/Sentinal-Glimpass/bubbles/internal/tui"
 )
 
@@ -126,6 +127,24 @@ func runApp() {
 			}
 		}
 	}()
+	go func() { // fire durable wake schedules: the always-alive daemon wakes bubbles on their triggers
+		t := time.NewTicker(20 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			k.FireDue()
+		}
+	}()
+	go func() { // persist schedules shortly after they change, so wakes survive a restart
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		var lastVer int64 = -1
+		for range t.C {
+			if v := k.Sched.Version(); v != lastVer {
+				lastVer = v
+				_ = saveSchedules(baseDir, k)
+			}
+		}
+	}()
 
 	// Resource sampler: feeds the dashboard's top-right panel. It sends to
 	// whichever TUI program is currently running (nil while diving into a bubble).
@@ -143,6 +162,7 @@ func runApp() {
 	// terminal, then relaunch the fleet view.
 	marks := restoreFleet(baseDir, k) // rehydrate a saved fleet (empty if none)
 	inboxExisted, inboxOK := loadInbox(baseDir, k)
+	loadSchedules(baseDir, k)
 	startupFlash := ""
 	if inboxExisted && !inboxOK {
 		startupFlash = "⚠ saved inbox was unreadable — some messages may have been lost; ask senders to resend"
@@ -345,6 +365,23 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}
 		return ipc.Reply{OK: true}
+	case "schedule":
+		trig, err := sched.ParseTrigger(r.Every, r.Daily)
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		id, err := k.ScheduleBy(from, addr.Address(r.To), r.Subject, r.Body, trig, r.Urgent)
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: id}
+	case "unschedule":
+		if err := k.UnscheduleBy(from, r.Addr); err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true}
+	case "schedules":
+		return ipc.Reply{OK: true, Messages: k.SchedulesFor(from)}
 	default:
 		return ipc.Reply{OK: false, Err: "unknown op: " + r.Op}
 	}

@@ -24,6 +24,8 @@ type Request struct {
 	Persona     string `json:"persona,omitempty"`
 	Dir     string `json:"dir,omitempty"`
 	Model   string `json:"model,omitempty"`
+	Every   string `json:"every,omitempty"` // schedule interval ("15m")
+	Daily   string `json:"daily,omitempty"` // schedule daily time ("08:00")
 }
 
 // Reply is the result of handling a Request.
