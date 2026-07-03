@@ -33,6 +33,7 @@ type Session interface {
 	CPUTime() time.Duration  // cumulative CPU consumed by this session (for the usage dashboard)
 	LastActivity() time.Time // when this session last produced output (idle detection); zero = unknown
 	RecentOutput() string    // recent output text (for detecting a failed --resume)
+	InputReady() bool        // true once claude is at a real input prompt (past any startup menu)
 }
 
 // Runner launches and kills sessions by address.

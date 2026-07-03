@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -42,6 +44,21 @@ type LocalRunner struct {
 	AllowAll      *bool                     // shared toggle: true => --dangerously-skip-permissions
 	MemMaxMB      int                       // default per-bubble RAM ceiling (0 = uncapped); each bubble runs in its own memory-capped cgroup so a runaway dies alone
 	SessionFile   func(addr.Address) string // per-bubble file where a hook records the live session id (nil = no session-id tracking)
+
+	// StrictMCP passes --strict-mcp-config so a bubble sees ONLY our MCP server,
+	// not the operator's inherited ones (github/playwright/gmail/…) — no context
+	// bloat, no tools a bubble will never use. Configured, not compiled into
+	// claude, so upgrades are unaffected.
+	StrictMCP bool
+	// DisallowedTools are built-in tools disabled per launch via --disallowed-tools.
+	// Default: AskUserQuestion — its interactive in-chat menu blocks an autonomous
+	// bubble waiting for a human that isn't there.
+	DisallowedTools []string
+
+	// ResumeSummaryThreshold drives the resume "continue from summary / as-is"
+	// menu autopilot: on resume, if the conversation is >= this many tokens pick
+	// "summary" (compact), else "as-is". 0 disables the autopilot.
+	ResumeSummaryThreshold int
 
 	mu       sync.Mutex
 	sessions map[addr.Address]*ptySession
@@ -125,7 +142,13 @@ func memCapSupported() bool {
 // NewLocal returns a LocalRunner with claude defaults. InterruptByte is 0:
 // urgent messages are typed in (queued for the next turn), never interrupting.
 func NewLocal() *LocalRunner {
-	return &LocalRunner{Bin: "claude", sessions: map[addr.Address]*ptySession{}}
+	return &LocalRunner{
+		Bin:                    "claude",
+		sessions:               map[addr.Address]*ptySession{},
+		StrictMCP:              true,
+		DisallowedTools:        []string{"AskUserQuestion"},
+		ResumeSummaryThreshold: 500_000,
+	}
 }
 
 // Launch starts claude in a PTY in dir, seeded with the persona/goal.
@@ -143,12 +166,21 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 			return nil, err
 		}
 		args = append(args, "--mcp-config", cfgPath)
+		if r.StrictMCP {
+			args = append(args, "--strict-mcp-config") // only OUR server; ignore inherited MCP servers
+		}
 	}
 	if sp := r.writeSettings(a); sp != "" {
 		args = append(args, "--settings", sp) // hook that tracks the live session id
 	}
 	if r.CitizenPrompt != "" {
 		args = append(args, "--append-system-prompt", r.citizen(a))
+	}
+	// Disable interactive/unused built-in tools. Placed before --model so this
+	// (variadic) flag stops consuming at the next --flag, never eating a prompt.
+	if len(r.DisallowedTools) > 0 {
+		args = append(args, "--disallowed-tools")
+		args = append(args, r.DisallowedTools...)
 	}
 	model := opts.Model
 	if model == "" {
@@ -187,8 +219,9 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	if err != nil {
 		return nil, err
 	}
-	s := &ptySession{cmd: cmd, ptmx: ptmx, interrupt: r.InterruptByte, created: time.Now()}
-	go s.drain() // start reading immediately so claude never blocks on a full PTY buffer
+	s := &ptySession{cmd: cmd, ptmx: ptmx, interrupt: r.InterruptByte, created: time.Now(), resume: opts.Resume, menuThreshold: r.ResumeSummaryThreshold}
+	go s.drain()        // start reading immediately so claude never blocks on a full PTY buffer
+	go s.readyWatcher() // boot detection + auto-answer the resume "summary/as-is" menu
 	r.mu.Lock()
 	if r.sessions == nil {
 		r.sessions = map[addr.Address]*ptySession{}
@@ -248,6 +281,109 @@ type ptySession struct {
 	sub     io.Writer  // live viewer (dive-in), or nil when nobody is attached
 	lastOut time.Time  // when the session last produced output (idle detection)
 	created time.Time  // launch time (fallback activity stamp before any output)
+
+	resume        bool        // this launch is a --resume (may show the summary menu)
+	menuThreshold int         // token threshold for the summary-menu autopilot (0 = off)
+	inputReady    atomic.Bool // true once claude is at a real input prompt (past any resume menu)
+}
+
+// InputReady reports whether claude is booted and at a real input prompt — i.e.
+// past the resume "summary/as-is" menu — so a message typed in now won't land in
+// that menu. Message delivery waits on this.
+func (s *ptySession) InputReady() bool { return s.inputReady.Load() }
+
+// resumeMenuOpt1 / resumeMenuOpt2 are stable labels from Claude Code's resume
+// "continue" menu (verified in the 2.1.x bundle). Detecting both means it's up.
+const (
+	resumeMenuOpt1 = "Resume from summary"
+	resumeMenuOpt2 = "Resume full session as-is"
+)
+
+var ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+var tokenRE = regexp.MustCompile(`([\d][\d,]*(?:\.\d+)?)\s*([kKmM])?\s*tokens?`)
+
+// readyWatcher waits for claude to boot, then — on a resume — auto-answers the
+// "Resume from summary / Resume full session as-is" menu per the token threshold
+// (>= threshold -> summary/compact, else full/as-is; never the destructive
+// nothing here — both options preserve the conversation). It sets inputReady so
+// message delivery only starts once claude is at a real prompt.
+func (s *ptySession) readyWatcher() {
+	// 1) wait for first output (booted)
+	bootDeadline := time.Now().Add(30 * time.Second)
+	for s.RecentOutput() == "" {
+		if !s.Alive() || time.Now().After(bootDeadline) {
+			s.inputReady.Store(true)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !s.resume || s.menuThreshold <= 0 {
+		time.Sleep(400 * time.Millisecond) // fresh launch: no menu, small settle
+		s.inputReady.Store(true)
+		return
+	}
+	// 2) resume: watch for the summary menu; answer it, or grace out if none shows
+	firstOut := time.Now()
+	watchDeadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(watchDeadline) {
+		if !s.Alive() {
+			s.inputReady.Store(true)
+			return
+		}
+		out := s.RecentOutput()
+		if strings.Contains(out, resumeMenuOpt1) && strings.Contains(out, resumeMenuOpt2) {
+			s.answerResumeMenu(out)
+			time.Sleep(700 * time.Millisecond) // let claude repaint the real prompt
+			s.inputReady.Store(true)
+			return
+		}
+		if time.Since(firstOut) > 8*time.Second { // no menu appeared: short resume, at prompt
+			s.inputReady.Store(true)
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	s.inputReady.Store(true)
+}
+
+// answerResumeMenu selects an option in the resume menu. The menu is a select
+// list whose first (highlighted) item is "Resume from summary"; the second is
+// "Resume full session as-is". Enter picks summary; Down then Enter picks as-is.
+func (s *ptySession) answerResumeMenu(out string) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	if parseTokenCount(out) >= s.menuThreshold {
+		_, _ = s.ptmx.Write([]byte("\r")) // summary/compact (default option)
+		return
+	}
+	_, _ = s.ptmx.Write([]byte("\x1b[B")) // down -> "Resume full session as-is"
+	time.Sleep(150 * time.Millisecond)
+	_, _ = s.ptmx.Write([]byte("\r"))
+}
+
+// parseTokenCount pulls a token count out of the menu text (e.g. "512,340 tokens",
+// "1.2M tokens"). Returns 0 if none found — which, being below any positive
+// threshold, defaults to the non-lossy "as-is" choice.
+func parseTokenCount(s string) int {
+	clean := ansiRE.ReplaceAllString(s, "")
+	best := 0
+	for _, m := range tokenRE.FindAllStringSubmatch(clean, -1) {
+		num := strings.ReplaceAll(m[1], ",", "")
+		f, err := strconv.ParseFloat(num, 64)
+		if err != nil {
+			continue
+		}
+		switch strings.ToLower(m[2]) {
+		case "k":
+			f *= 1e3
+		case "m":
+			f *= 1e6
+		}
+		if int(f) > best {
+			best = int(f)
+		}
+	}
+	return best
 }
 
 // drain is the persistent reader: it never stops until the PTY closes, so the

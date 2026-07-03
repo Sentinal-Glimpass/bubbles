@@ -33,6 +33,9 @@ func (s *FakeSession) SetOutput(o string) {
 	s.mu.Unlock()
 }
 
+// InputReady: fake sessions are always ready (no startup menu in tests).
+func (s *FakeSession) InputReady() bool { return true }
+
 // CPUTime returns the simulated cumulative CPU.
 func (s *FakeSession) CPUTime() time.Duration {
 	s.mu.Lock()

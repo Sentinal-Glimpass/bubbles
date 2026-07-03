@@ -389,7 +389,7 @@ func (k *Kernel) fileAndNotify(from, to addr.Address, subject, body string, repl
 		if s == nil || !k.markNudge(to, unread) {
 			return
 		}
-		if _, isPTY := s.(runner.PTYSession); isPTY && s.RecentOutput() == "" {
+		if !s.InputReady() { // still booting / sitting on the resume menu — wait, off the send path
 			go k.deliverWhenReady(to, notify)
 			return
 		}
@@ -412,13 +412,13 @@ func (k *Kernel) fileAndNotify(from, to addr.Address, subject, body string, repl
 // unsubmitted until something else pressed Enter). Bounded by a timeout, after
 // which it delivers anyway. Runs off the send path (in a goroutine).
 func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte) {
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(35 * time.Second) // covers a long resume + the summary-menu autopilot
 	for time.Now().Before(deadline) {
 		s := k.session(a)
 		if s == nil || !s.Alive() {
 			return
 		}
-		if s.RecentOutput() != "" {
+		if s.InputReady() {
 			_, _ = s.Write(notify)
 			return
 		}

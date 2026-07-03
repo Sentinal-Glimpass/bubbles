@@ -2,7 +2,9 @@ package runner
 
 import (
 	"bytes"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/term"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 )
@@ -71,7 +74,7 @@ func TestLocalRunnerFlags(t *testing.T) {
 	sess.Write([]byte("go"))
 
 	out := attachUntil(ps, "go")
-	for _, want := range []string{"--dangerously-skip-permissions", "--session-id", "sid-123"} {
+	for _, want := range []string{"--dangerously-skip-permissions", "--session-id", "sid-123", "--disallowed-tools", "AskUserQuestion"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -111,7 +114,7 @@ func TestLocalRunnerLaunchAndDeliver(t *testing.T) {
 	}
 
 	out := attachUntil(ps, "ping-from-test")
-	for _, want := range []string{"ARGS:", "--permission-mode", "acceptEdits", "--mcp-config", "find bugs", "ping-from-test"} {
+	for _, want := range []string{"ARGS:", "--permission-mode", "acceptEdits", "--mcp-config", "--strict-mcp-config", "find bugs", "ping-from-test"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
@@ -215,6 +218,111 @@ func TestPTYAttachReplaysThenStreams(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if buf.String() != before {
 		t.Fatalf("detached viewer should receive nothing more, got %q", buf.String())
+	}
+}
+
+// aliveCmd starts a long-lived process so a test ptySession's Alive() probe
+// returns true, independent of the pty.Open pair used for I/O.
+func aliveCmd(t *testing.T) *exec.Cmd {
+	t.Helper()
+	c := exec.Command("sleep", "30")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Process.Kill() })
+	return c
+}
+
+func TestParseTokenCount(t *testing.T) {
+	cases := map[string]int{
+		"This session is 512,340 tokens long": 512340,
+		"1.2M tokens":                          1_200_000,
+		"620k tokens":                          620_000,
+		"no number here":                       0,
+		"version 2.1.199 released":             0, // not near "tokens" -> ignored
+	}
+	for in, want := range cases {
+		if got := parseTokenCount(in); got != want {
+			t.Errorf("parseTokenCount(%q) = %d want %d", in, got, want)
+		}
+	}
+}
+
+// TestResumeMenuAutopilot: the watcher detects the resume menu and picks the
+// option per the token threshold — Enter for summary (>= threshold), Down+Enter
+// for as-is (< threshold) — then marks the session input-ready.
+func TestResumeMenuAutopilot(t *testing.T) {
+	run := func(t *testing.T, tokens int, wantArrow bool) {
+		ptmx, tty, err := pty.Open()
+		if err != nil {
+			t.Skipf("pty.Open unavailable: %v", err)
+		}
+		defer ptmx.Close()
+		defer tty.Close()
+		if old, err := term.MakeRaw(int(tty.Fd())); err == nil { // no CR/NL translation
+			defer term.Restore(int(tty.Fd()), old)
+		}
+
+		s := &ptySession{ptmx: ptmx, cmd: aliveCmd(t), resume: true, menuThreshold: 500_000, created: time.Now()}
+		go s.drain()
+		go s.readyWatcher()
+
+		// claude "loads" then renders the menu
+		fmt.Fprintf(tty, "loading conversation (%d tokens)...\r\n", tokens)
+		time.Sleep(120 * time.Millisecond)
+		fmt.Fprintf(tty, "This session is %d tokens.\r\n  %s (recommended)\r\n  %s\r\n", tokens, resumeMenuOpt1, resumeMenuOpt2)
+
+		// capture what the autopilot types back
+		got := make(chan []byte, 1)
+		go func() {
+			buf := make([]byte, 64)
+			n, _ := tty.Read(buf)
+			got <- buf[:n]
+		}()
+		var keys []byte
+		select {
+		case keys = <-got:
+		case <-time.After(3 * time.Second):
+			t.Fatal("autopilot did not answer the menu")
+		}
+		hasArrow := bytes.Contains(keys, []byte{0x1b, '[', 'B'})
+		if hasArrow != wantArrow {
+			t.Fatalf("tokens=%d: down-arrow=%v want %v (keys=%q)", tokens, hasArrow, wantArrow, keys)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for !s.InputReady() && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !s.InputReady() {
+			t.Fatal("session should be input-ready after answering the menu")
+		}
+	}
+	t.Run("big->summary", func(t *testing.T) { run(t, 800_000, false) }) // Enter only
+	t.Run("small->as-is", func(t *testing.T) { run(t, 120_000, true) })  // Down + Enter
+}
+
+// TestFreshLaunchBecomesReady: a non-resume session is input-ready shortly after
+// it produces output (no menu to wait for).
+func TestFreshLaunchBecomesReady(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("pty.Open unavailable: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	s := &ptySession{ptmx: ptmx, cmd: aliveCmd(t), resume: false, menuThreshold: 500_000, created: time.Now()}
+	go s.drain()
+	go s.readyWatcher()
+	if s.InputReady() {
+		t.Fatal("should not be ready before any output")
+	}
+	fmt.Fprint(tty, "claude UI\r\n")
+	deadline := time.Now().Add(3 * time.Second)
+	for !s.InputReady() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !s.InputReady() {
+		t.Fatal("a fresh session should become ready after producing output")
 	}
 }
 
