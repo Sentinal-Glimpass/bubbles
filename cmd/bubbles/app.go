@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -195,6 +196,18 @@ func runApp() {
 	}
 }
 
+// clampPct bounds a CPU percentage to [0,100] (guards against a measurement
+// blip — a tiny dt or a usage_usec jump — momentarily overshooting).
+func clampPct(p float64) float64 {
+	if p < 0 {
+		return 0
+	}
+	if p > 100 {
+		return 100
+	}
+	return p
+}
+
 // runSampler polls per-session resource use every couple of seconds, turns the
 // cumulative CPU counters into a live percentage (delta over wall time), ranks
 // the busiest bubbles, and pushes a snapshot to the current TUI program.
@@ -204,6 +217,7 @@ func runSampler(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program]) {
 		at  time.Time
 	}
 	prev := map[addr.Address]prevSample{}
+	ncpu := float64(runtime.NumCPU()) // normalize to % of the WHOLE machine, so 100% = all cores busy (not top's per-core %)
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	for range t.C {
@@ -219,14 +233,16 @@ func runSampler(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program]) {
 			totalMem += s.Mem
 			pct := 0.0
 			if p, ok := prev[s.Addr]; ok {
-				if dt := now.Sub(p.at).Seconds(); dt > 0 {
-					pct = (s.CPU - p.cpu).Seconds() / dt * 100
+				if dt := now.Sub(p.at).Seconds(); dt > 0 && ncpu > 0 {
+					pct = (s.CPU - p.cpu).Seconds() / dt * 100 / ncpu // core-seconds/wall -> % of all cores
 				}
 			}
+			pct = clampPct(pct)
 			prev[s.Addr] = prevSample{s.CPU, now}
 			totalCPU += pct
 			rows = append(rows, tui.UsageRow{Name: s.Name, Mem: s.Mem, CPU: pct})
 		}
+		totalCPU = clampPct(totalCPU)
 		for a := range prev { // forget dead sessions so the map doesn't grow
 			if !seen[a] {
 				delete(prev, a)
