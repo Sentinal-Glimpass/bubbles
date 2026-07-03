@@ -169,6 +169,18 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolOK(msg.ID, "(no schedules)")
 		}
 		return toolOK(msg.ID, strings.Join(ss, "\n"))
+	case "webhook":
+		url, err := s.B.Webhook(s.Self)
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "your incoming webhook: "+url+"\nPOST JSON {\"subject\",\"body\",\"from\",\"urgent\"} or a raw body with ?subject= — it lands in your inbox and wakes you.")
+	case "webhook_rotate":
+		url, err := s.B.WebhookRotate(s.Self)
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "rotated — new webhook: "+url+" (the old URL is now dead)")
 	case "spawn":
 		if !s.Spawnable {
 			return errResp(msg.ID, -32601, "tool not available: spawn")

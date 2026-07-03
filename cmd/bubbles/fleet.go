@@ -25,6 +25,7 @@ type bubbleRec struct {
 	Goal       string   `json:"goal,omitempty"`
 	SpawnDepth int      `json:"spawnDepth,omitempty"` // spawn-grant depth (0 = none)
 	SessionID  string   `json:"sessionId"`            // "" if never launched (lazy)
+	Webhook    string   `json:"webhookToken,omitempty"` // incoming-webhook secret ("" = never minted)
 	Contacts   []string `json:"contacts"`
 }
 
@@ -133,7 +134,7 @@ func saveFleet(baseDir string, k *kernel.Kernel, marks map[int]addr.Address) err
 		recs = append(recs, bubbleRec{
 			Addr: b.Addr.String(), Name: b.Name, Persona: b.Persona, Dir: b.Dir,
 			Parent: b.Parent.String(), Model: b.Model, Goal: b.Goal, SpawnDepth: k.Caps.SpawnDepth(b.Addr),
-			SessionID: b.SessionID, Contacts: cs,
+			SessionID: b.SessionID, Webhook: b.WebhookToken, Contacts: cs,
 		})
 	}
 	mk := map[string]string{}
@@ -192,6 +193,7 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 		k.Reg.Restore(registry.Bubble{
 			Addr: addr.Address(r.Addr), Name: r.Name, Persona: r.Persona, Dir: r.Dir,
 			Parent: addr.Address(r.Parent), Status: registry.Idle, Model: r.Model, Goal: r.Goal, SessionID: r.SessionID,
+			WebhookToken: r.Webhook,
 		})
 		if r.SpawnDepth > 0 {
 			k.Caps.GrantSpawnDepth(addr.Address(r.Addr), r.SpawnDepth) // restore the spawn grant

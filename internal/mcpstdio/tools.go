@@ -14,6 +14,8 @@ type Backend interface {
 	Schedule(by, target, subject, body, every, daily string, urgent bool) (string, error)
 	Unschedule(by, id string) error
 	Schedules(by string) []string
+	Webhook(owner string) (string, error)       // the caller's incoming-webhook URL (minted on first use)
+	WebhookRotate(owner string) (string, error) // revoke + reissue the URL
 	Spawn(by, name, description, dir, model string) (string, error)
 	Edit(by, addr, name, description, model string) error
 	Delete(by, addr string) (int, error) // returns how many bubbles were removed (target + subtree)
@@ -124,6 +126,16 @@ func (s *Server) tools() []Tool {
 		{
 			Name:        "schedules",
 			Description: "List the wake schedules you can see (ones you created or that target you / your subtree).",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "webhook",
+			Description: "Get YOUR incoming-webhook URL (minted on first call, stable afterwards). Anything that can make an HTTP request — a cron, a script, an external service — can POST to it and the payload lands in your inbox as a message from \"webhook\", waking you if asleep. POST JSON {subject, body, from?, urgent?} or a raw body with ?subject=. Give this URL to programs that need to notify you; you cannot reply to webhook messages.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "webhook_rotate",
+			Description: "Revoke your current webhook URL and mint a fresh one (use if the old URL leaked or a program should lose access). Anything still POSTing to the old URL gets 404.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 	}

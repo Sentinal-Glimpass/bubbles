@@ -862,6 +862,59 @@ func TestScheduleWakes(t *testing.T) {
 	}
 }
 
+// TestWebhook: URL minting is gated on the server running and stable across
+// calls; rotation revokes the old token; a webhook delivery wakes a cold bubble,
+// is labeled programmatic ("webhook (src)"), and grants NO reply edge.
+func TestWebhook(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+
+	if _, err := k.WebhookURL(a); err == nil {
+		t.Fatal("no server running -> WebhookURL should error")
+	}
+	k.WebhookBase = "http://127.0.0.1:8899"
+	u1, err := k.WebhookURL(a)
+	if err != nil || !strings.HasPrefix(u1, "http://127.0.0.1:8899/w/") {
+		t.Fatalf("mint: %q %v", u1, err)
+	}
+	if u2, _ := k.WebhookURL(a); u2 != u1 {
+		t.Fatalf("URL should be stable, got %q then %q", u1, u2)
+	}
+	tok := strings.TrimPrefix(u1, "http://127.0.0.1:8899/w/")
+	if got, ok := k.ResolveWebhookToken(tok); !ok || got != a {
+		t.Fatalf("resolve = %v %v", got, ok)
+	}
+
+	// deliver: wakes the cold bubble, no reply grant, labeled as programmatic
+	if k.IsHot(a) {
+		t.Fatal("precondition: cold")
+	}
+	if _, err := k.WebhookDeliver(a, "ci", "build failed", "job 4821", true); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if !k.IsHot(a) {
+		t.Fatal("an urgent webhook should wake the cold bubble")
+	}
+	in := k.Inbox(a)
+	if len(in) != 1 || !strings.Contains(in[0], "webhook (ci)") || !strings.Contains(in[0], "job 4821") {
+		t.Fatalf("inbox = %v", in)
+	}
+	if k.Caps.CanSend(a, WebhookFrom) {
+		t.Fatal("webhook messages must NOT grant a reply edge")
+	}
+
+	// rotation revokes the old token
+	u3, err := k.RotateWebhook(a)
+	if err != nil || u3 == u1 {
+		t.Fatalf("rotate: %q %v", u3, err)
+	}
+	if _, ok := k.ResolveWebhookToken(tok); ok {
+		t.Fatal("old token should be dead after rotation")
+	}
+}
+
 // TestCompact: a running bubble's compact() types the /compact command into its
 // own session; a cold bubble reports it isn't running.
 func TestCompact(t *testing.T) {

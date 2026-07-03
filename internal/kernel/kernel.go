@@ -53,6 +53,11 @@ type Kernel struct {
 	// least-recently-used bubbles page out until it fits. 0 = unlimited.
 	MemBudget int64
 
+	// WebhookBase is the advertised base URL of the daemon's incoming-webhook
+	// server (e.g. "http://127.0.0.1:8899"). "" = server not running, so the
+	// webhook tools report unavailable instead of handing out dead URLs.
+	WebhookBase string
+
 	// IdleTimeout pages out a session that has produced no output for this long
 	// (it's genuinely idle, not mid-work). Its state survives via --resume, so it
 	// wakes on next use. 0 = never page out on idleness alone (budget only).
@@ -356,8 +361,16 @@ func (k *Kernel) fileAndNotify(from, to addr.Address, subject, body string, repl
 	if b, ok := k.Reg.Get(from); ok {
 		fromName = b.Label()
 	}
+	return k.deliverMessage(from, fromName, to, subject, body, replyTo, urgent, true)
+}
+
+// deliverMessage is the shared delivery core. replyGrant is false for
+// programmatic senders (webhooks) that have no address a bubble could reply to.
+func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Address, subject, body string, replyTo int, urgent, replyGrant bool) int {
 	id := k.Store.Append(inbox.Message{From: from, FromName: fromName, To: to, Subject: subject, Body: body, ReplyTo: replyTo})
-	k.Caps.AddContact(to, from) // reply grant: the recipient can always reply to whoever messaged it
+	if replyGrant {
+		k.Caps.AddContact(to, from) // reply grant: the recipient can always reply to whoever messaged it
+	}
 	if to == addr.Root {
 		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard (root is the human; always notified)
 	}
@@ -640,6 +653,62 @@ func (k *Kernel) Compact(a addr.Address, focus string) error {
 	}
 	_, err := s.Write([]byte(cmd)) // Write appends Enter, submitting the command
 	return err
+}
+
+// WebhookFrom is the pseudo-address programmatic (webhook) messages arrive from.
+// It is not a real bubble: no contacts point at it and it can't be replied to.
+const WebhookFrom = addr.Address("webhook")
+
+// WebhookURL returns a bubble's incoming-webhook URL, minting its secret token
+// on first use (persisted, so the URL is stable across restarts).
+func (k *Kernel) WebhookURL(a addr.Address) (string, error) {
+	if k.WebhookBase == "" {
+		return "", errors.New("kernel: webhook server not running (port busy or disabled)")
+	}
+	b, ok := k.Reg.Get(a)
+	if !ok {
+		return "", fmt.Errorf("kernel: no bubble at %s", a)
+	}
+	if b.WebhookToken == "" {
+		k.Reg.SetWebhookToken(a, newWebhookToken())
+		b, _ = k.Reg.Get(a)
+	}
+	return k.WebhookBase + "/w/" + b.WebhookToken, nil
+}
+
+// RotateWebhook revokes a bubble's current webhook URL and issues a fresh one.
+func (k *Kernel) RotateWebhook(a addr.Address) (string, error) {
+	if _, ok := k.Reg.Get(a); !ok {
+		return "", fmt.Errorf("kernel: no bubble at %s", a)
+	}
+	k.Reg.SetWebhookToken(a, newWebhookToken())
+	return k.WebhookURL(a)
+}
+
+// ResolveWebhookToken maps an incoming /w/<token> hit to its bubble.
+func (k *Kernel) ResolveWebhookToken(tok string) (addr.Address, bool) {
+	if b, ok := k.Reg.ByWebhookToken(tok); ok {
+		return b.Addr, true
+	}
+	return "", false
+}
+
+// WebhookDeliver files a PROGRAMMATIC message (from a script/cron/external
+// service via the bubble's webhook URL) and wakes the target like any other
+// delivery. source labels the sender for display ("webhook (ci)"); there is no
+// reply grant — the recipient can tell it was a machine, and can't reply.
+func (k *Kernel) WebhookDeliver(target addr.Address, source, subject, body string, urgent bool) (int, error) {
+	if _, ok := k.Reg.Get(target); !ok {
+		return 0, fmt.Errorf("kernel: no bubble at %s", target)
+	}
+	return k.deliverMessage(WebhookFrom, source, target, subject, body, 0, urgent, false), nil
+}
+
+// newWebhookToken returns an unguessable URL-safe secret.
+func newWebhookToken() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("%x", b)
 }
 
 // canManage reports whether `by` may schedule/manage wakes for target: root

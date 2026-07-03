@@ -18,6 +18,7 @@ type fakeBackend struct {
 	compacts    [][2]string // owner, focus
 	schedules   [][]string  // by, target, subject, every, daily
 	unschedules [][2]string // by, id
+	webhooks    []string    // owners who asked for their URL
 }
 
 func (f *fakeBackend) Send(from, to, subject, body string, replyTo int, urgent bool) (int, error) {
@@ -41,6 +42,13 @@ func (f *fakeBackend) Unschedule(by, id string) error {
 	return nil
 }
 func (f *fakeBackend) Schedules(by string) []string { return []string{"[s-1] -> 0.2"} }
+func (f *fakeBackend) Webhook(owner string) (string, error) {
+	f.webhooks = append(f.webhooks, owner)
+	return "http://127.0.0.1:8899/w/tok-" + owner, nil
+}
+func (f *fakeBackend) WebhookRotate(owner string) (string, error) {
+	return "http://127.0.0.1:8899/w/new-" + owner, nil
+}
 func (f *fakeBackend) Spawn(by, n, desc, d, model string) (string, error) { return "0.1.1", nil }
 func (f *fakeBackend) Edit(by, addr, name, desc, model string) error {
 	f.edits = append(f.edits, [5]string{by, addr, name, desc, model})
@@ -117,7 +125,7 @@ func TestServeFlow(t *testing.T) {
 	for _, tdef := range listR.Tools {
 		names = append(names, tdef.Name)
 	}
-	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact,schedule,unschedule,schedules" {
+	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact,schedule,unschedule,schedules,webhook,webhook_rotate" {
 		t.Fatalf("tools = %v", names)
 	}
 
@@ -141,12 +149,12 @@ func TestServeFlow(t *testing.T) {
 
 func TestSpawnGated(t *testing.T) {
 	base := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: false}
-	if len(base.tools()) != 9 { // send, contacts, inbox, status, forget, compact, schedule, unschedule, schedules
-		t.Fatalf("base server should advertise 9 tools, got %d", len(base.tools()))
+	if len(base.tools()) != 11 { // send..schedules + webhook + webhook_rotate
+		t.Fatalf("base server should advertise 11 tools, got %d", len(base.tools()))
 	}
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 14 { // + spawn, edit, delete, introduce, broadcast
-		t.Fatalf("spawnable server should advertise 14 tools, got %d", len(s.tools()))
+	if len(s.tools()) != 16 { // + spawn, edit, delete, introduce, broadcast
+		t.Fatalf("spawnable server should advertise 16 tools, got %d", len(s.tools()))
 	}
 }
 

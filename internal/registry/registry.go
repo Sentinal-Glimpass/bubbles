@@ -29,6 +29,11 @@ type Bubble struct {
 	Model     string // claude --model alias ("" => default); persisted so a restart keeps it
 	Goal      string // initial prompt/instruction, used on the bubble's first (lazy) launch
 	SessionID string // claude session id; "" until first launched (lazy), then set so it resumes
+
+	// WebhookToken is the secret in this bubble's incoming-webhook URL
+	// (/w/<token>). "" until minted on first webhook() call; persisted so the
+	// URL is stable across restarts. Rotating it revokes the old URL.
+	WebhookToken string
 }
 
 // Label is what to show for a bubble: its Name, or its legacy Persona if Name is
@@ -122,6 +127,31 @@ func (r *Registry) SetModel(a addr.Address, model string) {
 		b.Model = model
 		r.version++
 	}
+}
+
+// SetWebhookToken sets (or rotates) a bubble's incoming-webhook secret.
+func (r *Registry) SetWebhookToken(a addr.Address, tok string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.WebhookToken = tok
+		r.version++
+	}
+}
+
+// ByWebhookToken finds the bubble owning an incoming-webhook token.
+func (r *Registry) ByWebhookToken(tok string) (*Bubble, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if tok == "" {
+		return nil, false
+	}
+	for _, b := range r.bubbles {
+		if b.WebhookToken == tok {
+			return b, true
+		}
+	}
+	return nil, false
 }
 
 // SetGoal changes a bubble's initial instruction (used on its next fresh launch).

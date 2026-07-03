@@ -27,6 +27,9 @@ const detachSentinel = "\x1b]6660;bubbles-detach\x07"
 func main() {
 	applyMessagePollingFlag() // --message_polling <minutes> -> env, inherited by the daemon + hosted child
 	applyFlagToEnv("--mcp", "BUBBLES_MCP") // --mcp playwright,github,none -> which operator MCP servers bubbles inherit
+	applyFlagToEnv("--webhook-port", "BUBBLES_WEBHOOK_PORT")
+	applyFlagToEnv("--webhook-base", "BUBBLES_WEBHOOK_BASE") // advertised base URL (e.g. behind a reverse proxy/tunnel)
+	applyBoolFlagToEnv("--webhook-public", "BUBBLES_WEBHOOK_PUBLIC") // bind 0.0.0.0 instead of 127.0.0.1
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "mcp-stdio":
@@ -81,6 +84,16 @@ func applyFlagToEnv(flag, env string) {
 	for i := 0; i+1 < len(os.Args); i++ {
 		if os.Args[i] == flag {
 			_ = os.Setenv(env, os.Args[i+1])
+			return
+		}
+	}
+}
+
+// applyBoolFlagToEnv sets env to "1" when a value-less flag is present.
+func applyBoolFlagToEnv(flag, env string) {
+	for _, a := range os.Args[1:] {
+		if a == flag {
+			_ = os.Setenv(env, "1")
 			return
 		}
 	}
@@ -245,6 +258,28 @@ func (b *ipcBackend) Unschedule(by, id string) error {
 func (b *ipcBackend) Schedules(by string) []string {
 	rep, _ := b.c.Do(ipc.Request{Op: "schedules", From: by})
 	return rep.Messages
+}
+
+func (b *ipcBackend) Webhook(owner string) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "webhook", From: owner})
+	if err != nil {
+		return "", err
+	}
+	if !rep.OK {
+		return "", errors.New(rep.Err)
+	}
+	return rep.Addr, nil // Addr carries the URL
+}
+
+func (b *ipcBackend) WebhookRotate(owner string) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "webhook_rotate", From: owner})
+	if err != nil {
+		return "", err
+	}
+	if !rep.OK {
+		return "", errors.New(rep.Err)
+	}
+	return rep.Addr, nil
 }
 
 func (b *ipcBackend) Introduce(by, a, bb string) error {

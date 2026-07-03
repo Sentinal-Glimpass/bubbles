@@ -146,6 +146,10 @@ func runApp() {
 		}
 	}()
 
+	// Incoming webhooks: per-bubble secret URLs so scripts/crons/external
+	// services can message (and wake) a bubble programmatically.
+	k.WebhookBase = startWebhookServer(k)
+
 	// Resource sampler: feeds the dashboard's top-right panel. It sends to
 	// whichever TUI program is currently running (nil while diving into a bubble).
 	var curProg atomic.Pointer[tea.Program]
@@ -382,6 +386,18 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 		return ipc.Reply{OK: true}
 	case "schedules":
 		return ipc.Reply{OK: true, Messages: k.SchedulesFor(from)}
+	case "webhook":
+		url, err := k.WebhookURL(from)
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: url}
+	case "webhook_rotate":
+		url, err := k.RotateWebhook(from)
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: url}
 	default:
 		return ipc.Reply{OK: false, Err: "unknown op: " + r.Op}
 	}
