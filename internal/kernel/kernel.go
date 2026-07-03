@@ -83,14 +83,17 @@ type Kernel struct {
 	notified map[addr.Address]int // highest unread count already announced per bubble (nudge dedup)
 }
 
-// markNudge reports whether a "you have mail" nudge should be written for a: true
-// only when unread has grown past the level we last announced (so overlapping
-// nudges don't stack). clearNudge resets it when the bubble reads its inbox.
+// markNudge reports whether a "you have mail" nudge should be written for a. It
+// fires at most ONCE per unread backlog — the first message that arrives while a
+// bubble has an empty inbox gets one notice; further messages that pile up before
+// it reads are suppressed (it'll drain them all in the one inbox() call). Every
+// notice costs the recipient a turn + an inbox() round-trip, so we spend exactly
+// one per batch. clearNudge resets it when the bubble reads.
 func (k *Kernel) markNudge(a addr.Address, unread int) bool {
 	k.notifyMu.Lock()
 	defer k.notifyMu.Unlock()
-	if unread <= k.notified[a] {
-		return false
+	if unread == 0 || k.notified[a] != 0 {
+		return false // nothing pending, or this backlog was already announced (until they read)
 	}
 	k.notified[a] = unread
 	return true

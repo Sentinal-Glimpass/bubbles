@@ -1142,21 +1142,22 @@ func TestNudgeDedup(t *testing.T) {
 	if first != 1 {
 		t.Fatalf("first message should nudge once, got %d", first)
 	}
-	// a redundant drain for the same unread level must NOT add another notice
+	// a redundant drain for the same backlog must NOT add another notice
 	k.DrainInboxes()
 	if strings.Count(fr.Session(a).Written(), "unread message") != 0 {
 		t.Fatal("drain re-announced an already-nudged backlog")
 	}
-	// a second message (unread grows) DOES nudge again
+	// more messages piling up before it reads do NOT re-nudge — one notice per
+	// batch (it'll drain them all in the one inbox() call)
 	k.Send(addr.Root, a, "m2", "", 0, true)
-	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
-		t.Fatal("a new message past the announced level should nudge again")
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 1 {
+		t.Fatal("a second message before reading should NOT add another notice")
 	}
-	// reading resets: the next message nudges even at the same count
+	// reading resets: the next message nudges again (fresh batch)
 	k.Inbox(a)
 	k.Send(addr.Root, a, "m3", "", 0, true)
-	if strings.Count(fr.Session(a).Written(), "📬 New message") != 3 {
-		t.Fatal("after reading, a new message should nudge again")
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
+		t.Fatal("after reading, a new message should start a fresh notice")
 	}
 }
 
