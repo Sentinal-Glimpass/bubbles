@@ -281,7 +281,8 @@ func TestFocusHoldsWhileTyping(t *testing.T) {
 
 	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
 	k.EnsureAlive(a) // hot
-	k.SetFocus(a)    // stamps a keystroke; with the huge window, typing stays "active"
+	k.SetFocus(a)
+	k.NoteKeystroke() // the operator is typing; with the huge window it stays "active"
 
 	// even an URGENT message must not type into the bubble mid-keystroke
 	if _, err := k.Send(addr.Root, a, "urgent!", "body", 0, true); err != nil {
@@ -313,11 +314,10 @@ func TestFocusDeliversWhenIdle(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
 	k.RelaunchProbe = 0
-	k.TypingWindow = time.Nanosecond // idle: any keystroke instantly counts as stale
 
 	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
 	k.EnsureAlive(a)
-	k.SetFocus(a)
+	k.SetFocus(a) // just entered, not typing -> idle
 
 	if _, err := k.Send(addr.Root, a, "fyi", "body", 0, true); err != nil {
 		t.Fatalf("send: %v", err)
@@ -345,6 +345,27 @@ func TestUnfocusedStillDelivers(t *testing.T) {
 	}
 	if !strings.Contains(fr.Session(b).Written(), "New message") {
 		t.Fatal("a message to a non-focused bubble should be delivered immediately")
+	}
+}
+
+// TestDeliverWhenReady: a notice is held until the session has produced output
+// (booted) and only then typed in — so a message that boots a cold bubble isn't
+// lost into a still-initializing claude.
+func TestDeliverWhenReady(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	k.EnsureAlive(a) // fake session, no output yet ("not booted")
+
+	go func() { // it "boots" (produces output) shortly
+		time.Sleep(120 * time.Millisecond)
+		fr.Session(a).SetOutput("claude UI painted")
+	}()
+	k.deliverWhenReady(a, []byte("📬 New message"))
+
+	if !strings.Contains(fr.Session(a).Written(), "New message") {
+		t.Fatalf("should deliver once the session is up, got %q", fr.Session(a).Written())
 	}
 }
 

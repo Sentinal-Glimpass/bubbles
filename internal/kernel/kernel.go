@@ -73,11 +73,11 @@ type Kernel struct {
 	lastKey     atomic.Int64 // unixnano of the operator's last keystroke in the focused bubble
 }
 
-// SetFocus marks the bubble the operator is actively dived into, and treats the
-// entry as a keystroke so an immediate arrival isn't dumped the instant you dive
-// in (it waits to see whether you start typing).
+// SetFocus marks the bubble the operator is dived into. Entry starts IDLE (not
+// typing) — diving in is not typing — so a message delivers/flush promptly while
+// you're just viewing; only real keystrokes (NoteKeystroke) mark active typing.
 func (k *Kernel) SetFocus(a addr.Address) {
-	k.lastKey.Store(time.Now().UnixNano())
+	k.lastKey.Store(0) // reset any carried-over typing state from another bubble
 	k.focusMu.Lock()
 	k.focused, k.heldFlushed = a, false
 	k.focusMu.Unlock()
@@ -346,19 +346,52 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 	if k.isFocused(to) && k.typingActive() {
 		return id, nil
 	}
-	if urgent {
-		if s := k.EnsureAlive(to); s != nil {
-			_, _ = s.Write(notify)
+	// deliver types the notice in — but a freshly-launched real session hasn't
+	// rendered its input yet, so typing now would land in a not-ready TUI and sit
+	// there unsubmitted. In that case wait (off the send path) until it's produced
+	// output, i.e. booted. Already-running sessions (and test fakes) deliver now.
+	deliver := func(s runner.Session) {
+		if s == nil {
+			return
 		}
+		if _, isPTY := s.(runner.PTYSession); isPTY && s.RecentOutput() == "" {
+			go k.deliverWhenReady(to, notify)
+			return
+		}
+		_, _ = s.Write(notify)
+	}
+	if urgent {
+		deliver(k.EnsureAlive(to))
 	} else if s := k.session(to); s != nil && s.Alive() {
 		k.touch(to)
-		_, _ = s.Write(notify)
+		deliver(s)
 	} else if b, ok := k.Reg.Get(to); ok && b.SessionID == "" && !to.IsRoot() {
-		if s := k.EnsureAlive(to); s != nil {
-			_, _ = s.Write(notify)
-		}
+		deliver(k.EnsureAlive(to))
 	}
 	return id, nil
+}
+
+// deliverWhenReady waits until a's session has produced output — its TUI is up
+// and accepting input — before typing the notice in, so a message that boots a
+// cold bubble isn't typed into a still-initializing claude (where it would sit
+// unsubmitted until something else pressed Enter). Bounded by a timeout, after
+// which it delivers anyway. Runs off the send path (in a goroutine).
+func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte) {
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		s := k.session(a)
+		if s == nil || !s.Alive() {
+			return
+		}
+		if s.RecentOutput() != "" {
+			_, _ = s.Write(notify)
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if s := k.session(a); s != nil && s.Alive() {
+		_, _ = s.Write(notify)
+	}
 }
 
 // DrainInboxes is the periodic non-urgent delivery batch: it wakes every non-root
