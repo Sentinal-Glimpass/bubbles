@@ -955,6 +955,58 @@ func TestWebhookOwnership(t *testing.T) {
 	}
 }
 
+// TestRelaunchSession: a hot bubble is bounced (relaunched, resuming) so a
+// launch-time change (model / spawn-tool availability) takes effect; a cold
+// bubble is left alone (its next launch already uses current config).
+func TestRelaunchSession(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	k.EnsureAlive(a)
+	old := fr.Session(a)
+	n0 := len(fr.Launches)
+
+	k.RelaunchSession(a)
+	if len(fr.Launches) <= n0 {
+		t.Fatal("hot bubble should be relaunched")
+	}
+	if fr.Session(a) == old || !k.IsHot(a) {
+		t.Fatal("should come back as a fresh live session")
+	}
+	if last := fr.Launches[len(fr.Launches)-1]; !last.Opts.Resume {
+		t.Fatal("relaunch should resume the conversation")
+	}
+
+	// cold bubble: no-op
+	b, _ := k.Spawn(addr.Root, "", "/tmp/b", runner.SpawnOpts{Name: "b"})
+	n1 := len(fr.Launches)
+	k.RelaunchSession(b)
+	if len(fr.Launches) != n1 || k.IsHot(b) {
+		t.Fatal("a cold bubble must not be launched by RelaunchSession")
+	}
+
+	// EditBy with a model change bounces; name-only does not
+	k.EnsureAlive(a)
+	n2 := len(fr.Launches)
+	if err := k.EditBy(addr.Root, a, "renamed", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(fr.Launches) != n2 {
+		t.Fatal("a name-only edit should NOT relaunch")
+	}
+	if err := k.EditBy(addr.Root, a, "", "opus", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(fr.Launches) <= n2 {
+		t.Fatal("a model change should relaunch")
+	}
+	if last := fr.Launches[len(fr.Launches)-1]; last.Opts.Model != "opus" {
+		t.Fatalf("relaunch should carry the new model, got %+v", last.Opts)
+	}
+}
+
 // TestCompact: a running bubble's compact() types the /compact command into its
 // own session; a cold bubble reports it isn't running.
 func TestCompact(t *testing.T) {

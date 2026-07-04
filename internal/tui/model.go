@@ -404,6 +404,11 @@ func (m Model) updateEditBubble(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editing = false
 		return m, nil
 	case "enter":
+		prevGrant := m.k.Caps.CanSpawn(m.editAddr)
+		prevModel := ""
+		if b, ok := m.k.Reg.Get(m.editAddr); ok {
+			prevModel = b.Model
+		}
 		if p := strings.TrimSpace(m.editPersona); p != "" {
 			m.k.Reg.SetName(m.editAddr, p)
 		}
@@ -412,6 +417,13 @@ func (m Model) updateEditBubble(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.k.Caps.GrantSpawnDepth(m.editAddr, 1)
 		} else {
 			m.k.Caps.GrantSpawnDepth(m.editAddr, 0)
+		}
+		// The spawn tools and the model are baked in at launch, so a live session
+		// keeps its old set until relaunched. If either changed, bounce that one
+		// session (async, so the UI doesn't stall) — it resumes with the change.
+		modelChanged := m.editModel != prevModel && !(prevModel == "" && m.editModel == runner.DefaultModel)
+		if m.editGrant != prevGrant || modelChanged {
+			go m.k.RelaunchSession(m.editAddr)
 		}
 		m.editing = false
 		m.rows = m.fleetRows()

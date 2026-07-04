@@ -295,7 +295,7 @@ func (m Model) View() string {
 		b.WriteString(sel(0) + "name: " + m.editPersona + caret + "\n")
 		b.WriteString(sel(1) + "model:   " + modelChoiceLabel(m.editModel) + "   (←/→)\n")
 		b.WriteString(sel(2) + "spawn grant (depth 1): " + onOff(m.editGrant) + "   (←/→ toggle)\n")
-		b.WriteString(helpStyle.Render("  name/grant apply now; model applies on next relaunch") + "\n")
+		b.WriteString(helpStyle.Render("  saving a model/grant change bounces the session so it takes effect now (conversation resumes)") + "\n")
 	case m.groupEdit:
 		g, _ := m.k.Groups.Get(m.groupEditName)
 		b.WriteString(fmt.Sprintf("edit group '%s' (%d members) — ↑/↓ move · enter add/remove a bubble (✓) · esc done\n",

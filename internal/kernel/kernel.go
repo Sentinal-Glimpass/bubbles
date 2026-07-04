@@ -262,6 +262,25 @@ func (k *Kernel) EnforceBudget() {
 	}
 }
 
+// RelaunchSession bounces a HOT bubble's session so config that is baked in at
+// launch picks up a change made while it was running — specifically the model
+// (--model) and whether the spawn/edit/delete/introduce/broadcast tools are
+// offered (BUBBLE_SPAWNABLE is written from CanSpawn when the mcp-config is
+// generated, so a live session keeps its old tool list until relaunched). The
+// conversation resumes via --resume; an in-progress turn is lost. No-op for root
+// or a cold bubble — its next launch already uses current config.
+func (k *Kernel) RelaunchSession(a addr.Address) {
+	if a.IsRoot() || !k.IsHot(a) {
+		return
+	}
+	k.smu.Lock()
+	delete(k.sessions, a)
+	delete(k.lastUsed, a)
+	k.smu.Unlock()
+	_ = k.runner.Kill(a)
+	k.EnsureAlive(a) // relaunch with current config (resumes the conversation)
+}
+
 // EvictIdle pages out live worker sessions that have produced no output for
 // longer than IdleTimeout — genuinely idle sessions (sitting at a prompt), as
 // opposed to ones actively working (which stream output). Their conversation
@@ -987,9 +1006,11 @@ func (k *Kernel) EditBy(by, a addr.Address, name, model, description string) err
 	if by != addr.Root && !by.IsAncestorOf(a) {
 		return ErrNotAllowed
 	}
-	if _, ok := k.Reg.Get(a); !ok {
+	b, ok := k.Reg.Get(a)
+	if !ok {
 		return fmt.Errorf("kernel: no bubble at %s", a)
 	}
+	oldModel := b.Model
 	if name != "" {
 		k.Reg.SetName(a, name)
 	}
@@ -998,6 +1019,9 @@ func (k *Kernel) EditBy(by, a addr.Address, name, model, description string) err
 	}
 	if description != "" {
 		k.Reg.SetGoal(a, description)
+	}
+	if model != "" && model != oldModel {
+		k.RelaunchSession(a) // model is a launch flag — bounce so the change takes effect now
 	}
 	return nil
 }
