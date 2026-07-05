@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
@@ -43,16 +44,72 @@ func humanBytes(b uint64) string {
 	}
 }
 
-// usagePanel builds the right-hand resource block: totals plus the top few
-// bubbles by CPU. Empty when there's nothing live to show.
-func usagePanel(u Model) []string {
-	if u.usage.Hot == 0 {
-		return nil
+// sevStyle colors a usage figure by its limit severity.
+func sevStyle(sev string) lipgloss.Style {
+	switch sev {
+	case "warning":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
+	case "high", "critical", "exceeded":
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")) // red
+	default:
+		return panelStyle
 	}
-	lines := []string{
+}
+
+// claudeUsageLine renders the account's Claude usage ("/usage") — the 5-hour and
+// weekly windows, each colored by severity, with the tighter one's reset time.
+func claudeUsageLine(c ClaudeUsage) string {
+	if !c.OK {
+		return ""
+	}
+	wk := sevStyle(c.WeeklySev).Render(fmt.Sprintf("wk %d%%", c.WeeklyPct))
+	fh := sevStyle(c.FiveHourSev).Render(fmt.Sprintf("5h %d%%", c.FiveHourPct))
+	tail := ""
+	if r := usageResetHint(c); r != "" {
+		tail = panelStyle.Render(" · " + r)
+	}
+	return panelHead.Render("CLAUDE ") + fh + panelStyle.Render(" · ") + wk + tail
+}
+
+// usageResetHint shows when the more-constrained window resets.
+func usageResetHint(c ClaudeUsage) string {
+	now := time.Now()
+	// surface whichever window is closer to its cap
+	at, label := c.WeeklyResets, "wk"
+	if c.FiveHourPct >= c.WeeklyPct {
+		at, label = c.FiveHourResets, "5h"
+	}
+	if at.IsZero() {
+		return ""
+	}
+	d := at.Sub(now)
+	if d <= 0 {
+		return label + " resets soon"
+	}
+	switch {
+	case d >= 24*time.Hour:
+		return fmt.Sprintf("%s resets %dd", label, int(d.Hours())/24)
+	case d >= time.Hour:
+		return fmt.Sprintf("%s resets %dh", label, int(d.Hours()))
+	default:
+		return fmt.Sprintf("%s resets %dm", label, int(d.Minutes()))
+	}
+}
+
+// usagePanel builds the right-hand block: Claude account usage on top, then live
+// resources (totals + the top few bubbles by CPU).
+func usagePanel(u Model) []string {
+	var lines []string
+	if cu := claudeUsageLine(u.claude); cu != "" {
+		lines = append(lines, cu)
+	}
+	if u.usage.Hot == 0 {
+		return lines // usage line only (or nothing) when no bubbles are live
+	}
+	lines = append(lines,
 		panelHead.Render(fmt.Sprintf("RESOURCES · %d hot", u.usage.Hot)),
 		panelStyle.Render(fmt.Sprintf("RAM %s · CPU %.0f%%", humanBytes(u.usage.TotalMem), u.usage.TotalCPU)),
-	}
+	)
 	for _, r := range u.usage.Top {
 		name := r.Name
 		if len(name) > 12 {

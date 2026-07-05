@@ -598,3 +598,22 @@ func TestUsagePanelAndFlashRender(t *testing.T) {
 }
 
 func bytesContains(s, sub string) bool { return bytes.Contains([]byte(s), []byte(sub)) }
+
+func TestClaudeUsageRenders(t *testing.T) {
+	k := newKernelWith(t)
+	m := New(k)
+	m.BaseDir = t.TempDir()
+	m.width = 120
+	m.claude = ClaudeUsage{OK: true, FiveHourPct: 17, WeeklyPct: 86, FiveHourSev: "normal", WeeklySev: "warning", WeeklyResets: time.Now().Add(48 * time.Hour)}
+	out := m.View()
+	for _, want := range []string{"CLAUDE", "5h 17%", "wk 86%"} {
+		if !bytesContains(out, want) {
+			t.Fatalf("claude usage missing %q:\n%s", want, out)
+		}
+	}
+	// hidden when not OK
+	m.claude = ClaudeUsage{OK: false}
+	if bytesContains(m.View(), "CLAUDE") {
+		t.Fatal("should not render usage line when not OK")
+	}
+}
