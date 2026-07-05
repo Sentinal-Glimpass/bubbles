@@ -79,24 +79,49 @@ type Kernel struct {
 	heldFlushed bool         // whether the current idle backlog has already been flushed
 	lastKey     atomic.Int64 // unixnano of the operator's last keystroke in the focused bubble
 
-	notifyMu sync.Mutex
-	notified map[addr.Address]int // highest unread count already announced per bubble (nudge dedup)
+	notifyMu  sync.Mutex
+	notified  map[addr.Address]int       // per bubble: >0 once its current backlog has been announced (nudge dedup)
+	lastNudge map[addr.Address]time.Time // when we last wrote a notice to it (for stale-notice recovery)
 }
 
-// markNudge reports whether a "you have mail" nudge should be written for a. It
-// fires at most ONCE per unread backlog — the first message that arrives while a
-// bubble has an empty inbox gets one notice; further messages that pile up before
-// it reads are suppressed (it'll drain them all in the one inbox() call). Every
-// notice costs the recipient a turn + an inbox() round-trip, so we spend exactly
-// one per batch. clearNudge resets it when the bubble reads.
+// nudgeRecovery is how long an already-announced backlog can sit before a sweep
+// re-nudges it — the safety net for a notice that never landed (a cold bubble
+// that stalled booting, a lost write). Well under the drain interval.
+const nudgeRecovery = 2 * time.Minute
+
+// markNudge is the FAST (send) path: it fires at most ONCE per unread backlog —
+// the first message into an empty inbox gets a notice; further messages that pile
+// up before the bubble reads are suppressed (it drains them all in one inbox()
+// call). clearNudge resets it when the bubble reads. This is what keeps a busy
+// fleet from spending a turn per message.
 func (k *Kernel) markNudge(a addr.Address, unread int) bool {
 	k.notifyMu.Lock()
 	defer k.notifyMu.Unlock()
 	if unread == 0 || k.notified[a] != 0 {
-		return false // nothing pending, or this backlog was already announced (until they read)
+		return false
 	}
 	k.notified[a] = unread
+	k.lastNudge[a] = time.Now()
 	return true
+}
+
+// recoverNudge is the SWEEP/drain path: it fires for a backlog that was never
+// announced (pooled, or the send happened while the bubble was cold), OR for one
+// announced so long ago that the notice was likely missed. This is the safety net
+// that guarantees a bubble with unread mail gets told — so an inbox can never grow
+// silently, and after a restart every bubble with pending mail is re-notified.
+func (k *Kernel) recoverNudge(a addr.Address, unread int) bool {
+	if unread == 0 {
+		return false
+	}
+	k.notifyMu.Lock()
+	defer k.notifyMu.Unlock()
+	if k.notified[a] == 0 || time.Since(k.lastNudge[a]) >= nudgeRecovery {
+		k.notified[a] = unread
+		k.lastNudge[a] = time.Now()
+		return true
+	}
+	return false
 }
 
 func (k *Kernel) clearNudge(a addr.Address) {
@@ -191,6 +216,7 @@ func New(r runner.Runner) *Kernel {
 		sessions:      map[addr.Address]runner.Session{},
 		lastUsed:      map[addr.Address]int64{},
 		notified:      map[addr.Address]int{},
+		lastNudge:     map[addr.Address]time.Time{},
 	}
 }
 
@@ -467,30 +493,38 @@ func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte) {
 	}
 }
 
-// DrainInboxes is the periodic non-urgent delivery batch: it wakes every non-root
-// bubble that has unread mail (paging in cold ones) and nudges it to read, so no
-// pooled message goes unanswered. The memory budget keeps the resident set
-// bounded as bubbles rotate through to drain.
-func (k *Kernel) DrainInboxes() {
+// DrainInboxes is the periodic full sweep: it wakes cold bubbles that have unread
+// mail and (re)nudges them, so no message goes unseen — including after a restart,
+// where every bubble with pending mail gets re-notified.
+func (k *Kernel) DrainInboxes() { k.RecoverUnread(false) }
+
+// RecoverUnread nudges bubbles that have unread mail they haven't been told about
+// (or whose earlier notice went stale). It's the safety net behind the fast send
+// path: a lost/never-landed notice is recovered here, so an inbox can't grow
+// silently. hotOnly=true does the cheap frequent pass (only bubbles already
+// running — just a PTY write); hotOnly=false is the full drain, paging cold
+// bubbles in with bounded concurrency. The focused bubble is skipped so the
+// operator's typing isn't interrupted.
+func (k *Kernel) RecoverUnread(hotOnly bool) {
 	type job struct {
 		a addr.Address
 		n int
 	}
 	var jobs []job
 	for _, b := range k.Reg.All() {
-		if b.Addr.IsRoot() || k.isFocused(b.Addr) { // don't nudge the bubble the operator is typing in
+		if b.Addr.IsRoot() || k.isFocused(b.Addr) {
 			continue
 		}
-		if n := k.Store.UnreadCount(b.Addr); n > 0 {
+		if hotOnly && !k.IsHot(b.Addr) {
+			continue
+		}
+		if n := k.Store.UnreadCount(b.Addr); n > 0 && k.recoverNudge(b.Addr, n) {
 			jobs = append(jobs, job{b.Addr, n})
 		}
 	}
 	if len(jobs) == 0 {
 		return
 	}
-	// Wake mailed bubbles with bounded concurrency, so a large fleet's drain
-	// finishes in seconds rather than paging bubbles in one-at-a-time (each cold
-	// resume costs the relaunch probe + claude startup).
 	const workers = 4
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
@@ -500,11 +534,20 @@ func (k *Kernel) DrainInboxes() {
 		go func(j job) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if !k.markNudge(j.a, j.n) { // already announced this backlog
+			var s runner.Session
+			if hotOnly {
+				s = k.session(j.a)
+			} else {
+				s = k.EnsureAlive(j.a) // page a cold bubble in so it has a terminal to notify
+			}
+			if s == nil || !s.Alive() {
 				return
 			}
-			if s := k.EnsureAlive(j.a); s != nil {
-				_, _ = s.Write([]byte(formatDrain(j.n)))
+			notify := []byte(formatDrain(j.n))
+			if s.InputReady() { // don't type into a still-booting claude
+				_, _ = s.Write(notify)
+			} else {
+				go k.deliverWhenReady(j.a, notify)
 			}
 		}(j)
 	}
@@ -975,7 +1018,7 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 		delete(k.lastUsed, v)
 		k.smu.Unlock()
 		k.Groups.PurgeMember(v)
-		k.Caps.Purge(v)      // drop it from EVERY bubble's contacts, so no ghost lingers
+		k.Caps.Purge(v)        // drop it from EVERY bubble's contacts, so no ghost lingers
 		k.Sched.PurgeBubble(v) // drop any wake schedules for/by it
 	}
 	return victims

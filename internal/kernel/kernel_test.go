@@ -8,6 +8,7 @@ import (
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/bus"
+	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
@@ -1176,6 +1177,56 @@ func TestBroadcastBy(t *testing.T) {
 	// recipients can reply to the broadcaster
 	if !k.Caps.CanSend(w1, mgr) {
 		t.Fatal("a broadcast recipient should be able to reply to the sender")
+	}
+}
+
+// TestRecoverUnread: the safety net. Mail sitting in an inbox that was never
+// announced (pooled, or a restart with persisted unread) gets the bubble woken
+// and notified by the full sweep; an already-announced backlog is not re-notified
+// immediately (once per batch) but IS recovered once its notice goes stale; and
+// reading resets it. This is what keeps an inbox from growing silently.
+func TestRecoverUnread(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+
+	// mail lands in the inbox without a nudge (models a restart-restored unread /
+	// a pooled message): notified stays 0.
+	k.Store.Append(inbox.Message{From: addr.Root, To: a, Subject: "pending"})
+
+	k.RecoverUnread(true) // hot-only pass must NOT wake a cold bubble
+	if k.IsHot(a) {
+		t.Fatal("the cheap hot-only sweep should not page in a cold bubble")
+	}
+	k.RecoverUnread(false) // full sweep (the restart path): wake + notify
+	if !k.IsHot(a) {
+		t.Fatal("the full sweep should wake a cold bubble that has pending mail")
+	}
+	if !strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatal("it should be notified of the backlog")
+	}
+
+	// an immediate re-sweep does NOT re-notify (once per batch)
+	before := fr.Session(a).Written()
+	k.RecoverUnread(true)
+	if fr.Session(a).Written() != before {
+		t.Fatal("a just-announced backlog must not be re-notified")
+	}
+	// but a STALE notice (may have been missed) is recovered
+	k.notifyMu.Lock()
+	k.lastNudge[a] = time.Now().Add(-2 * nudgeRecovery)
+	k.notifyMu.Unlock()
+	k.RecoverUnread(true)
+	if strings.Count(fr.Session(a).Written(), "unread") < 2 {
+		t.Fatal("a stale, still-unread backlog should be recovered")
+	}
+	// reading resets: new mail re-announces
+	k.Inbox(a)
+	k.Store.Append(inbox.Message{From: addr.Root, To: a, Subject: "again"})
+	k.RecoverUnread(true)
+	if strings.Count(fr.Session(a).Written(), "unread") < 3 {
+		t.Fatal("after reading, new mail should notify again")
 	}
 }
 

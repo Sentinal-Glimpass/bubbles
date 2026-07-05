@@ -109,11 +109,18 @@ func runApp() {
 			k.FlushHeldIfIdle()
 		}
 	}()
-	go func() { // periodic inbox drain: deliver pooled (non-urgent) messages so none go unanswered
+	go func() { // periodic inbox drain: page in cold bubbles with pending mail so none go unanswered
 		t := time.NewTicker(time.Duration(messagePollMinutes()) * time.Minute)
 		defer t.Stop()
 		for range t.C {
 			k.DrainInboxes()
+		}
+	}()
+	go func() { // fast recovery: re-nudge already-running bubbles whose notice never landed (cheap PTY write)
+		t := time.NewTicker(45 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			k.RecoverUnread(true)
 		}
 	}()
 	go func() { // persist the message store shortly after it changes, so mail survives a restart
@@ -178,6 +185,10 @@ func runApp() {
 	marks := restoreFleet(baseDir, k) // rehydrate a saved fleet (empty if none)
 	inboxExisted, inboxOK := loadInbox(baseDir, k)
 	loadSchedules(baseDir, k)
+	// After a restart, wake and re-notify every bubble that still has unread mail,
+	// so a message that arrived before the stop lands in its terminal too. Delayed
+	// a few seconds so the fleet and webhook/tunnel setup settle first.
+	go func() { time.Sleep(6 * time.Second); k.RecoverUnread(false) }()
 	startupFlash := ""
 	if inboxExisted && !inboxOK {
 		startupFlash = "⚠ saved inbox was unreadable — some messages may have been lost; ask senders to resend"
