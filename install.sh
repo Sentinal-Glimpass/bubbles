@@ -18,6 +18,7 @@ REPO="github.com/Sentinal-Glimpass/bubbles"
 BIN_DIR="$HOME/.local/bin"
 GO_DIR="$HOME/.local/go"
 WITH_NGROK=1
+ORIG_PATH="$PATH" # the user's shell PATH, before this script prepends its own dirs
 
 for a in "$@"; do
 	case "$a" in
@@ -31,6 +32,29 @@ log()  { printf '  \033[32m›\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 die()  { printf '  \033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# on_path tests the USER's original shell PATH (not the script's mutated one), so
+# "does the command work after this exits" is judged correctly.
+on_path() { case ":$ORIG_PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
+
+# pick_bindir chooses where to put `bubbles` so it works in the CURRENT shell
+# right away: a writable directory already on PATH (preferring ~/.local/bin, the
+# canonical spot where claude/ngrok also land). Only if none is on PATH do we fall
+# back to ~/.local/bin and update the shell rc.
+pick_bindir() {
+	local d
+	for d in "$HOME/.local/bin" "$HOME/bin" "$HOME/go/bin"; do
+		if on_path "$d" && { [ -d "$d" ] && [ -w "$d" ] || mkdir -p "$d" 2>/dev/null; }; then
+			echo "$d"; return
+		fi
+	done
+	local p
+	IFS=: read -ra _p <<<"$ORIG_PATH"
+	for p in "${_p[@]}"; do
+		[ -n "$p" ] && [ -d "$p" ] && [ -w "$p" ] && case "$p" in "$HOME"/*) echo "$p"; return ;; esac
+	done
+	echo "$HOME/.local/bin"
+}
 
 detect_platform() {
 	OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -114,27 +138,25 @@ rc_file() {
 
 ensure_path() {
 	local rc; rc="$(rc_file)"
-	local added=0
-	case ":$PATH:" in
-	*":$BIN_DIR:"*) ;;
-	*)
-		echo "export PATH=\"$BIN_DIR:\$PATH\"" >>"$rc"
-		export PATH="$BIN_DIR:$PATH"
-		added=1
-		;;
-	esac
-	if [ "${PERSIST_GO:-0}" = 1 ]; then
+	# Persist Go's bin for future shells if we installed it.
+	if [ "${PERSIST_GO:-0}" = 1 ] && ! on_path "$GO_DIR/bin"; then
 		echo "export PATH=\"$GO_DIR/bin:\$PATH\"" >>"$rc"
-		added=1
 	fi
-	[ "$added" = 1 ] && warn "updated PATH in $rc — run 'source $rc' or open a new terminal"
-	return 0
+	# bubbles was placed in an on-PATH dir when one was available (see pick_bindir),
+	# so the common case needs nothing. Only if BIN_DIR is off PATH do we fix the rc.
+	if on_path "$BIN_DIR"; then
+		BUBBLES_READY=1
+		return
+	fi
+	echo "export PATH=\"$BIN_DIR:\$PATH\"" >>"$rc"
+	NEED_PATH_FIX=1
 }
 
 main() {
 	bold "Bubbles installer"
 	detect_platform
-	log "platform: $OS/$ARCH"
+	BIN_DIR="$(pick_bindir)"
+	log "platform: $OS/$ARCH   install dir: $BIN_DIR"
 	ensure_go
 	ensure_claude
 	install_bubbles
@@ -143,10 +165,14 @@ main() {
 	echo
 	bold "Done."
 	if [ "${NEED_CLAUDE_AUTH:-0}" = 1 ]; then
-		warn "First, authenticate Claude Code: run 'claude' once and sign in."
+		warn "Authenticate Claude Code first: run 'claude' once and sign in."
+	fi
+	if [ "${NEED_PATH_FIX:-0}" = 1 ]; then
+		warn "Make 'bubbles' available in THIS shell now:"
+		echo "      export PATH=\"$BIN_DIR:\$PATH\"        # (already added to $(rc_file) for new shells)"
 	fi
 	echo "  Then, from any project directory:  bubbles"
 	echo "  Public webhooks (needs ngrok authtoken):  bubbles --ngrok"
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then main "$@"; fi

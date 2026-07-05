@@ -24,7 +24,42 @@ var hostedMode bool
 // detaches. It's an OSC string terminals ignore, so it never shows on screen.
 const detachSentinel = "\x1b]6660;bubbles-detach\x07"
 
+// ensureToolPath appends the standard user-install locations to PATH so bubbles
+// can always find `claude` (and `ngrok`) — they're installed to ~/.local/bin,
+// which isn't always on a login shell's PATH. Every bubbles process runs this
+// (client, daemon, hosted app), and the fixed PATH is inherited by the claude
+// sessions it launches. Appended (not prepended) so it never shadows a tool the
+// user has deliberately earlier on PATH.
+func ensureToolPath() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	candidates := []string{
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, "go", "bin"),
+		filepath.Join(home, "bin"),
+	}
+	if gp := os.Getenv("GOPATH"); gp != "" {
+		candidates = append(candidates, filepath.Join(gp, "bin"))
+	}
+	path := os.Getenv("PATH")
+	have := map[string]bool{}
+	for _, p := range filepath.SplitList(path) {
+		have[p] = true
+	}
+	sep := string(os.PathListSeparator)
+	for _, d := range candidates {
+		if d != "" && !have[d] {
+			path += sep + d
+			have[d] = true
+		}
+	}
+	_ = os.Setenv("PATH", path)
+}
+
 func main() {
+	ensureToolPath()          // find claude/ngrok even if ~/.local/bin isn't on the shell's PATH
 	applyMessagePollingFlag() // --message_polling <minutes> -> env, inherited by the daemon + hosted child
 	applyFlagToEnv("--mcp", "BUBBLES_MCP") // --mcp playwright,github,none -> which operator MCP servers bubbles inherit
 	applyFlagToEnv("--webhook-port", "BUBBLES_WEBHOOK_PORT")
