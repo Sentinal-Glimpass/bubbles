@@ -302,13 +302,27 @@ const (
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 var tokenRE = regexp.MustCompile(`([\d][\d,]*(?:\.\d+)?)\s*([kKmM])?\s*tokens?`)
 
-// readyWatcher waits for claude to boot, then — on a resume — auto-answers the
-// "Resume from summary / Resume full session as-is" menu per the token threshold
-// (>= threshold -> summary/compact, else full/as-is; never the destructive
-// nothing here — both options preserve the conversation). It sets inputReady so
-// message delivery only starts once claude is at a real prompt.
+// idleFor reports how long since the session last produced output (0 if it never
+// has). Quiet output means claude has finished booting/loading/repainting and is
+// sitting at the prompt — the point at which a typed line will actually submit.
+func (s *ptySession) idleFor() time.Duration {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	if s.lastOut.IsZero() {
+		return 0
+	}
+	return time.Since(s.lastOut)
+}
+
+// readyWatcher waits for claude to be genuinely at its input prompt before
+// declaring the session input-ready. It (1) waits for first output, (2) on a
+// resume, auto-answers the "Resume from summary / as-is" menu per the token
+// threshold, then (3) waits for output to SETTLE — a resumed conversation can
+// take several seconds to load and repaint, and typing a message before it's
+// done leaves the text sitting unsubmitted. Only once output has been quiet do we
+// mark it ready, so message delivery lands at a clean prompt. Bounded so we never
+// hang if claude keeps streaming.
 func (s *ptySession) readyWatcher() {
-	// 1) wait for first output (booted)
 	bootDeadline := time.Now().Add(30 * time.Second)
 	for s.RecentOutput() == "" {
 		if !s.Alive() || time.Now().After(bootDeadline) {
@@ -317,29 +331,36 @@ func (s *ptySession) readyWatcher() {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !s.resume || s.menuThreshold <= 0 {
-		time.Sleep(400 * time.Millisecond) // fresh launch: no menu, small settle
-		s.inputReady.Store(true)
-		return
-	}
-	// 2) resume: watch for the summary menu; answer it, or grace out if none shows
 	firstOut := time.Now()
-	watchDeadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(watchDeadline) {
+	// resume: answer the summary menu if it appears (up to a few seconds).
+	if s.resume && s.menuThreshold > 0 {
+		menuDeadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(menuDeadline) {
+			if !s.Alive() {
+				s.inputReady.Store(true)
+				return
+			}
+			out := s.RecentOutput()
+			if strings.Contains(out, resumeMenuOpt1) && strings.Contains(out, resumeMenuOpt2) {
+				s.answerResumeMenu(out)
+				time.Sleep(500 * time.Millisecond) // let it start repainting the real prompt
+				break
+			}
+			if time.Since(firstOut) > 6*time.Second { // no menu; move on to the settle-wait
+				break
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+	// Wait for output to go quiet (claude finished loading/repainting and is at the
+	// prompt). Fallback deadline so we never hang if it keeps producing output.
+	settleDeadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(settleDeadline) {
 		if !s.Alive() {
-			s.inputReady.Store(true)
-			return
+			break
 		}
-		out := s.RecentOutput()
-		if strings.Contains(out, resumeMenuOpt1) && strings.Contains(out, resumeMenuOpt2) {
-			s.answerResumeMenu(out)
-			time.Sleep(700 * time.Millisecond) // let claude repaint the real prompt
-			s.inputReady.Store(true)
-			return
-		}
-		if time.Since(firstOut) > 8*time.Second { // no menu appeared: short resume, at prompt
-			s.inputReady.Store(true)
-			return
+		if s.idleFor() >= 1200*time.Millisecond {
+			break // settled -> at the prompt
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
