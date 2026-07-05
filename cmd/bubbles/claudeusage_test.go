@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 )
 
@@ -41,9 +42,13 @@ func TestParseClaudeUsage(t *testing.T) {
 	}
 }
 
-// TestFetchClaudeUsageLive hits the real endpoint if a token is present; it just
-// confirms the wiring works end-to-end (skips if not logged in).
+// TestFetchClaudeUsageLive hits the real endpoint end-to-end. It's opt-in
+// (BUBBLES_LIVE_USAGE=1) so the normal suite stays offline and can't flake on the
+// account's rate limit; the parse logic is covered offline by TestParseClaudeUsage.
 func TestFetchClaudeUsageLive(t *testing.T) {
+	if os.Getenv("BUBBLES_LIVE_USAGE") != "1" {
+		t.Skip("set BUBBLES_LIVE_USAGE=1 to hit the real usage endpoint")
+	}
 	if _, err := claudeAccessToken(); err != nil {
 		t.Skip("no claude token; skipping live usage fetch")
 	}

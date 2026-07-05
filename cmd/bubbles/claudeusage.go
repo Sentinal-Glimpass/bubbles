@@ -141,10 +141,14 @@ func parseClaudeUsage(u usageResponse) tui.ClaudeUsage {
 	return c
 }
 
+// claudeUsagePoll is how often we hit the usage API. Once a minute is gentle on
+// the endpoint's rate limit; the display still refreshes every second.
+const claudeUsagePoll = 60 * time.Second
+
 // runClaudeUsage keeps the usage panel live: it re-sends the value to the TUI
 // every second (so the row is always painted, in step with the other metrics and
-// so reset countdowns tick), but only hits the API every 10s. A failed fetch
-// (expired token / offline) keeps the last-known value on screen.
+// so reset countdowns tick), but only hits the API once a minute. A failed fetch
+// (expired token / offline / rate-limited) keeps the last-known value on screen.
 func runClaudeUsage(curProg interface{ Load() *tea.Program }) {
 	if _, err := claudeAccessToken(); err != nil {
 		return // not logged in with a subscription token — no usage to show
@@ -168,7 +172,7 @@ func runClaudeUsage(curProg interface{ Load() *tea.Program }) {
 	t := time.NewTicker(1 * time.Second)
 	defer t.Stop()
 	for range t.C {
-		if time.Since(lastFetch) >= 10*time.Second {
+		if time.Since(lastFetch) >= claudeUsagePoll {
 			fetch()
 		}
 		send()

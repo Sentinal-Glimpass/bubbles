@@ -92,13 +92,13 @@ func claudeUsageRows(c ClaudeUsage) []string {
 	return rows
 }
 
-// usagePanel builds the right-hand block: Claude account usage on top, then live
-// resources (totals + the top few bubbles by CPU).
+// usagePanel builds the right-hand block: Claude account usage rows on top, then
+// the resources view (RAM/CPU + hot count, always shown), then the top bubbles by
+// CPU when any are live.
 func usagePanel(u Model) []string {
 	lines := claudeUsageRows(u.claude)
-	if u.usage.Hot == 0 {
-		return lines // usage line only (or nothing) when no bubbles are live
-	}
+	// Resources are ALWAYS shown (even at 0 hot — RAM 0B · CPU 0%), so the metrics
+	// corner never disappears when the fleet is idle.
 	lines = append(lines,
 		panelHead.Render(fmt.Sprintf("RESOURCES · %d hot", u.usage.Hot)),
 		panelStyle.Render(fmt.Sprintf("RAM %s · CPU %.0f%%", humanBytes(u.usage.TotalMem), u.usage.TotalCPU)),
