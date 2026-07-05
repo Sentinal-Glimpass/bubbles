@@ -56,53 +56,46 @@ func sevStyle(sev string) lipgloss.Style {
 	}
 }
 
-// claudeUsageLine renders the account's Claude usage ("/usage") — the 5-hour and
-// weekly windows, each colored by severity, with the tighter one's reset time.
-func claudeUsageLine(c ClaudeUsage) string {
-	if !c.OK {
-		return ""
-	}
-	wk := sevStyle(c.WeeklySev).Render(fmt.Sprintf("wk %d%%", c.WeeklyPct))
-	fh := sevStyle(c.FiveHourSev).Render(fmt.Sprintf("5h %d%%", c.FiveHourPct))
-	tail := ""
-	if r := usageResetHint(c); r != "" {
-		tail = panelStyle.Render(" · " + r)
-	}
-	return panelHead.Render("CLAUDE ") + fh + panelStyle.Render(" · ") + wk + tail
-}
-
-// usageResetHint shows when the more-constrained window resets.
-func usageResetHint(c ClaudeUsage) string {
-	now := time.Now()
-	// surface whichever window is closer to its cap
-	at, label := c.WeeklyResets, "wk"
-	if c.FiveHourPct >= c.WeeklyPct {
-		at, label = c.FiveHourResets, "5h"
-	}
+// resetIn renders a compact "resets in" ("3h", "2d"); "" if unknown.
+func resetIn(at time.Time) string {
 	if at.IsZero() {
 		return ""
 	}
-	d := at.Sub(now)
-	if d <= 0 {
-		return label + " resets soon"
-	}
+	d := time.Until(at)
 	switch {
+	case d <= 0:
+		return "soon"
 	case d >= 24*time.Hour:
-		return fmt.Sprintf("%s resets %dd", label, int(d.Hours())/24)
+		return fmt.Sprintf("%dd", int(d.Hours())/24)
 	case d >= time.Hour:
-		return fmt.Sprintf("%s resets %dh", label, int(d.Hours()))
+		return fmt.Sprintf("%dh", int(d.Hours()))
 	default:
-		return fmt.Sprintf("%s resets %dm", label, int(d.Minutes()))
+		return fmt.Sprintf("%dm", int(d.Minutes()))
 	}
+}
+
+// claudeUsageRows renders the account usage ("/usage") — one row per window
+// (daily / weekly / model-scoped), each colored by the API's severity with its
+// reset time.
+func claudeUsageRows(c ClaudeUsage) []string {
+	if !c.OK || len(c.Windows) == 0 {
+		return nil
+	}
+	rows := []string{panelHead.Render("CLAUDE USAGE")}
+	for _, w := range c.Windows {
+		reset := ""
+		if r := resetIn(w.ResetsAt); r != "" {
+			reset = panelStyle.Render(" · " + r)
+		}
+		rows = append(rows, fmt.Sprintf(" %-13s ", w.Label)+sevStyle(w.Sev).Render(fmt.Sprintf("%3d%%", w.Pct))+reset)
+	}
+	return rows
 }
 
 // usagePanel builds the right-hand block: Claude account usage on top, then live
 // resources (totals + the top few bubbles by CPU).
 func usagePanel(u Model) []string {
-	var lines []string
-	if cu := claudeUsageLine(u.claude); cu != "" {
-		lines = append(lines, cu)
-	}
+	lines := claudeUsageRows(u.claude)
 	if u.usage.Hot == 0 {
 		return lines // usage line only (or nothing) when no bubbles are live
 	}

@@ -3,29 +3,41 @@ package main
 import (
 	"encoding/json"
 	"testing"
-	"time"
 )
 
 func TestParseClaudeUsage(t *testing.T) {
 	var u usageResponse
-	body := `{"five_hour":{"utilization":17.0,"resets_at":"2026-07-05T22:49:59.912705+00:00"},
-	          "seven_day":{"utilization":86.4,"resets_at":"2026-07-07T18:00:00.912730+00:00"},
-	          "limits":[{"kind":"session","severity":"normal"},{"kind":"weekly_all","severity":"warning"}]}`
+	body := `{"five_hour":{"utilization":8.0,"resets_at":"2026-07-06T03:49:59.7+00:00"},
+	          "seven_day":{"utilization":88.0,"resets_at":"2026-07-07T18:00:00.9+00:00"},
+	          "limits":[
+	            {"kind":"session","percent":8,"severity":"normal","resets_at":"2026-07-06T03:49:59.7+00:00"},
+	            {"kind":"weekly_all","percent":88,"severity":"warning","resets_at":"2026-07-07T18:00:00.9+00:00"},
+	            {"kind":"weekly_scoped","percent":62,"severity":"normal","resets_at":"2026-07-07T18:00:00.9+00:00","scope":{"model":{"display_name":"Fable"}}}
+	          ]}`
 	if err := json.Unmarshal([]byte(body), &u); err != nil {
 		t.Fatal(err)
 	}
 	c := parseClaudeUsage(u)
-	if !c.OK || c.FiveHourPct != 17 || c.WeeklyPct != 86 { // 86.4 rounds to 86
-		t.Fatalf("pct: %+v", c)
+	if !c.OK || len(c.Windows) != 3 {
+		t.Fatalf("windows: %+v", c)
 	}
-	if c.FiveHourSev != "normal" || c.WeeklySev != "warning" {
-		t.Fatalf("sev: %+v", c)
+	want := []struct {
+		label string
+		pct   int
+		sev   string
+	}{
+		{"daily usage", 8, "normal"},
+		{"weekly usage", 88, "warning"},
+		{"Fable usage", 62, "normal"},
 	}
-	if c.WeeklyResets.IsZero() || c.FiveHourResets.IsZero() {
-		t.Fatalf("resets not parsed: %+v", c)
-	}
-	if !c.WeeklyResets.Equal(time.Date(2026, 7, 7, 18, 0, 0, 912730000, time.UTC)) {
-		t.Fatalf("weekly reset = %v", c.WeeklyResets)
+	for i, w := range want {
+		g := c.Windows[i]
+		if g.Label != w.label || g.Pct != w.pct || g.Sev != w.sev {
+			t.Fatalf("window %d = %+v want %+v", i, g, w)
+		}
+		if g.ResetsAt.IsZero() {
+			t.Fatalf("window %d reset not parsed", i)
+		}
 	}
 }
 
@@ -39,8 +51,10 @@ func TestFetchClaudeUsageLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("live fetch: %v", err)
 	}
-	if !c.OK {
-		t.Fatal("expected OK usage")
+	if !c.OK || len(c.Windows) == 0 {
+		t.Fatal("expected OK usage with windows")
 	}
-	t.Logf("LIVE usage: 5h=%d%% (%s)  wk=%d%% (%s)", c.FiveHourPct, c.FiveHourSev, c.WeeklyPct, c.WeeklySev)
+	for _, w := range c.Windows {
+		t.Logf("LIVE %-13s %3d%% (%s)", w.Label, w.Pct, w.Sev)
+	}
 }

@@ -38,16 +38,21 @@ type UsageMsg struct {
 	Top      []UsageRow
 }
 
+// UsageWindow is one Claude usage limit: a label, a percent used, its severity,
+// and when it resets.
+type UsageWindow struct {
+	Label    string
+	Pct      int
+	Sev      string // normal | warning | high | critical
+	ResetsAt time.Time
+}
+
 // ClaudeUsage is the account's Claude subscription usage (what `/usage` shows):
-// the rolling 5-hour and 7-day windows, each a percent + severity + reset time.
+// the rolling 5-hour window, the weekly window, and the per-model (e.g. Fable)
+// weekly window — each its own row in the dashboard.
 type ClaudeUsage struct {
-	OK             bool
-	FiveHourPct    int
-	WeeklyPct      int
-	FiveHourSev    string // normal | warning | high | critical
-	WeeklySev      string
-	FiveHourResets time.Time
-	WeeklyResets   time.Time
+	OK      bool
+	Windows []UsageWindow
 }
 
 // ClaudeUsageMsg is pushed by the usage poller into the dashboard panel.

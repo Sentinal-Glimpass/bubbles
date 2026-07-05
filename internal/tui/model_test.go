@@ -604,16 +604,20 @@ func TestClaudeUsageRenders(t *testing.T) {
 	m := New(k)
 	m.BaseDir = t.TempDir()
 	m.width = 120
-	m.claude = ClaudeUsage{OK: true, FiveHourPct: 17, WeeklyPct: 86, FiveHourSev: "normal", WeeklySev: "warning", WeeklyResets: time.Now().Add(48 * time.Hour)}
+	m.claude = ClaudeUsage{OK: true, Windows: []UsageWindow{
+		{Label: "daily usage", Pct: 8, Sev: "normal", ResetsAt: time.Now().Add(3 * time.Hour)},
+		{Label: "weekly usage", Pct: 88, Sev: "warning", ResetsAt: time.Now().Add(48 * time.Hour)},
+		{Label: "Fable usage", Pct: 62, Sev: "normal", ResetsAt: time.Now().Add(48 * time.Hour)},
+	}}
 	out := m.View()
-	for _, want := range []string{"CLAUDE", "5h 17%", "wk 86%"} {
+	for _, want := range []string{"CLAUDE USAGE", "daily usage", "weekly usage", "Fable usage", "88%"} {
 		if !bytesContains(out, want) {
 			t.Fatalf("claude usage missing %q:\n%s", want, out)
 		}
 	}
 	// hidden when not OK
 	m.claude = ClaudeUsage{OK: false}
-	if bytesContains(m.View(), "CLAUDE") {
-		t.Fatal("should not render usage line when not OK")
+	if bytesContains(m.View(), "CLAUDE USAGE") {
+		t.Fatal("should not render usage rows when not OK")
 	}
 }
