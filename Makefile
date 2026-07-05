@@ -1,4 +1,9 @@
-.PHONY: test vet spike build bin install
+.PHONY: test vet spike build bin install bootstrap
+
+# One command that installs every dependency (Go, Claude Code, ngrok) and builds
+# bubbles. Pass ARGS="--no-ngrok" to skip the optional ngrok install.
+bootstrap:
+	@bash install.sh $(ARGS)
 
 test:
 	go test ./...

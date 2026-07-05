@@ -22,33 +22,43 @@ BUBBLES — fleet   permissions: ALLOW-ALL (skip permissions) (ctrl+p)
 
 ## Requirements
 
-- **[Claude Code](https://claude.com/claude-code)** — the `claude` CLI must be
-  installed and authenticated (run `claude` once and sign in). Bubbles launches real
-  `claude` sessions, so this is required.
-- **Go 1.24+** — to install/build the binary (`go version` to check).
+The one-command installer below sets all of these up for you; they're listed here
+for reference:
+
+- **[Claude Code](https://claude.com/claude-code)** — the `claude` CLI (Bubbles
+  launches real `claude` sessions). You still authenticate it once (`claude`, sign in).
+- **Go 1.25+** — build toolchain (runtime doesn't need it).
+- **ngrok** *(optional)* — only for public webhook URLs (`bubbles --ngrok`).
+- **Linux** with systemd `--user` gives per-bubble memory accounting; without it,
+  bubbles still runs (uncapped).
 
 ## Install
 
-```bash
-go install github.com/Sentinal-Glimpass/bubbles/cmd/bubbles@latest
-```
-
-This puts `bubbles` in `$(go env GOPATH)/bin` (usually `~/go/bin`). Make sure that's
-on your `PATH`:
+**One command** — installs every dependency (Go, Claude Code, ngrok) and builds
+bubbles, all under `$HOME`, no sudo:
 
 ```bash
-export PATH="$(go env GOPATH)/bin:$PATH"   # add to ~/.zshrc or ~/.bashrc to persist
+curl -fsSL https://raw.githubusercontent.com/Sentinal-Glimpass/bubbles/main/install.sh | bash
 ```
+
+It's idempotent (skips anything already present) and drops `bubbles` in
+`~/.local/bin`. Add `| bash -s -- --no-ngrok` to skip the optional ngrok install.
+Then authenticate Claude Code once (`claude`, sign in) and run `bubbles`.
 
 <details>
-<summary>Or build from source</summary>
+<summary>Manual options</summary>
 
 ```bash
-git clone https://github.com/Sentinal-Glimpass/bubbles.git
-cd bubbles
-make install        # builds to ~/.local/bin/bubbles
-# or: make bin      # builds ./bin/bubbles
+# Go module install (needs Go 1.25+ on your PATH):
+go install github.com/Sentinal-Glimpass/bubbles/cmd/bubbles@latest   # -> $(go env GOPATH)/bin
+
+# Or from source:
+git clone https://github.com/Sentinal-Glimpass/bubbles.git && cd bubbles
+make bootstrap      # deps + build  (ARGS="--no-ngrok" to skip ngrok)
+make install        # just build -> ~/.local/bin/bubbles
 ```
+
+Ensure the install dir is on your `PATH` (`~/.local/bin` or `$(go env GOPATH)/bin`).
 </details>
 
 ## Quick start
