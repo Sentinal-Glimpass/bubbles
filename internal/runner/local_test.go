@@ -233,6 +233,43 @@ func aliveCmd(t *testing.T) *exec.Cmd {
 	return c
 }
 
+// TestDefaultModelSkip: an empty DefaultModel (and no per-bubble model) passes
+// NO --model, so claude uses its own default (ANTHROPIC_MODEL / Bedrock). A set
+// default is passed through.
+func TestDefaultModelSkip(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "stub.sh")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho \"ARGS:$@\"\ncat\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// DefaultModel "" -> no --model
+	r := NewLocal()
+	r.Bin = stub
+	r.DefaultModel = ""
+	sess, err := r.Launch("0.1", dir, SpawnOpts{Persona: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Kill("0.1")
+	if out := attachUntil(sess.(PTYSession), "ARGS:"); strings.Contains(out, "--model") {
+		t.Fatalf("empty DefaultModel should pass no --model:\n%s", out)
+	}
+
+	// DefaultModel set to a bedrock-style id -> passed through
+	r2 := NewLocal()
+	r2.Bin = stub
+	r2.DefaultModel = "us.anthropic.claude-sonnet-4-v1:0"
+	s2, err := r2.Launch("0.2", dir, SpawnOpts{Persona: "y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Kill("0.2")
+	if out := attachUntil(s2.(PTYSession), "ARGS:"); !strings.Contains(out, "--model us.anthropic.claude-sonnet-4-v1:0") {
+		t.Fatalf("set DefaultModel should be passed:\n%s", out)
+	}
+}
+
 func TestParseTokenCount(t *testing.T) {
 	cases := map[string]int{
 		"This session is 512,340 tokens long": 512340,

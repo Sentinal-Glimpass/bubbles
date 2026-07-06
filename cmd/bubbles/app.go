@@ -73,6 +73,18 @@ func runApp() {
 
 	lr := runner.NewLocal()
 	lr.CitizenPrompt = citizenPrompt
+	// Fleet default model. Unset => "sonnet" (subscription). Set BUBBLES_MODEL to a
+	// specific model id, or to "auto"/"env" to pass NO --model so claude uses its
+	// own default (ANTHROPIC_MODEL) — the path for AWS Bedrock / Vertex, where the
+	// subscription aliases may not resolve. Per-bubble models still override.
+	if v, ok := os.LookupEnv("BUBBLES_MODEL"); ok {
+		switch v {
+		case "auto", "env", "inherit", "default", "-":
+			lr.DefaultModel = "" // don't force a model
+		default:
+			lr.DefaultModel = v
+		}
+	}
 	allowAll := true // default: launch bubbles with --dangerously-skip-permissions
 	lr.AllowAll = &allowAll
 	lr.MemMaxMB = 0 // no per-session hard cap (it was killing legit busy sessions); each runs in its own cgroup scope for measurement, bounded only by the global budget below

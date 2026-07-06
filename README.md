@@ -92,6 +92,41 @@ alive even when you close the IDE:
 The fleet is also saved to disk and resumes (`claude --resume`) if the daemon is
 ever stopped and you reopen.
 
+## Backends: subscription, API key, or AWS Bedrock / Vertex
+
+Bubbles isn't tied to a Claude subscription — it just launches the `claude` CLI,
+so it uses **whatever backend Claude Code is configured for**. The launch
+environment is inherited all the way to each bubble's session, so you configure
+it the standard Claude Code way and start bubbles.
+
+**AWS Bedrock** — export the standard vars, then start bubbles with `--default-model auto`
+so it doesn't force a subscription model alias:
+
+```bash
+export CLAUDE_CODE_USE_BEDROCK=1
+export AWS_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=...          # or an AWS_PROFILE / instance role
+export AWS_SECRET_ACCESS_KEY=...
+export ANTHROPIC_MODEL='us.anthropic.claude-sonnet-4-...'   # a Bedrock model id / inference-profile ARN
+export ANTHROPIC_SMALL_FAST_MODEL='us.anthropic.claude-haiku-...'
+
+bubbles stop            # if a daemon from a previous (subscription) session is running
+bubbles --default-model auto
+```
+
+- `--default-model auto` (or `BUBBLES_MODEL=auto`) makes bubbles pass **no**
+  `--model`, so each session uses your `ANTHROPIC_MODEL`. You can also set
+  `--default-model <id>` to a specific Bedrock model. Per-bubble models chosen at
+  spawn still override.
+- **Restart matters:** a running daemon keeps the env it started with, so set the
+  vars *before* `bubbles` (run `bubbles stop` first if one is already up).
+- **API key** instead of subscription: just `export ANTHROPIC_API_KEY=...` (no
+  `--default-model` change needed — the aliases resolve). **Vertex AI**: same as
+  Bedrock but `CLAUDE_CODE_USE_VERTEX=1` + the Google vars.
+- The top-right **Claude usage panel is subscription-only** (it reads the
+  subscription's `/usage`); on Bedrock/Vertex it simply hides itself — billing is
+  on your cloud account.
+
 ## Keys
 
 **Fleet view**

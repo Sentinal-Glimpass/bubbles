@@ -61,7 +61,8 @@ func ensureToolPath() {
 func main() {
 	ensureToolPath()          // find claude/ngrok even if ~/.local/bin isn't on the shell's PATH
 	applyMessagePollingFlag() // --message_polling <minutes> -> env, inherited by the daemon + hosted child
-	applyFlagToEnv("--mcp", "BUBBLES_MCP") // --mcp playwright,github,none -> which operator MCP servers bubbles inherit
+	applyFlagToEnv("--mcp", "BUBBLES_MCP")             // --mcp playwright,github,none -> which operator MCP servers bubbles inherit
+	applyFlagToEnv("--default-model", "BUBBLES_MODEL") // fleet default model (or "auto" to inherit ANTHROPIC_MODEL, e.g. Bedrock)
 	applyFlagToEnv("--webhook-port", "BUBBLES_WEBHOOK_PORT")
 	applyFlagToEnv("--webhook-base", "BUBBLES_WEBHOOK_BASE") // advertised base URL (e.g. behind a reverse proxy/tunnel)
 	applyBoolFlagToEnv("--webhook-public", "BUBBLES_WEBHOOK_PUBLIC") // bind 0.0.0.0 instead of 127.0.0.1

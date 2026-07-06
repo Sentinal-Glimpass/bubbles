@@ -60,6 +60,12 @@ type LocalRunner struct {
 	// "summary" (compact), else "as-is". 0 disables the autopilot.
 	ResumeSummaryThreshold int
 
+	// DefaultModel is the --model passed when a bubble doesn't specify one. "" =
+	// pass no --model at all, so claude uses its configured default (e.g.
+	// ANTHROPIC_MODEL / a Bedrock model id) — the escape hatch for non-subscription
+	// backends where "sonnet"/"fable" aliases may not resolve.
+	DefaultModel string
+
 	mu       sync.Mutex
 	sessions map[addr.Address]*ptySession
 }
@@ -148,6 +154,7 @@ func NewLocal() *LocalRunner {
 		StrictMCP:              true,
 		DisallowedTools:        []string{"AskUserQuestion"},
 		ResumeSummaryThreshold: 500_000,
+		DefaultModel:           DefaultModel,
 	}
 }
 
@@ -184,9 +191,11 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	}
 	model := opts.Model
 	if model == "" {
-		model = DefaultModel
+		model = r.DefaultModel
 	}
-	args = append(args, "--model", model)
+	if model != "" { // "" => don't force a model; let claude use its default (ANTHROPIC_MODEL / Bedrock)
+		args = append(args, "--model", model)
+	}
 	if r.AllowAll != nil && *r.AllowAll {
 		args = append(args, "--dangerously-skip-permissions")
 	} else {
