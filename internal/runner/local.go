@@ -35,6 +35,15 @@ type PTYSession interface {
 // enough to hold a full claude repaint, small enough to be cheap per bubble.
 const scrollbackCap = 256 * 1024
 
+// bedrockModels maps friendly aliases to pinned Bedrock model IDs (Opus 4.6,
+// the latest available as of 2025-07). Used when CLAUDE_CODE_USE_BEDROCK=1 so
+// bubbles doesn't pass an alias that resolves to a model not yet on Bedrock.
+var bedrockModels = map[string]string{
+	"opus":   "us.anthropic.claude-opus-4-6-v1:0",
+	"sonnet": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+	"haiku":  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+}
+
 // LocalRunner launches real claude sessions in PTYs on this machine.
 type LocalRunner struct {
 	Bin           string                    // default "claude"
@@ -193,7 +202,12 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	if model == "" {
 		model = r.DefaultModel
 	}
-	if model != "" { // "" => don't force a model; let claude use its default (ANTHROPIC_MODEL / Bedrock)
+	if model != "" && os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
+		if id, ok := bedrockModels[model]; ok {
+			model = id
+		}
+	}
+	if model != "" {
 		args = append(args, "--model", model)
 	}
 	if r.AllowAll != nil && *r.AllowAll {

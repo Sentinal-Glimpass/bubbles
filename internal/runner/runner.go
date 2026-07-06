@@ -20,9 +20,10 @@ type SpawnOpts struct {
 	Resume     bool   // restored bubble: resume its conversation, no initial prompt
 }
 
-// DefaultModel is the model alias used when SpawnOpts.Model is empty. Aliases
-// track the latest of each family, so "sonnet" is the current Sonnet.
-const DefaultModel = "sonnet"
+// DefaultModel is the model alias used when SpawnOpts.Model is empty.
+// Pinned to Opus 4.6 (1M context) — the latest available on Bedrock as of
+// 2025-07. Change when newer Opus versions land on Bedrock.
+const DefaultModel = "us.anthropic.claude-opus-4-6-v1:0"
 
 // Session is a running agent we can inject input into (message delivery).
 type Session interface {
