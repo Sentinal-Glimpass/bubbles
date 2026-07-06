@@ -82,9 +82,9 @@ func TestNestedSpawnParentReachesChildren(t *testing.T) {
 	if !k.Caps.CanSend(p, c1) || !k.Caps.CanSend(p, c2) {
 		t.Fatal("parent should reach its children")
 	}
-	// ...but not vice versa, and no siblings or ancestors
-	if k.Caps.CanSend(c1, p) {
-		t.Fatal("child should NOT auto-reach its parent")
+	// child can reach its parent (spawner)
+	if !k.Caps.CanSend(c1, p) {
+		t.Fatal("child should auto-reach its parent")
 	}
 	if k.Caps.CanSend(c1, c2) || k.Caps.CanSend(c2, c1) {
 		t.Fatal("siblings should NOT be connected")
@@ -101,15 +101,12 @@ func TestReplyGrant(t *testing.T) {
 	p, _ := k.Spawn(addr.Root, "p", "/tmp/p", runner.SpawnOpts{Persona: "p"})
 	c, _ := k.SpawnUnder(addr.Root, p, "c", "/tmp/c", runner.SpawnOpts{Persona: "c"})
 
-	if k.Caps.CanSend(c, p) {
-		t.Fatal("child should not reach parent before being messaged")
+	if !k.Caps.CanSend(c, p) {
+		t.Fatal("child should auto-reach its parent from spawn")
 	}
 	id, err := k.Send(p, c, "do X", "", 0, true) // parent messages child
 	if err != nil {
 		t.Fatalf("parent->child: %v", err)
-	}
-	if !k.Caps.CanSend(c, p) {
-		t.Fatal("child should be able to reply after the parent messaged it")
 	}
 	if _, err := k.Send(c, p, "done", "", id, true); err != nil { // child replies (threaded)
 		t.Fatalf("child reply: %v", err)

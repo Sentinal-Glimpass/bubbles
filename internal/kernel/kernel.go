@@ -961,8 +961,9 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 	// Lazy launch: NO session id and NO process yet. The bubble is a cold record
 	// (0 RAM) until first used — a dive, a message, or a loop trigger pages it in
 	// via EnsureAlive. So you can spawn hundreds and only the touched ones run.
-	k.Caps.AddContact(b.Addr, addr.Root) // every bubble can reach root
-	k.Caps.AddContact(parent, b.Addr)    // the parent can reach its child (one-directional: no vice versa, no siblings, no ancestors)
+	k.Caps.AddContact(b.Addr, addr.Root)  // every bubble can reach root
+	k.Caps.AddContact(b.Addr, parent)     // the child can reach its spawner (report progress, ask questions)
+	k.Caps.AddContact(parent, b.Addr)     // the parent can reach its child
 
 	// Spawn-ability grant. Root grants explicitly (opts.GrantSpawn => depth 1: the
 	// child may spawn, but its own children may not). A non-root spawner can only
