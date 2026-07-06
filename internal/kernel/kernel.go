@@ -25,6 +25,9 @@ import (
 // ErrNotContact is returned by Send when from may not message to.
 var ErrNotContact = errors.New("kernel: recipient not in contacts")
 
+// ErrDisabled is returned by Send when the target bubble is disabled.
+var ErrDisabled = errors.New("kernel: target bubble is disabled")
+
 // ErrNotAllowed is returned for root-only actions attempted by non-root.
 var ErrNotAllowed = errors.New("kernel: action not permitted")
 
@@ -419,6 +422,11 @@ func (k *Kernel) session(a addr.Address) runner.Session {
 func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, urgent bool) (int, error) {
 	if !k.Caps.CanSend(from, to) {
 		return 0, ErrNotContact
+	}
+	if !from.IsRoot() && !to.IsRoot() {
+		if b, ok := k.Reg.Get(to); ok && b.Disabled {
+			return 0, ErrDisabled
+		}
 	}
 	return k.fileAndNotify(from, to, subject, body, replyTo, urgent), nil
 }
