@@ -39,10 +39,10 @@ const scrollbackCap = 256 * 1024
 // the latest available as of 2025-07). Used when CLAUDE_CODE_USE_BEDROCK=1 so
 // bubbles doesn't pass an alias that resolves to a model not yet on Bedrock.
 var bedrockModels = map[string]string{
-	"opus":   "us.anthropic.claude-opus-4-6-v1:0",
-	"sonnet": "us.anthropic.claude-opus-4-6-v1:0",
-	"fable":  "us.anthropic.claude-opus-4-6-v1:0",
-	"haiku":  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+	"opus":   "global.anthropic.claude-opus-4-6-v1",
+	"sonnet": "global.anthropic.claude-opus-4-6-v1",
+	"fable":  "global.anthropic.claude-opus-4-6-v1",
+	"haiku":  "global.anthropic.claude-haiku-4-5-20251001-v1:0",
 }
 
 // LocalRunner launches real claude sessions in PTYs on this machine.
