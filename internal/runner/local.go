@@ -40,7 +40,8 @@ const scrollbackCap = 256 * 1024
 // bubbles doesn't pass an alias that resolves to a model not yet on Bedrock.
 var bedrockModels = map[string]string{
 	"opus":   "us.anthropic.claude-opus-4-6-v1:0",
-	"sonnet": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+	"sonnet": "us.anthropic.claude-opus-4-6-v1:0",
+	"fable":  "us.anthropic.claude-opus-4-6-v1:0",
 	"haiku":  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 }
 
@@ -202,9 +203,11 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	if model == "" {
 		model = r.DefaultModel
 	}
-	if model != "" && os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
+	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
 		if id, ok := bedrockModels[model]; ok {
 			model = id
+		} else {
+			model = r.DefaultModel
 		}
 	}
 	if model != "" {
