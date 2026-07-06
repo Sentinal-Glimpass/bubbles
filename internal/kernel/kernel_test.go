@@ -791,6 +791,54 @@ func TestEditDeleteBySubtreeOnly(t *testing.T) {
 	}
 }
 
+// TestDisableBubble: disabling hides a bubble from contacts, kills its session,
+// and blocks any relaunch (message/dive/schedule); re-enabling restores it.
+func TestDisableBubble(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	b, _ := k.Spawn(addr.Root, "b", "/tmp/b", runner.SpawnOpts{Name: "b"})
+	k.Introduce(addr.Root, a, b)
+	k.EnsureAlive(b) // b is running
+	if !contains(k.Contacts(a), b) {
+		t.Fatal("precondition: a sees b")
+	}
+
+	k.SetEnabled(b, false) // disable b
+	if contains(k.Contacts(a), b) {
+		t.Fatalf("disabled bubble must be hidden from contacts, got %v", k.Contacts(a))
+	}
+	if k.IsHot(b) {
+		t.Fatal("disabling should stop the running session")
+	}
+	// a message can't wake it; EnsureAlive refuses
+	if _, err := k.Send(addr.Root, b, "hi", "", 0, true); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if k.IsHot(b) || k.EnsureAlive(b) != nil {
+		t.Fatal("a disabled bubble must not launch")
+	}
+	// the drain/recovery sweep must not wake it either
+	k.RecoverUnread(false)
+	if k.IsHot(b) {
+		t.Fatal("recovery must not wake a disabled bubble")
+	}
+
+	// re-enable: visible again and launchable, resuming (its inbox survived)
+	k.SetEnabled(b, true)
+	if !contains(k.Contacts(a), b) {
+		t.Fatal("re-enabled bubble should reappear in contacts")
+	}
+	if s := k.EnsureAlive(b); s == nil || !s.Alive() {
+		t.Fatal("re-enabled bubble should launch")
+	}
+	if k.Store.UnreadCount(b) != 1 {
+		t.Fatal("the message sent while disabled should still be in its inbox")
+	}
+}
+
 // TestDeletePurgesContacts: deleting a bubble removes it from EVERY other
 // bubble's contacts, so it can't linger as a nameless ghost (the zombie-contacts
 // bug). Also verifies Contacts filters out any address with no registry entry.

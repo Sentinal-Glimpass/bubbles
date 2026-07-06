@@ -247,12 +247,17 @@ func (m Model) View() string {
 
 		a := r.addr
 		persona := ""
+		disabled := false
 		if bub, ok := m.k.Reg.Get(a); ok {
 			persona = bub.Label()
+			disabled = bub.Disabled
 		}
 		status := "○" // cold: no live session (paged out / never launched)
 		if m.k.IsHot(a) {
 			status = "●" // hot: resident, running
+		}
+		if disabled {
+			status = "⊘" // parked: hidden from contacts, can't launch
 		}
 		mark := ""
 		if m.introStage > 0 || m.groupStage == 1 || m.groupEdit {
@@ -297,6 +302,9 @@ func (m Model) View() string {
 				label = pingStyle.Render(label)
 			}
 			line += "  " + label
+		}
+		if disabled {
+			line = helpStyle.Render(line + " (disabled)")
 		}
 		b.WriteString(line + "\n")
 	}
@@ -375,7 +383,7 @@ func (m Model) View() string {
 			b.WriteString("  " + cur + g.Name + fmt.Sprintf(" (%d members)\n", len(g.Members)))
 		}
 	default:
-		b.WriteString(helpStyle.Render("↑/↓ move · →/← expand · enter dive · 0-9 jump · m+0-9 slot · n new · e edit · d delete · i introduce · g group · G del-group · ctrl+p perms · q quit") + "\n")
+		b.WriteString(helpStyle.Render("↑/↓ move · →/← expand · enter dive · 0-9 jump · m+0-9 slot · n new · e edit · d delete · x disable · i introduce · g group · G del-group · ctrl+p perms · q quit") + "\n")
 	}
 	return overlayTopRight(b.String(), usagePanel(m), m.width)
 }

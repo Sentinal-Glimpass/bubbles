@@ -363,6 +363,10 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.groupExpanded[r.group] = !m.groupExpanded[r.group]
 			m.rows = m.fleetRows()
 		} else if a := r.addr; a != "" {
+			if b, ok := m.k.Reg.Get(a); ok && b.Disabled {
+				m.Flash = a.String() + " is disabled — press x to enable it"
+				return m, nil
+			}
 			if a.IsRoot() {
 				_ = m.k.StartRoot(m.BaseDir) // launch root's own session, then dive in
 			} else {
@@ -402,6 +406,13 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d": // delete the highlighted bubble (and its subtree) after a confirm
 		if a := m.curAddr(); a != "" && !a.IsRoot() {
 			m.delBubble = a
+		}
+	case "x": // toggle disabled: park/un-park the highlighted bubble
+		if a := m.curAddr(); a != "" && !a.IsRoot() {
+			if b, ok := m.k.Reg.Get(a); ok {
+				m.k.SetEnabled(a, b.Disabled) // currently disabled -> enable; else disable
+			}
+			m.rows = m.fleetRows()
 		}
 	case "e": // edit: a group's membership (on a header) or a bubble's settings
 		r := m.curRow()

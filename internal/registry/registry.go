@@ -34,6 +34,10 @@ type Bubble struct {
 	// (/w/<token>). "" until minted on first webhook() call; persisted so the
 	// URL is stable across restarts. Rotating it revokes the old URL.
 	WebhookToken string
+
+	// Disabled parks a bubble: it's hidden from everyone's contacts and cannot be
+	// launched (dive/message/schedule/webhook are all no-ops) until re-enabled.
+	Disabled bool
 }
 
 // Label is what to show for a bubble: its Name, or its legacy Persona if Name is
@@ -125,6 +129,16 @@ func (r *Registry) SetModel(a addr.Address, model string) {
 	defer r.mu.Unlock()
 	if b, ok := r.bubbles[a]; ok {
 		b.Model = model
+		r.version++
+	}
+}
+
+// SetDisabled parks or un-parks a bubble.
+func (r *Registry) SetDisabled(a addr.Address, disabled bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.Disabled = disabled
 		r.version++
 	}
 }

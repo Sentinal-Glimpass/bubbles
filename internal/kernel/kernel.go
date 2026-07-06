@@ -307,6 +307,29 @@ func (k *Kernel) RelaunchSession(a addr.Address) {
 	k.EnsureAlive(a) // relaunch with current config (resumes the conversation)
 }
 
+// SetEnabled parks or un-parks a bubble. Disabling hides it from every bubble's
+// contacts, stops it immediately (kills its session), and blocks any relaunch —
+// so it can't be woken by a dive, message, schedule, or webhook until re-enabled.
+// Root can't be disabled. Its inbox and conversation are preserved; on re-enable
+// it wakes and resumes normally.
+func (k *Kernel) SetEnabled(a addr.Address, enabled bool) {
+	if a.IsRoot() {
+		return
+	}
+	k.Reg.SetDisabled(a, !enabled)
+	if !enabled { // stop it now
+		k.smu.Lock()
+		s := k.sessions[a]
+		delete(k.sessions, a)
+		delete(k.lastUsed, a)
+		k.smu.Unlock()
+		if s != nil {
+			_ = s.Close()
+		}
+		_ = k.runner.Kill(a)
+	}
+}
+
 // EvictIdle pages out live worker sessions that have produced no output for
 // longer than IdleTimeout — genuinely idle sessions (sitting at a prompt), as
 // opposed to ones actively working (which stream output). Their conversation
@@ -576,6 +599,9 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	if !ok {
 		return cur // unregistered address: nothing to relaunch
 	}
+	if b.Disabled {
+		return nil // parked: refuse to launch until re-enabled
+	}
 	if cur != nil {
 		_ = cur.Close()
 	}
@@ -671,7 +697,7 @@ func (k *Kernel) Contacts(owner addr.Address) []addr.Address {
 			out = append(out, c)
 			continue
 		}
-		if _, ok := k.Reg.Get(c); ok {
+		if b, ok := k.Reg.Get(c); ok && !b.Disabled { // hide disabled bubbles from contact lists
 			out = append(out, c)
 		}
 	}

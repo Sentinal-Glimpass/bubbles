@@ -21,7 +21,8 @@ func TestFleetSaveRestore(t *testing.T) {
 	a1, _ := k1.Spawn(addr.Root, "alice", filepath.Join(base, "alice"), runner.SpawnOpts{Persona: "alice"})
 	a2, _ := k1.Spawn(addr.Root, "bob", filepath.Join(base, "bob"), runner.SpawnOpts{Persona: "bob"})
 	_ = k1.Introduce(addr.Root, a1, a2)
-	k1.EnsureAlive(a1) // launch a1 so it has a session id (lazy: spawn alone assigns none)
+	k1.EnsureAlive(a1)       // launch a1 so it has a session id (lazy: spawn alone assigns none)
+	k1.SetEnabled(a2, false) // disable bob; must survive the round-trip
 	if err := saveFleet(base, k1, map[int]addr.Address{2: a1}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -37,8 +38,8 @@ func TestFleetSaveRestore(t *testing.T) {
 	if b, ok := k2.Reg.Get(a1); !ok || b.Persona != "alice" || b.SessionID != sid {
 		t.Fatalf("%s not restored with session id: %+v ok=%v", a1, b, ok)
 	}
-	if b, ok := k2.Reg.Get(a2); !ok || b.Persona != "bob" {
-		t.Fatalf("%s not restored", a2)
+	if b, ok := k2.Reg.Get(a2); !ok || b.Persona != "bob" || !b.Disabled {
+		t.Fatalf("%s not restored (disabled should persist): %+v", a2, b)
 	}
 	if !k2.Caps.CanSend(a1, a2) || !k2.Caps.CanSend(a2, a1) {
 		t.Fatal("contacts not restored")
