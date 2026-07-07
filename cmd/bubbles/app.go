@@ -501,35 +501,49 @@ func resolveMCPServers(allow []string) map[string]json.RawMessage {
 	if err != nil {
 		return out
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".claude.json"))
-	if err != nil {
-		return out
-	}
-	var cfg struct {
-		MCPServers map[string]json.RawMessage `json:"mcpServers"`
-		Projects   map[string]struct {
-			MCPServers map[string]json.RawMessage `json:"mcpServers"`
-		} `json:"projects"`
-	}
-	if json.Unmarshal(data, &cfg) != nil {
-		return out
-	}
 	want := map[string]bool{}
 	for _, n := range allow {
 		want[n] = true
 	}
-	for name, def := range cfg.MCPServers {
-		if want[name] {
-			out[name] = def
+
+	// 1. ~/.mcp.json (the standard MCP config location)
+	if data, err := os.ReadFile(filepath.Join(home, ".mcp.json")); err == nil {
+		var mcp struct {
+			MCPServers map[string]json.RawMessage `json:"mcpServers"`
 		}
-	}
-	for _, p := range cfg.Projects {
-		for name, def := range p.MCPServers {
-			if want[name] && out[name] == nil {
-				out[name] = def
+		if json.Unmarshal(data, &mcp) == nil {
+			for name, def := range mcp.MCPServers {
+				if want[name] {
+					out[name] = def
+				}
 			}
 		}
 	}
+
+	// 2. ~/.claude.json (global + per-project servers)
+	if data, err := os.ReadFile(filepath.Join(home, ".claude.json")); err == nil {
+		var cfg struct {
+			MCPServers map[string]json.RawMessage `json:"mcpServers"`
+			Projects   map[string]struct {
+				MCPServers map[string]json.RawMessage `json:"mcpServers"`
+			} `json:"projects"`
+		}
+		if json.Unmarshal(data, &cfg) == nil {
+			for name, def := range cfg.MCPServers {
+				if want[name] && out[name] == nil {
+					out[name] = def
+				}
+			}
+			for _, p := range cfg.Projects {
+				for name, def := range p.MCPServers {
+					if want[name] && out[name] == nil {
+						out[name] = def
+					}
+				}
+			}
+		}
+	}
+
 	return out
 }
 
