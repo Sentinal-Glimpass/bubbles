@@ -466,7 +466,7 @@ func readSessionFile(baseDir string, a addr.Address) string {
 // the operator's config are simply skipped. Override with BUBBLES_MCP.
 var defaultMCPAllow = []string{
 	"playwright", "context7", "firecrawl", "web-scraper", "web-scraping",
-	"react-bits-mcp", "github", "googlemaps",
+	"react-bits-mcp", "github", "googlemaps", "mechmagnet",
 }
 
 // mcpAllowList returns which of the operator's MCP servers bubbles inherit:
@@ -554,9 +554,25 @@ func mcpConfigJSON(exe, sock string, a addr.Address, spawnable bool, extra map[s
 		},
 	}
 	for name, def := range extra {
-		if name != "bubbles" { // never let an inherited server shadow ours
-			servers[name] = def
+		if name == "bubbles" { // never let an inherited server shadow ours
+			continue
 		}
+		// Inject BUBBLE_ADDR into inherited servers so they can resolve
+		// per-bubble identity (e.g. mechmagnet's key-file lookup).
+		var parsed map[string]any
+		if json.Unmarshal(def, &parsed) == nil {
+			env, _ := parsed["env"].(map[string]any)
+			if env == nil {
+				env = map[string]any{}
+			}
+			env["BUBBLE_ADDR"] = a.String()
+			parsed["env"] = env
+			if patched, err := json.Marshal(parsed); err == nil {
+				servers[name] = json.RawMessage(patched)
+				continue
+			}
+		}
+		servers[name] = def
 	}
 	b, _ := json.Marshal(map[string]any{"mcpServers": servers})
 	return string(b)
