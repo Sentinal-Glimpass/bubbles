@@ -28,6 +28,7 @@ type portManifest struct {
 	Convos     int    `json:"conversations"`  // how many claude transcripts are bundled
 	Files      string `json:"files"`          // scope: metadata | text | nomedia | all
 	FileCount  int    `json:"fileCount"`      // working files bundled
+	Full       bool   `json:"full,omitempty"` // --full: includes env, schedules, plugins, mcp, identity
 }
 
 // exportModes are the four working-file scopes.
@@ -131,12 +132,15 @@ func humanSize(n int64) string {
 // runExport bundles the fleet, inbox, every bubble's claude conversation, and
 // (per scope) the working files into a single .tgz. Usage:
 //
-//	bubbles export [outfile] [--files metadata|text|nomedia|all] [--dir base]
+//	bubbles export [outfile] [--files metadata|text|nomedia|all] [--dir base] [--full]
 func runExport(args []string) {
 	base, out, mode := defaultWorkspace(), "", ""
+	full := false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
+		case a == "--full":
+			full = true
 		case strings.HasPrefix(a, "--files="):
 			mode = strings.TrimPrefix(a, "--files=")
 		case a == "--files" && i+1 < len(args):
@@ -147,7 +151,9 @@ func runExport(args []string) {
 			out = a
 		}
 	}
-	if mode == "" {
+	if full {
+		mode = "all"
+	} else if mode == "" {
 		if term.IsTerminal(int(os.Stdin.Fd())) {
 			mode = chooseMode()
 		} else {
@@ -160,13 +166,16 @@ func runExport(args []string) {
 	if out == "" {
 		out = fmt.Sprintf("bubbles-export-%s.tgz", time.Now().Format("20060102-150405"))
 	}
-	convos, files, bytes, err := exportFleet(base, out, mode)
+	convos, files, bytes, err := exportFleet(base, out, mode, full)
 	if err != nil {
 		fatal(err)
 	}
 	fmt.Printf("exported [%s]: fleet + inbox + %d conversation(s)", mode, convos)
 	if mode != "metadata" {
 		fmt.Printf(" + %d working file(s) (%s)", files, humanSize(bytes))
+	}
+	if full {
+		fmt.Print(" + env + schedules + plugins + mcp + identity")
 	}
 	fmt.Printf(" -> %s\n", out)
 	fmt.Println("(reflects the last saved state; detach the client first for a fully current export)")
@@ -195,7 +204,7 @@ func chooseMode() string {
 }
 
 // exportFleet writes the blob and returns (conversations, files, bytes) bundled.
-func exportFleet(base, outPath, mode string) (convos, files int, fileBytes int64, err error) {
+func exportFleet(base, outPath, mode string, full bool) (convos, files int, fileBytes int64, err error) {
 	fm, ok := loadFleet(base)
 	if !ok {
 		return 0, 0, 0, fmt.Errorf("no fleet found in %s (start bubbles there first)", base)
@@ -223,7 +232,7 @@ func exportFleet(base, outPath, mode string) (convos, files int, fileBytes int64
 	}
 	// manifest first, then fleet/inbox, then conversations, then working files —
 	// this order lets the importer stream (read metadata up front, stream the bulk).
-	man := portManifest{Version: 1, Created: time.Now().UTC().Format(time.RFC3339), SourceBase: absBase, MsgPoll: messagePollMinutes(), Convos: convos, Files: mode}
+	man := portManifest{Version: 1, Created: time.Now().UTC().Format(time.RFC3339), SourceBase: absBase, MsgPoll: messagePollMinutes(), Convos: convos, Files: mode, Full: full}
 	// count working files first so the manifest is accurate
 	if mode != "metadata" {
 		_ = walkWorkdirs(fm, absBase, absOut, mode, func(_, _ string, fi os.FileInfo) error {
@@ -242,12 +251,14 @@ func exportFleet(base, outPath, mode string) (convos, files int, fileBytes int64
 	}
 	_ = tarCopy(tw, "inbox.json", inboxPath(base))
 
+	// schedules
+	schedPath := filepath.Join(base, ".bubbles", "schedules.json")
+	_ = tarCopy(tw, "schedules.json", schedPath)
+
 	for _, b := range fm.Bubbles {
 		if b.SessionID == "" || b.Dir == "" {
 			continue
 		}
-		// snapshot-read (not stream): a live fleet may be appending to the transcript,
-		// and a size mismatch would corrupt the tar entry.
 		_ = tarCopy(tw, "conversations/"+b.SessionID+".jsonl", convPath(home, b.Dir, b.SessionID))
 	}
 	if mode != "metadata" {
@@ -257,7 +268,102 @@ func exportFleet(base, outPath, mode string) (convos, files int, fileBytes int64
 			return 0, 0, 0, err
 		}
 	}
+
+	// --full: bundle everything needed for cold-start replication
+	if full {
+		// env vars (relevant ones from the running process)
+		envData := exportEnvVars()
+		if len(envData) > 0 {
+			_ = tarWrite(tw, "full/env.sh", envData)
+		}
+
+		// global MCP config
+		_ = tarCopy(tw, "full/mcp.json", filepath.Join(home, ".mcp.json"))
+
+		// per-bubble identity files (~/.claude/bubbles/)
+		bubblesDir := filepath.Join(home, ".claude", "bubbles")
+		_ = tarDir(tw, "full/claude-bubbles/", bubblesDir)
+
+		// global plugins (~/.claude/plugins/ — skip large cache/repos dirs)
+		pluginsDir := filepath.Join(home, ".claude", "plugins")
+		_ = tarDirFiltered(tw, "full/claude-plugins/", pluginsDir, func(rel string) bool {
+			return !strings.HasPrefix(rel, "cache/") &&
+				!strings.HasPrefix(rel, "repos/") &&
+				!strings.HasPrefix(rel, "marketplaces/")
+		})
+
+		// per-project .mcp.json files for each bubble's dir
+		seen := map[string]bool{}
+		for _, b := range fm.Bubbles {
+			if b.Dir == "" {
+				continue
+			}
+			mcpFile := filepath.Join(b.Dir, ".mcp.json")
+			if seen[mcpFile] {
+				continue
+			}
+			seen[mcpFile] = true
+			if rel, err := filepath.Rel(absBase, mcpFile); err == nil && !strings.HasPrefix(rel, "..") {
+				_ = tarCopy(tw, "full/project-mcp/"+rel, mcpFile)
+			}
+		}
+	}
+
 	return convos, files, fileBytes, nil
+}
+
+// exportEnvVars dumps relevant env vars as a sourceable shell script.
+func exportEnvVars() []byte {
+	prefixes := []string{"AWS_", "ANTHROPIC_", "CLAUDE_CODE_USE_", "BUBBLES_", "OPENAI_", "GH_TOKEN", "GITHUB_TOKEN"}
+	skip := map[string]bool{
+		"CLAUDE_CODE_CHILD_SESSION": true, "CLAUDE_CODE_SESSION_ID": true,
+		"CLAUDE_CODE_SSE_PORT": true, "CLAUDE_CODE_ENTRYPOINT": true,
+		"CLAUDE_CODE_EXECPATH": true,
+	}
+	var b strings.Builder
+	b.WriteString("#!/bin/bash\n# Bubbles full export — env vars (source this or add to .bashrc)\n")
+	for _, e := range os.Environ() {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) != 2 || skip[parts[0]] {
+			continue
+		}
+		match := false
+		for _, p := range prefixes {
+			if strings.HasPrefix(parts[0], p) {
+				match = true
+				break
+			}
+		}
+		if match {
+			b.WriteString(fmt.Sprintf("export %s=%q\n", parts[0], parts[1]))
+		}
+	}
+	return []byte(b.String())
+}
+
+// tarDir adds all regular files in dir under prefix in the tar.
+func tarDir(tw *tar.Writer, prefix, dir string) error {
+	return filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil || !fi.Mode().IsRegular() {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, p)
+		return tarStreamFile(tw, prefix+filepath.ToSlash(rel), p)
+	})
+}
+
+// tarDirFiltered adds files matching filter (rel path from dir) under prefix.
+func tarDirFiltered(tw *tar.Writer, prefix, dir string, filter func(string) bool) error {
+	return filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil || !fi.Mode().IsRegular() {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, p)
+		if !filter(filepath.ToSlash(rel)) {
+			return nil
+		}
+		return tarStreamFile(tw, prefix+filepath.ToSlash(rel), p)
+	})
 }
 
 // walkWorkdirs visits every in-scope working file across the fleet's bubble dirs,
@@ -384,8 +490,9 @@ func importFleet(blob, target string, force bool) (string, error) {
 	var man portManifest
 	var fm manifest
 	sidToDir := map[string]string{} // session id -> rebased dir (for conversation placement)
-	placed, restored := 0, 0
+	placed, restored, fullFiles := 0, 0, 0
 	var fleetSeen bool
+	var envScript string
 
 	for {
 		h, err := tr.Next()
@@ -424,6 +531,9 @@ func importFleet(blob, target string, force bool) (string, error) {
 			if err := streamToFile(inboxPath(target), 0o644, tr); err != nil {
 				return "", err
 			}
+		case h.Name == "schedules.json":
+			dst := filepath.Join(target, ".bubbles", "schedules.json")
+			_ = streamToFile(dst, 0o644, tr)
 		case strings.HasPrefix(h.Name, "conversations/"):
 			sid := strings.TrimSuffix(strings.TrimPrefix(h.Name, "conversations/"), ".jsonl")
 			dir := sidToDir[sid]
@@ -438,10 +548,39 @@ func importFleet(blob, target string, force bool) (string, error) {
 			rel := strings.TrimPrefix(h.Name, "workdir/")
 			dst, ok := safeJoin(absTarget, rel)
 			if !ok {
-				continue // path traversal guard
+				continue
 			}
 			if streamToFile(dst, os.FileMode(h.Mode).Perm(), tr) == nil {
 				restored++
+			}
+
+		// --full extras
+		case h.Name == "full/env.sh":
+			data, _ := io.ReadAll(tr)
+			envScript = string(data)
+			dst := filepath.Join(target, ".bubbles", "env.sh")
+			_ = os.WriteFile(dst, data, 0o600)
+			fullFiles++
+		case h.Name == "full/mcp.json":
+			dst := filepath.Join(home, ".mcp.json")
+			_ = streamToFile(dst, 0o644, tr)
+			fullFiles++
+		case strings.HasPrefix(h.Name, "full/claude-bubbles/"):
+			rel := strings.TrimPrefix(h.Name, "full/claude-bubbles/")
+			dst := filepath.Join(home, ".claude", "bubbles", rel)
+			_ = streamToFile(dst, 0o644, tr)
+			fullFiles++
+		case strings.HasPrefix(h.Name, "full/claude-plugins/"):
+			rel := strings.TrimPrefix(h.Name, "full/claude-plugins/")
+			dst := filepath.Join(home, ".claude", "plugins", rel)
+			_ = streamToFile(dst, 0o644, tr)
+			fullFiles++
+		case strings.HasPrefix(h.Name, "full/project-mcp/"):
+			rel := strings.TrimPrefix(h.Name, "full/project-mcp/")
+			dst, ok := safeJoin(absTarget, rel)
+			if ok {
+				_ = streamToFile(dst, 0o644, tr)
+				fullFiles++
 			}
 		}
 	}
@@ -461,9 +600,16 @@ func importFleet(blob, target string, force bool) (string, error) {
 
 	var s strings.Builder
 	fmt.Fprintf(&s, "imported %d bubble(s) into %s\n", len(fm.Bubbles), absTarget)
-	fmt.Fprintf(&s, "restored %d conversation(s) (best effort — any that don't resume start fresh, keeping their inbox)\n", placed)
+	fmt.Fprintf(&s, "restored %d conversation(s)\n", placed)
 	if man.Files != "" && man.Files != "metadata" {
 		fmt.Fprintf(&s, "restored %d working file(s) [%s scope]\n", restored, man.Files)
+	}
+	if man.Full {
+		fmt.Fprintf(&s, "restored %d full-export files (env, plugins, mcp, identity)\n", fullFiles)
+		if envScript != "" {
+			fmt.Fprintf(&s, "\n*** ENV VARS saved to %s/.bubbles/env.sh ***\n", absTarget)
+			fmt.Fprintf(&s, "    source %s/.bubbles/env.sh   # then restart bubbles\n", absTarget)
+		}
 	}
 	if man.MsgPoll > 0 && man.MsgPoll != 10 {
 		fmt.Fprintf(&s, "note: source ran with --message_polling %d\n", man.MsgPoll)
