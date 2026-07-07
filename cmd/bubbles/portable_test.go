@@ -52,7 +52,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 
 	// export with the text scope: notes.md travels, logo.png does not
 	blob := filepath.Join(t.TempDir(), "fleet.tgz")
-	n, files, _, err := exportFleet(src, blob, "text", false)
+	n, files, _, err := exportFleet(src, blob, "text", false, nil)
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}

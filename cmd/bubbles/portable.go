@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/term"
@@ -132,15 +133,17 @@ func humanSize(n int64) string {
 // runExport bundles the fleet, inbox, every bubble's claude conversation, and
 // (per scope) the working files into a single .tgz. Usage:
 //
-//	bubbles export [outfile] [--files metadata|text|nomedia|all] [--dir base] [--full]
+//	bubbles export [outfile] [--files metadata|text|nomedia|all] [--dir base] [--full] [-y]
 func runExport(args []string) {
 	base, out, mode := defaultWorkspace(), "", ""
-	full := false
+	full, yes := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--full":
 			full = true
+		case a == "-y" || a == "--yes":
+			yes = true
 		case strings.HasPrefix(a, "--files="):
 			mode = strings.TrimPrefix(a, "--files=")
 		case a == "--files" && i+1 < len(args):
@@ -166,20 +169,224 @@ func runExport(args []string) {
 	if out == "" {
 		out = fmt.Sprintf("bubbles-export-%s.tgz", time.Now().Format("20060102-150405"))
 	}
-	convos, files, bytes, err := exportFleet(base, out, mode, full)
+
+	// Phase 1: pre-scan — calculate total size and file count
+	fm, ok := loadFleet(base)
+	if !ok {
+		fatal(fmt.Errorf("no fleet found in %s (start bubbles there first)", base))
+	}
+	absBase, _ := filepath.Abs(base)
+	absOut, _ := filepath.Abs(out)
+	home, _ := os.UserHomeDir()
+
+	scan := preScan(fm, absBase, absOut, home, mode, full)
+
+	// Phase 2: confirmation
+	interactive := term.IsTerminal(int(os.Stdin.Fd()))
+	if interactive && !yes {
+		printScanSummary(scan, out, mode, full)
+		fmt.Print("\nproceed? [Y/n] ")
+		sc := bufio.NewScanner(os.Stdin)
+		sc.Scan()
+		ans := strings.TrimSpace(strings.ToLower(sc.Text()))
+		if ans != "" && ans != "y" && ans != "yes" {
+			fmt.Println("cancelled.")
+			os.Exit(0)
+		}
+	}
+
+	// Phase 3: export with progress
+	start := time.Now()
+	var progress exportProgress
+	progress.totalBytes = scan.totalBytes
+	progress.totalFiles = scan.totalFiles
+
+	done := make(chan struct{})
+	if interactive {
+		go progressTicker(&progress, done)
+	}
+
+	convos, files, bytes, err := exportFleet(base, out, mode, full, &progress)
+	close(done)
+	if interactive {
+		clearLine()
+	}
 	if err != nil {
+		_ = os.Remove(out)
 		fatal(err)
 	}
-	fmt.Printf("exported [%s]: fleet + inbox + %d conversation(s)", mode, convos)
-	if mode != "metadata" {
-		fmt.Printf(" + %d working file(s) (%s)", files, humanSize(bytes))
+
+	// Phase 4: final summary
+	elapsed := time.Since(start)
+	blobSize := int64(0)
+	if fi, e := os.Stat(out); e == nil {
+		blobSize = fi.Size()
 	}
+	ratio := float64(0)
+	if bytes > 0 {
+		ratio = (1 - float64(blobSize)/float64(bytes)) * 100
+	}
+
+	fmt.Println("╭─── export complete ───────────────────────────────")
+	fmt.Printf("│ scope:        %s", mode)
 	if full {
-		fmt.Print(" + env + schedules + plugins + mcp + identity")
+		fmt.Print(" (full replication)")
 	}
-	fmt.Printf(" -> %s\n", out)
-	fmt.Println("(reflects the last saved state; detach the client first for a fully current export)")
-	fmt.Printf("import it elsewhere with:  bubbles import %s\n", filepath.Base(out))
+	fmt.Println()
+	fmt.Printf("│ bubbles:      %d\n", len(fm.Bubbles))
+	fmt.Printf("│ conversations:%d\n", convos)
+	fmt.Printf("│ files:        %d (%s uncompressed)\n", files, humanSize(bytes))
+	fmt.Printf("│ blob:         %s (%.0f%% compression)\n", humanSize(blobSize), ratio)
+	fmt.Printf("│ time:         %s\n", elapsed.Round(time.Millisecond))
+	fmt.Printf("│ output:       %s\n", out)
+	fmt.Println("╰───────────────────────────────────────────────────")
+	fmt.Printf("\nimport elsewhere:  bubbles import %s\n", filepath.Base(out))
+}
+
+// scanResult holds the pre-scan totals for the confirmation prompt.
+type scanResult struct {
+	bubbles    int
+	convos     int
+	convoBytes int64
+	workFiles  int
+	workBytes  int64
+	fullFiles  int
+	fullBytes  int64
+	totalFiles int
+	totalBytes int64
+}
+
+func preScan(fm manifest, absBase, absOut, home, mode string, full bool) scanResult {
+	var s scanResult
+	s.bubbles = len(fm.Bubbles)
+
+	for _, b := range fm.Bubbles {
+		if b.SessionID == "" || b.Dir == "" {
+			continue
+		}
+		p := convPath(home, b.Dir, b.SessionID)
+		if fi, err := os.Stat(p); err == nil {
+			s.convos++
+			s.convoBytes += fi.Size()
+		}
+	}
+
+	if mode != "metadata" {
+		_ = walkWorkdirs(fm, absBase, absOut, mode, func(_, full string, fi os.FileInfo) error {
+			s.workFiles++
+			s.workBytes += fi.Size()
+			return nil
+		})
+	}
+
+	if full {
+		scanDir(filepath.Join(home, ".claude", "bubbles"), &s.fullFiles, &s.fullBytes)
+		scanDirFiltered(filepath.Join(home, ".claude", "plugins"), &s.fullFiles, &s.fullBytes, func(rel string) bool {
+			return !strings.HasPrefix(rel, "cache/") && !strings.HasPrefix(rel, "repos/") && !strings.HasPrefix(rel, "marketplaces/")
+		})
+		scanFile(filepath.Join(home, ".mcp.json"), &s.fullFiles, &s.fullBytes)
+	}
+
+	s.totalFiles = s.convos + s.workFiles + s.fullFiles + 3 // +fleet+inbox+schedules
+	s.totalBytes = s.convoBytes + s.workBytes + s.fullBytes
+	return s
+}
+
+func scanDir(dir string, count *int, bytes *int64) {
+	_ = filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error {
+		if err != nil || !fi.Mode().IsRegular() {
+			return nil
+		}
+		*count++
+		*bytes += fi.Size()
+		return nil
+	})
+}
+
+func scanDirFiltered(dir string, count *int, bytes *int64, filter func(string) bool) {
+	_ = filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil || !fi.Mode().IsRegular() {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, p)
+		if !filter(filepath.ToSlash(rel)) {
+			return nil
+		}
+		*count++
+		*bytes += fi.Size()
+		return nil
+	})
+}
+
+func scanFile(path string, count *int, bytes *int64) {
+	if fi, err := os.Stat(path); err == nil {
+		*count++
+		*bytes += fi.Size()
+	}
+}
+
+func printScanSummary(s scanResult, out, mode string, full bool) {
+	fmt.Println("╭─── export plan ────────────────────────────────────")
+	fmt.Printf("│ scope:         %s", mode)
+	if full {
+		fmt.Print(" (full replication)")
+	}
+	fmt.Println()
+	fmt.Printf("│ bubbles:       %d\n", s.bubbles)
+	fmt.Printf("│ conversations: %d (%s)\n", s.convos, humanSize(s.convoBytes))
+	if s.workFiles > 0 {
+		fmt.Printf("│ working files: %d (%s)\n", s.workFiles, humanSize(s.workBytes))
+	}
+	if full && s.fullFiles > 0 {
+		fmt.Printf("│ full extras:   %d (%s) [env, plugins, mcp, identity]\n", s.fullFiles, humanSize(s.fullBytes))
+	}
+	fmt.Printf("│ total:         ~%s uncompressed (compressed .tgz will be smaller)\n", humanSize(s.totalBytes))
+	fmt.Printf("│ output:        %s\n", out)
+	fmt.Println("╰────────────────────────────────────────────────────")
+}
+
+// exportProgress tracks bytes/files written for the progress bar.
+type exportProgress struct {
+	totalBytes  int64
+	totalFiles  int
+	doneBytes   int64 // atomic
+	doneFiles   int64 // atomic
+}
+
+func progressTicker(p *exportProgress, done <-chan struct{}) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	start := time.Now()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			db := atomic.LoadInt64(&p.doneBytes)
+			df := atomic.LoadInt64(&p.doneFiles)
+			pct := float64(0)
+			if p.totalBytes > 0 {
+				pct = float64(db) / float64(p.totalBytes) * 100
+			}
+			elapsed := time.Since(start).Round(time.Second)
+			bar := progressBar(pct, 30)
+			clearLine()
+			fmt.Printf("  %s %.0f%%  %s / %s  %d files  %s",
+				bar, pct, humanSize(db), humanSize(p.totalBytes), df, elapsed)
+		}
+	}
+}
+
+func progressBar(pct float64, width int) string {
+	filled := int(pct / 100 * float64(width))
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", width-filled) + "]"
+}
+
+func clearLine() {
+	fmt.Print("\r\033[K")
 }
 
 func chooseMode() string {
@@ -204,7 +411,7 @@ func chooseMode() string {
 }
 
 // exportFleet writes the blob and returns (conversations, files, bytes) bundled.
-func exportFleet(base, outPath, mode string, full bool) (convos, files int, fileBytes int64, err error) {
+func exportFleet(base, outPath, mode string, full bool, prog *exportProgress) (convos, files int, fileBytes int64, err error) {
 	fm, ok := loadFleet(base)
 	if !ok {
 		return 0, 0, 0, fmt.Errorf("no fleet found in %s (start bubbles there first)", base)
@@ -223,6 +430,13 @@ func exportFleet(base, outPath, mode string, full bool) (convos, files int, file
 	tw := tar.NewWriter(gz)
 	defer tw.Close()
 
+	track := func(n int64) {
+		if prog != nil {
+			atomic.AddInt64(&prog.doneBytes, n)
+			atomic.AddInt64(&prog.doneFiles, 1)
+		}
+	}
+
 	for _, b := range fm.Bubbles {
 		if b.SessionID != "" && b.Dir != "" {
 			if _, e := os.Stat(convPath(home, b.Dir, b.SessionID)); e == nil {
@@ -230,10 +444,7 @@ func exportFleet(base, outPath, mode string, full bool) (convos, files int, file
 			}
 		}
 	}
-	// manifest first, then fleet/inbox, then conversations, then working files —
-	// this order lets the importer stream (read metadata up front, stream the bulk).
 	man := portManifest{Version: 1, Created: time.Now().UTC().Format(time.RFC3339), SourceBase: absBase, MsgPoll: messagePollMinutes(), Convos: convos, Files: mode, Full: full}
-	// count working files first so the manifest is accurate
 	if mode != "metadata" {
 		_ = walkWorkdirs(fm, absBase, absOut, mode, func(_, _ string, fi os.FileInfo) error {
 			files++
@@ -251,7 +462,6 @@ func exportFleet(base, outPath, mode string, full bool) (convos, files int, file
 	}
 	_ = tarCopy(tw, "inbox.json", inboxPath(base))
 
-	// schedules
 	schedPath := filepath.Join(base, ".bubbles", "schedules.json")
 	_ = tarCopy(tw, "schedules.json", schedPath)
 
@@ -259,40 +469,42 @@ func exportFleet(base, outPath, mode string, full bool) (convos, files int, file
 		if b.SessionID == "" || b.Dir == "" {
 			continue
 		}
-		_ = tarCopy(tw, "conversations/"+b.SessionID+".jsonl", convPath(home, b.Dir, b.SessionID))
+		p := convPath(home, b.Dir, b.SessionID)
+		if fi, e := os.Stat(p); e == nil {
+			_ = tarCopy(tw, "conversations/"+b.SessionID+".jsonl", p)
+			track(fi.Size())
+		}
 	}
 	if mode != "metadata" {
-		if err := walkWorkdirs(fm, absBase, absOut, mode, func(rel, full string, _ os.FileInfo) error {
-			return tarStreamFile(tw, "workdir/"+rel, full)
+		if err := walkWorkdirs(fm, absBase, absOut, mode, func(rel, fullPath string, fi os.FileInfo) error {
+			if err := tarStreamFile(tw, "workdir/"+rel, fullPath); err != nil {
+				return err
+			}
+			track(fi.Size())
+			return nil
 		}); err != nil {
 			return 0, 0, 0, err
 		}
 	}
 
-	// --full: bundle everything needed for cold-start replication
 	if full {
-		// env vars (relevant ones from the running process)
 		envData := exportEnvVars()
 		if len(envData) > 0 {
 			_ = tarWrite(tw, "full/env.sh", envData)
 		}
 
-		// global MCP config
 		_ = tarCopy(tw, "full/mcp.json", filepath.Join(home, ".mcp.json"))
 
-		// per-bubble identity files (~/.claude/bubbles/)
 		bubblesDir := filepath.Join(home, ".claude", "bubbles")
-		_ = tarDir(tw, "full/claude-bubbles/", bubblesDir)
+		_ = tarDirTracked(tw, "full/claude-bubbles/", bubblesDir, track)
 
-		// global plugins (~/.claude/plugins/ — skip large cache/repos dirs)
 		pluginsDir := filepath.Join(home, ".claude", "plugins")
-		_ = tarDirFiltered(tw, "full/claude-plugins/", pluginsDir, func(rel string) bool {
+		_ = tarDirFilteredTracked(tw, "full/claude-plugins/", pluginsDir, func(rel string) bool {
 			return !strings.HasPrefix(rel, "cache/") &&
 				!strings.HasPrefix(rel, "repos/") &&
 				!strings.HasPrefix(rel, "marketplaces/")
-		})
+		}, track)
 
-		// per-project .mcp.json files for each bubble's dir
 		seen := map[string]bool{}
 		for _, b := range fm.Bubbles {
 			if b.Dir == "" {
@@ -310,6 +522,37 @@ func exportFleet(base, outPath, mode string, full bool) (convos, files int, file
 	}
 
 	return convos, files, fileBytes, nil
+}
+
+func tarDirTracked(tw *tar.Writer, prefix, dir string, track func(int64)) error {
+	return filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil || !fi.Mode().IsRegular() {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, p)
+		if err := tarStreamFile(tw, prefix+filepath.ToSlash(rel), p); err != nil {
+			return err
+		}
+		track(fi.Size())
+		return nil
+	})
+}
+
+func tarDirFilteredTracked(tw *tar.Writer, prefix, dir string, filter func(string) bool, track func(int64)) error {
+	return filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil || !fi.Mode().IsRegular() {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, p)
+		if !filter(filepath.ToSlash(rel)) {
+			return nil
+		}
+		if err := tarStreamFile(tw, prefix+filepath.ToSlash(rel), p); err != nil {
+			return err
+		}
+		track(fi.Size())
+		return nil
+	})
 }
 
 // exportEnvVars dumps relevant env vars as a sourceable shell script.
