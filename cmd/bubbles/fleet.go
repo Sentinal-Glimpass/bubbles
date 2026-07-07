@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
@@ -170,7 +171,13 @@ func loadFleet(baseDir string) (manifest, bool) {
 	}
 	var m manifest
 	if json.Unmarshal(data, &m) != nil {
-		return manifest{}, false
+		// Retry once — the daemon may be mid-write (atomic rename not guaranteed
+		// on all filesystems).
+		time.Sleep(100 * time.Millisecond)
+		data, err = os.ReadFile(fleetPath(baseDir))
+		if err != nil || json.Unmarshal(data, &m) != nil {
+			return manifest{}, false
+		}
 	}
 	return m, true
 }
