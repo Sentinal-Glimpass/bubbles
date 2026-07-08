@@ -45,6 +45,13 @@ var bedrockModels = map[string]string{
 	"haiku":  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 }
 
+// isBedrockID reports whether a model string is a Bedrock/cross-region
+// inference-profile id (e.g. "us.anthropic.claude-…", "global.anthropic.…")
+// rather than a plain alias — these only work with CLAUDE_CODE_USE_BEDROCK=1.
+func isBedrockID(model string) bool {
+	return strings.Contains(model, "anthropic.claude-")
+}
+
 // LocalRunner launches real claude sessions in PTYs on this machine.
 type LocalRunner struct {
 	Bin           string                    // default "claude"
@@ -206,9 +213,14 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
 		if id, ok := bedrockModels[model]; ok {
 			model = id
-		} else {
-			model = r.DefaultModel
+		} else if id, ok := bedrockModels[r.DefaultModel]; ok {
+			model = id // unknown alias on Bedrock → the default's pinned Bedrock id
 		}
+	} else if isBedrockID(model) {
+		// Bedrock is OFF but a Bedrock inference-profile id is saved (e.g. left over
+		// from a Bedrock run): it's meaningless to the subscription API, so fall back
+		// to the plain default alias.
+		model = r.DefaultModel
 	}
 	if model != "" {
 		args = append(args, "--model", model)
