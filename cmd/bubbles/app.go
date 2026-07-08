@@ -190,7 +190,8 @@ func runApp() {
 	// whichever TUI program is currently running (nil while diving into a bubble).
 	var curProg atomic.Pointer[tea.Program]
 	go runSampler(k, &curProg)
-	go runClaudeUsage(&curProg) // account /usage in the dashboard, polled directly (no claude session)
+	go runClaudeUsage(&curProg)   // account /usage in the dashboard, polled directly (no claude session)
+	go runHeadroomStats(&curProg) // token-compression savings in the dashboard (no-op unless --headroom)
 
 	ln, err := ipc.Serve(sock, func(r ipc.Request) ipc.Reply { return handleIPC(k, r) })
 	if err != nil {

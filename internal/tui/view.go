@@ -44,6 +44,21 @@ func humanBytes(b uint64) string {
 	}
 }
 
+// hrGood is the green used for the headroom ON indicator and positive savings.
+var hrGood = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
+
+// humanCount renders a token count compactly (1.2M, 34K, 812).
+func humanCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.0fK", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
 // sevStyle colors a usage figure by its limit severity.
 func sevStyle(sev string) lipgloss.Style {
 	switch sev {
@@ -92,11 +107,34 @@ func claudeUsageRows(c ClaudeUsage) []string {
 	return rows
 }
 
+// headroomRows renders the token-compression status: an ON/warming indicator and
+// the cumulative token savings once the proxy reports any.
+func headroomRows(h Headroom) []string {
+	if !h.On {
+		return nil
+	}
+	status := sevStyle("warning").Render("warming")
+	if h.Ready {
+		status = hrGood.Render("ON")
+	}
+	rows := []string{panelHead.Render("HEADROOM") + " " + status}
+	if h.Ready {
+		if h.SavingsPct <= 0 {
+			rows = append(rows, panelStyle.Render(" saved   —  (no data yet)"))
+		} else {
+			saved := hrGood.Render(fmt.Sprintf("%.0f%%", h.SavingsPct))
+			rows = append(rows, " saved "+saved+panelStyle.Render(fmt.Sprintf("  (%s tok)", humanCount(h.TokensSaved))))
+		}
+	}
+	return rows
+}
+
 // usagePanel builds the right-hand block: Claude account usage rows on top, then
 // the resources view (RAM/CPU + hot count, always shown), then the top bubbles by
 // CPU when any are live.
 func usagePanel(u Model) []string {
 	lines := claudeUsageRows(u.claude)
+	lines = append(lines, headroomRows(u.headroom)...)
 	// Resources are ALWAYS shown (even at 0 hot — RAM 0B · CPU 0%), so the metrics
 	// corner never disappears when the fleet is idle.
 	lines = append(lines,

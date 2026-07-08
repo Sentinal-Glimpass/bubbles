@@ -58,6 +58,18 @@ type ClaudeUsage struct {
 // ClaudeUsageMsg is pushed by the usage poller into the dashboard panel.
 type ClaudeUsageMsg ClaudeUsage
 
+// Headroom is the token-compression proxy's state for the dashboard: whether
+// it's enabled, whether the proxy is answering, and the cumulative token savings.
+type Headroom struct {
+	On          bool
+	Ready       bool    // proxy /stats is reachable
+	SavingsPct  float64 // cumulative token savings %
+	TokensSaved int64
+}
+
+// HeadroomMsg is pushed by the headroom stats poller into the dashboard panel.
+type HeadroomMsg Headroom
+
 type blinkTickMsg struct{}
 
 // Model is the fleet tree.
@@ -116,10 +128,11 @@ type Model struct {
 	OnPersist func()
 	lastVer   int64 // last registry version we persisted at
 
-	width  int         // terminal width (from WindowSizeMsg), for the top-right panel
-	usage  UsageMsg    // latest resource snapshot from the sampler
-	claude ClaudeUsage // latest Claude subscription usage (/usage)
-	Flash  string      // transient notice (e.g. a failed dive), shown until the next key
+	width    int         // terminal width (from WindowSizeMsg), for the top-right panel
+	usage    UsageMsg    // latest resource snapshot from the sampler
+	claude   ClaudeUsage // latest Claude subscription usage (/usage)
+	headroom Headroom    // token-compression proxy state (/stats)
+	Flash    string      // transient notice (e.g. a failed dive), shown until the next key
 
 	// Selected is set to the address the user dived into, then the program
 	// quits so the caller (cmd/bubbles) can hand over the terminal.
@@ -271,6 +284,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case ClaudeUsageMsg:
 		m.claude = ClaudeUsage(msg)
+		return m, nil
+	case HeadroomMsg:
+		m.headroom = Headroom(msg)
 		return m, nil
 	case PingMsg:
 		m.pings[msg.From] = msg.Subject
