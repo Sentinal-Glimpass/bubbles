@@ -71,6 +71,12 @@ func runApp() {
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-%d.sock", os.Getpid()))
 	self, _ := os.Executable()
 
+	// Token-compression proxy (opt-in, off by default). Started here so it warms
+	// up in parallel with the rest of boot; env is injected later (routeWhenReady)
+	// once /health is ready, before any bubble launches. Fail-open.
+	headroom := startHeadroom(baseDir)
+	defer headroom.stop()
+
 	lr := runner.NewLocal()
 	lr.CitizenPrompt = citizenPrompt
 	// Fleet default model. Unset => "sonnet" (subscription). Set BUBBLES_MODEL to a
@@ -192,6 +198,13 @@ func runApp() {
 	}
 	defer ln.Close()
 	defer os.Remove(sock)
+
+	// Gate compression routing on the proxy being healthy, BEFORE any bubble
+	// launches (env is inherited by each claude session). Fail-open: if it isn't
+	// ready in time, sessions talk to the provider directly.
+	if headroom != nil {
+		headroom.routeWhenReady(20 * time.Second)
+	}
 
 	// Quit/relaunch loop: the TUI quits when you dive in; we hand over the
 	// terminal, then relaunch the fleet view.

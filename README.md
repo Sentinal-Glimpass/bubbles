@@ -126,6 +126,29 @@ bubbles
   subscription's `/usage`); on Bedrock/Vertex it simply hides itself — billing is
   on your cloud account.
 
+## Token compression (optional)
+
+A busy fleet burns tokens fast. Bubbles can route every session through
+[Headroom](https://github.com/headroomlabs-ai/headroom), a local compression
+proxy that shrinks tool outputs, logs, and history before they reach the model
+(and trims what the model writes back). Same answers, fewer tokens.
+
+```bash
+uv tool install "headroom-ai[proxy]"    # one-time: install the proxy
+bubbles --headroom                      # route the whole fleet through it
+```
+
+- **One proxy, whole fleet** — bubbles starts it, health-checks it, and points
+  every session at it (`ANTHROPIC_BASE_URL`, or `ANTHROPIC_BEDROCK_BASE_URL` +
+  `--backend bedrock` when `CLAUDE_CODE_USE_BEDROCK=1`). Off by default.
+- **Fail-open** — routing turns on only after the proxy reports healthy; if it's
+  not installed or won't start, the fleet talks to the provider directly. If the
+  proxy crashes, bubbles relaunches it.
+- **Cache-safe** — Headroom compresses only new bytes and keeps the frozen prefix
+  byte-identical, so provider prompt caches still hit.
+- Port defaults to 8787 (`--headroom-port`). Logs: `.bubbles/headroom.log`. See
+  savings with `headroom dashboard` / `headroom stats`.
+
 ## Keys
 
 **Fleet view**
