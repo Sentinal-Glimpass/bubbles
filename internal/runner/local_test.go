@@ -243,6 +243,8 @@ func TestDefaultModelSkip(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Setenv("ANTHROPIC_MODEL", "") // isolate from the dev shell's env
+
 	// DefaultModel "" -> no --model
 	r := NewLocal()
 	r.Bin = stub
@@ -267,6 +269,20 @@ func TestDefaultModelSkip(t *testing.T) {
 	defer r2.Kill("0.2")
 	if out := attachUntil(s2.(PTYSession), "ARGS:"); !strings.Contains(out, "--model us.anthropic.claude-sonnet-4-v1:0") {
 		t.Fatalf("set DefaultModel should be passed:\n%s", out)
+	}
+
+	// ANTHROPIC_MODEL set -> no --model at all, even with a per-bubble model
+	// (a --model flag would override the env var; env is the source of truth)
+	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]")
+	r3 := NewLocal()
+	r3.Bin = stub
+	s3, err := r3.Launch("0.3", dir, SpawnOpts{Persona: "z", Model: "opus"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r3.Kill("0.3")
+	if out := attachUntil(s3.(PTYSession), "ARGS:"); strings.Contains(out, "--model") {
+		t.Fatalf("ANTHROPIC_MODEL set should suppress --model entirely:\n%s", out)
 	}
 }
 

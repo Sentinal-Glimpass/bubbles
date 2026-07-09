@@ -190,12 +190,17 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 		args = append(args, "--disallowed-tools")
 		args = append(args, r.DisallowedTools...)
 	}
-	model := opts.Model
-	if model == "" {
-		model = r.DefaultModel
-	}
-	if model != "" {
-		args = append(args, "--model", model)
+	// ANTHROPIC_MODEL is the single source of truth when set: pass no --model at
+	// all (a --model flag would override the env var), so EVERY bubble — including
+	// ones with an old per-bubble model saved in fleet.json — resolves to the env.
+	if os.Getenv("ANTHROPIC_MODEL") == "" {
+		model := opts.Model
+		if model == "" {
+			model = r.DefaultModel
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
 	}
 	if r.AllowAll != nil && *r.AllowAll {
 		args = append(args, "--dangerously-skip-permissions")
