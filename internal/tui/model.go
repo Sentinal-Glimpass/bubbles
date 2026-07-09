@@ -63,8 +63,9 @@ type ClaudeUsageMsg ClaudeUsage
 type Headroom struct {
 	On          bool
 	Ready       bool    // proxy /stats is reachable
-	SavingsPct  float64 // cumulative token savings %
-	TokensSaved int64
+	SavingsPct  float64 // cumulative COST savings % (cache alignment + compression)
+	SavedUSD    float64 // dollars saved (cache + compression)
+	TokensSaved int64   // tokens removed by compression
 }
 
 // HeadroomMsg is pushed by the headroom stats poller into the dashboard panel.

@@ -210,6 +210,12 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	if model == "" {
 		model = r.DefaultModel
 	}
+	// Fleet policy: Sonnet has been burning more tokens than Opus for our
+	// workloads (costing more net), so every sonnet request — current bubbles on
+	// relaunch and any future spawn — is routed to opus. One reference to change.
+	if model == "sonnet" {
+		model = "opus"
+	}
 	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
 		if id, ok := bedrockModels[model]; ok {
 			model = id

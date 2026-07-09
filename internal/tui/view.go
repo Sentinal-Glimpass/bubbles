@@ -47,6 +47,16 @@ func humanBytes(b uint64) string {
 // hrGood is the green used for the headroom ON indicator and positive savings.
 var hrGood = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
 
+// humanUSD renders a dollar amount compactly ($3.5K, $412, $7).
+func humanUSD(v float64) string {
+	switch {
+	case v >= 1000:
+		return fmt.Sprintf("$%.1fK", v/1000)
+	default:
+		return fmt.Sprintf("$%.0f", v)
+	}
+}
+
 // humanCount renders a token count compactly (1.2M, 34K, 812).
 func humanCount(n int64) string {
 	switch {
@@ -123,7 +133,7 @@ func headroomRows(h Headroom) []string {
 			rows = append(rows, panelStyle.Render(" saved   —  (no data yet)"))
 		} else {
 			saved := hrGood.Render(fmt.Sprintf("%.0f%%", h.SavingsPct))
-			rows = append(rows, " saved "+saved+panelStyle.Render(fmt.Sprintf("  (%s tok)", humanCount(h.TokensSaved))))
+			rows = append(rows, " saved "+saved+panelStyle.Render("  "+humanUSD(h.SavedUSD)))
 		}
 	}
 	return rows
