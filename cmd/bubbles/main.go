@@ -70,6 +70,7 @@ func main() {
 	applyFlagToEnv("--ngrok-domain", "BUBBLES_NGROK_DOMAIN")         // reserved ngrok domain for a STABLE public URL
 	applyBoolFlagToEnv("--headroom", "BUBBLES_HEADROOM")             // route the fleet through the headroom token-compression proxy
 	applyFlagToEnv("--headroom-port", "BUBBLES_HEADROOM_PORT")       // proxy port (default 8787)
+	applyFlagToEnv("--headroom-mode", "BUBBLES_HEADROOM_MODE")       // token (max compression) | cache (max prefix-cache; best $ for a cache-heavy fleet)
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "mcp-stdio":

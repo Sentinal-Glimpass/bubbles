@@ -73,6 +73,13 @@ func startHeadroom(baseDir string) *headroomProc {
 		// The proxy re-signs SigV4, so it can compress and forward direct to AWS.
 		args = append(args, "--backend", "bedrock")
 	}
+	// Optimization mode: "cache" freezes prior turns to maximize provider
+	// prefix-cache hits (best net $ for a cache-heavy fleet); "token" rewrites
+	// them for max compression (may bust cache). The dashboard's cost-savings %
+	// nets both — flip this and watch which wins. Default: headroom's own default.
+	if m := os.Getenv("BUBBLES_HEADROOM_MODE"); m != "" {
+		args = append(args, "--mode", m)
+	}
 	if os.Getenv("HEADROOM_OUTPUT_SHAPER") == "" {
 		// Trim what the model writes back (verbosity steering + effort routing on
 		// tool-result resumes). Output tokens cost ~5x input on Opus-class models.
