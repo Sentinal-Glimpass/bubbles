@@ -20,9 +20,12 @@ type SpawnOpts struct {
 	Resume     bool   // restored bubble: resume its conversation, no initial prompt
 }
 
-// DefaultModel is the --model passed when a bubble doesn't specify one. Empty
-// means don't pass --model at all — Claude Code uses ANTHROPIC_MODEL from env.
-const DefaultModel = ""
+// DefaultModel is the --model passed when a bubble doesn't specify one. A plain
+// alias (not empty, not a raw Bedrock id) so an unmodelled bubble on
+// subscription gets a clean alias instead of falling through to a Bedrock-shaped
+// ANTHROPIC_MODEL lingering in the shell. On Bedrock the env drives instead
+// (--model is suppressed entirely — see local.go).
+const DefaultModel = "sonnet"
 
 // Session is a running agent we can inject input into (message delivery).
 type Session interface {
