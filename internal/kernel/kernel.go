@@ -623,15 +623,12 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	// Try to resume the existing conversation.
 	if b.SessionID != "" {
 		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
-			if k.RelaunchProbe > 0 {
-				time.Sleep(k.RelaunchProbe) // give a doomed resume time to exit / print its error
-			}
 			// A resume can fail two ways: the process exits (Alive false), or claude
 			// has no record of the id and prints "No conversation found" (e.g. the
 			// session was never persisted because the bubble stalled, or its working
 			// dir changed). Either way, fall through to a fresh session — which keeps
 			// the bubble's pending inbox messages (those live in our store).
-			if sess.Alive() && !resumeLost(sess) {
+			if k.resumeHealthy(sess) {
 				k.setSession(a, sess)
 				k.touch(a)
 				k.EnforceBudget() // page in -> may page out a colder bubble
@@ -985,6 +982,33 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 // instead of leaving the bubble stuck on the error.
 func resumeLost(s runner.Session) bool {
 	return strings.Contains(s.RecentOutput(), "No conversation found")
+}
+
+// resumeProbeWindow bounds how long resumeHealthy waits for a doomed --resume to
+// reveal itself. A doomed resume prints "No conversation found" and exits ~1.4s
+// after launch (a LOCAL session-file check, so it's stable — not affected by the
+// network or a compression proxy). The old single 800ms sleep raced ahead of
+// that error and handed back the dying session; we poll the window instead and
+// bail the instant the resume fails. A healthy resume waits out the window (a
+// background wake path, not keystroke latency) — correctness over ~1.7s.
+const resumeProbeWindow = 2500 * time.Millisecond
+
+// resumeHealthy reports whether a freshly-resumed session came up on the real
+// conversation. It polls (rather than sleeping once) so it heals regardless of
+// how long claude takes to print "No conversation found" — the bug that left
+// bubbles stuck on that error. RelaunchProbe <= 0 (tests) skips the wait.
+func (k *Kernel) resumeHealthy(sess runner.Session) bool {
+	if k.RelaunchProbe <= 0 {
+		return sess.Alive() && !resumeLost(sess)
+	}
+	deadline := time.Now().Add(resumeProbeWindow)
+	for time.Now().Before(deadline) {
+		if resumeLost(sess) || !sess.Alive() {
+			return false // doomed resume revealed itself — heal to a fresh session
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return sess.Alive() && !resumeLost(sess)
 }
 
 // newSessionID returns a random UUIDv4 string for tagging a claude session.
