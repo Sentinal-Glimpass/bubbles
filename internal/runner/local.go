@@ -190,10 +190,13 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 		args = append(args, "--disallowed-tools")
 		args = append(args, r.DisallowedTools...)
 	}
-	// ANTHROPIC_MODEL is the single source of truth when set: pass no --model at
-	// all (a --model flag would override the env var), so EVERY bubble — including
-	// ones with an old per-bubble model saved in fleet.json — resolves to the env.
-	if os.Getenv("ANTHROPIC_MODEL") == "" {
+	// On Bedrock, ANTHROPIC_MODEL is the single source of truth: pass no --model
+	// at all (a --model flag would override the env var), so EVERY bubble —
+	// including ones with an old per-bubble model saved in fleet.json — resolves
+	// to the env. On subscription (Bedrock off), per-bubble models apply normally
+	// even if ANTHROPIC_MODEL happens to be set in the shell.
+	envDrivesModel := os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" && os.Getenv("ANTHROPIC_MODEL") != ""
+	if !envDrivesModel {
 		model := opts.Model
 		if model == "" {
 			model = r.DefaultModel

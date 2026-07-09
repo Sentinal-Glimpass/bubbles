@@ -271,8 +271,9 @@ func TestDefaultModelSkip(t *testing.T) {
 		t.Fatalf("set DefaultModel should be passed:\n%s", out)
 	}
 
-	// ANTHROPIC_MODEL set -> no --model at all, even with a per-bubble model
-	// (a --model flag would override the env var; env is the source of truth)
+	// Bedrock ON + ANTHROPIC_MODEL set -> no --model at all, even with a
+	// per-bubble model (a --model flag would override the env var)
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
 	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]")
 	r3 := NewLocal()
 	r3.Bin = stub
@@ -282,7 +283,21 @@ func TestDefaultModelSkip(t *testing.T) {
 	}
 	defer r3.Kill("0.3")
 	if out := attachUntil(s3.(PTYSession), "ARGS:"); strings.Contains(out, "--model") {
-		t.Fatalf("ANTHROPIC_MODEL set should suppress --model entirely:\n%s", out)
+		t.Fatalf("Bedrock + ANTHROPIC_MODEL should suppress --model entirely:\n%s", out)
+	}
+
+	// Bedrock OFF + ANTHROPIC_MODEL set (a lingering shell export) -> the
+	// per-bubble model still applies
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "0")
+	r4 := NewLocal()
+	r4.Bin = stub
+	s4, err := r4.Launch("0.4", dir, SpawnOpts{Persona: "w", Model: "opus"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r4.Kill("0.4")
+	if out := attachUntil(s4.(PTYSession), "ARGS:"); !strings.Contains(out, "--model opus") {
+		t.Fatalf("Bedrock off: per-bubble model should be passed despite ANTHROPIC_MODEL:\n%s", out)
 	}
 }
 
