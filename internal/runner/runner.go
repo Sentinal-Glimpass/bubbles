@@ -20,11 +20,9 @@ type SpawnOpts struct {
 	Resume     bool   // restored bubble: resume its conversation, no initial prompt
 }
 
-// DefaultModel is the model alias used when SpawnOpts.Model is empty. It MUST
-// be a plain alias (not a raw Bedrock id) so it resolves on the subscription /
-// Anthropic API too; when CLAUDE_CODE_USE_BEDROCK=1, bedrockModels translates it
-// to the pinned Bedrock inference-profile id (Opus 4.6, 1M context).
-const DefaultModel = "opus"
+// DefaultModel is the --model passed when a bubble doesn't specify one. Empty
+// means don't pass --model at all — Claude Code uses ANTHROPIC_MODEL from env.
+const DefaultModel = ""
 
 // Session is a running agent we can inject input into (message delivery).
 type Session interface {

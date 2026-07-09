@@ -35,22 +35,6 @@ type PTYSession interface {
 // enough to hold a full claude repaint, small enough to be cheap per bubble.
 const scrollbackCap = 256 * 1024
 
-// bedrockModels maps friendly aliases to pinned Bedrock model IDs (Opus 4.6,
-// the latest available as of 2025-07). Used when CLAUDE_CODE_USE_BEDROCK=1 so
-// bubbles doesn't pass an alias that resolves to a model not yet on Bedrock.
-var bedrockModels = map[string]string{
-	"opus":   "us.anthropic.claude-opus-4-6-v1[1m]",
-	"sonnet": "us.anthropic.claude-opus-4-6-v1[1m]",
-	"fable":  "us.anthropic.claude-opus-4-6-v1[1m]",
-	"haiku":  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-}
-
-// isBedrockID reports whether a model string is a Bedrock/cross-region
-// inference-profile id (e.g. "us.anthropic.claude-…", "global.anthropic.…")
-// rather than a plain alias — these only work with CLAUDE_CODE_USE_BEDROCK=1.
-func isBedrockID(model string) bool {
-	return strings.Contains(model, "anthropic.claude-")
-}
 
 // LocalRunner launches real claude sessions in PTYs on this machine.
 type LocalRunner struct {
@@ -208,24 +192,6 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	}
 	model := opts.Model
 	if model == "" {
-		model = r.DefaultModel
-	}
-	// Fleet policy: Sonnet has been burning more tokens than Opus for our
-	// workloads (costing more net), so every sonnet request — current bubbles on
-	// relaunch and any future spawn — is routed to opus. One reference to change.
-	if model == "sonnet" {
-		model = "opus"
-	}
-	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
-		if id, ok := bedrockModels[model]; ok {
-			model = id
-		} else if id, ok := bedrockModels[r.DefaultModel]; ok {
-			model = id // unknown alias on Bedrock → the default's pinned Bedrock id
-		}
-	} else if isBedrockID(model) {
-		// Bedrock is OFF but a Bedrock inference-profile id is saved (e.g. left over
-		// from a Bedrock run): it's meaningless to the subscription API, so fall back
-		// to the plain default alias.
 		model = r.DefaultModel
 	}
 	if model != "" {

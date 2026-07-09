@@ -402,7 +402,7 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a = addr.Root // on a group header: spawn under root
 		}
 		m.spawnStage, m.input, m.pendingParent = 1, "", a
-		m.spawnModel, m.spawnGrant = runner.DefaultModel, false // reset options
+		m.spawnModel, m.spawnGrant = "sonnet", false // picker default for new bubbles
 	case "m":
 		m.markSet = true // arm: next digit (re)assigns the highlighted bubble
 	case "i":
@@ -440,7 +440,7 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.editing, m.editAddr, m.editField = true, a, 0
 				m.editPersona, m.editModel, m.editGrant = b.Label(), b.Model, m.k.Caps.CanSpawn(a)
 				if m.editModel == "" {
-					m.editModel = runner.DefaultModel
+					m.editModel = "sonnet" // picker default when no model is set
 				}
 			}
 		}

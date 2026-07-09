@@ -510,7 +510,7 @@ func TestEditBubbleSettings(t *testing.T) {
 	}
 	tm.Type("boss")
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> model field
-	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // opus (default) -> fable
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // sonnet (default) -> opus
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> grant field
 	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // grant ON
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save
@@ -522,8 +522,8 @@ func TestEditBubbleSettings(t *testing.T) {
 	if b.Label() != "boss" {
 		t.Fatalf("name = %q want boss", b.Label())
 	}
-	if b.Model != "fable" {
-		t.Fatalf("model = %q want fable", b.Model)
+	if b.Model != "opus" {
+		t.Fatalf("model = %q want opus", b.Model)
 	}
 	if !k.Caps.CanSpawn(addr.Address("0.1")) {
 		t.Fatal("grant should be ON after edit")
