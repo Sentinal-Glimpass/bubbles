@@ -190,20 +190,21 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 		args = append(args, "--disallowed-tools")
 		args = append(args, r.DisallowedTools...)
 	}
-	// On Bedrock, ANTHROPIC_MODEL is the single source of truth: pass no --model
-	// at all (a --model flag would override the env var), so EVERY bubble —
-	// including ones with an old per-bubble model saved in fleet.json — resolves
-	// to the env. On subscription (Bedrock off), per-bubble models apply normally
-	// even if ANTHROPIC_MODEL happens to be set in the shell.
-	envDrivesModel := os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" && os.Getenv("ANTHROPIC_MODEL") != ""
-	if !envDrivesModel {
-		model := opts.Model
-		if model == "" {
-			model = r.DefaultModel
-		}
-		if model != "" {
-			args = append(args, "--model", model)
-		}
+	// Every launch gets an explicit --model.
+	//   Bedrock ON  -> ANTHROPIC_MODEL from env (a Bedrock inference-profile id).
+	//   Bedrock OFF -> the per-bubble model, collapsed to two subscription aliases:
+	//                  "fable" stays "fable"; everything else (unset/sonnet/opus)
+	//                  becomes "opus".
+	var model string
+	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
+		model = os.Getenv("ANTHROPIC_MODEL")
+	} else if opts.Model == "fable" {
+		model = "fable"
+	} else {
+		model = "opus"
+	}
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	if r.AllowAll != nil && *r.AllowAll {
 		args = append(args, "--dangerously-skip-permissions")

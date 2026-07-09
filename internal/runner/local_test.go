@@ -233,71 +233,48 @@ func aliveCmd(t *testing.T) *exec.Cmd {
 	return c
 }
 
-// TestDefaultModelSkip: an empty DefaultModel (and no per-bubble model) passes
-// NO --model, so claude uses its own default (ANTHROPIC_MODEL / Bedrock). A set
-// default is passed through.
-func TestDefaultModelSkip(t *testing.T) {
+// TestModelResolution: every launch gets an explicit --model.
+//   Bedrock OFF -> "fable" stays "fable"; everything else collapses to "opus".
+//   Bedrock ON  -> ANTHROPIC_MODEL from env.
+func TestModelResolution(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "stub.sh")
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho \"ARGS:$@\"\ncat\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	t.Setenv("ANTHROPIC_MODEL", "") // isolate from the dev shell's env
-
-	// DefaultModel "" -> no --model
-	r := NewLocal()
-	r.Bin = stub
-	r.DefaultModel = ""
-	sess, err := r.Launch("0.1", dir, SpawnOpts{Persona: "x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Kill("0.1")
-	if out := attachUntil(sess.(PTYSession), "ARGS:"); strings.Contains(out, "--model") {
-		t.Fatalf("empty DefaultModel should pass no --model:\n%s", out)
+	launch := func(a string, opts SpawnOpts) string {
+		r := NewLocal()
+		r.Bin = stub
+		s, err := r.Launch(addr.Address(a), dir, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { r.Kill(addr.Address(a)) })
+		return attachUntil(s.(PTYSession), "ARGS:")
 	}
 
-	// DefaultModel set to a bedrock-style id -> passed through
-	r2 := NewLocal()
-	r2.Bin = stub
-	r2.DefaultModel = "us.anthropic.claude-sonnet-4-v1:0"
-	s2, err := r2.Launch("0.2", dir, SpawnOpts{Persona: "y"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r2.Kill("0.2")
-	if out := attachUntil(s2.(PTYSession), "ARGS:"); !strings.Contains(out, "--model us.anthropic.claude-sonnet-4-v1:0") {
-		t.Fatalf("set DefaultModel should be passed:\n%s", out)
+	// Bedrock OFF: unset/sonnet/opus -> opus; fable -> fable
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "0")
+	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]") // lingering shell export, must be ignored
+	for i, tc := range []struct{ in, want string }{
+		{"", "opus"},
+		{"sonnet", "opus"},
+		{"opus", "opus"},
+		{"fable", "fable"},
+	} {
+		out := launch(fmt.Sprintf("0.%d", i+1), SpawnOpts{Persona: "x", Model: tc.in})
+		if !strings.Contains(out, "--model "+tc.want) {
+			t.Fatalf("bedrock off, model=%q: want --model %s, got:\n%s", tc.in, tc.want, out)
+		}
 	}
 
-	// Bedrock ON + ANTHROPIC_MODEL set -> no --model at all, even with a
-	// per-bubble model (a --model flag would override the env var)
+	// Bedrock ON: --model is ANTHROPIC_MODEL, regardless of per-bubble model
 	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
 	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]")
-	r3 := NewLocal()
-	r3.Bin = stub
-	s3, err := r3.Launch("0.3", dir, SpawnOpts{Persona: "z", Model: "opus"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r3.Kill("0.3")
-	if out := attachUntil(s3.(PTYSession), "ARGS:"); strings.Contains(out, "--model") {
-		t.Fatalf("Bedrock + ANTHROPIC_MODEL should suppress --model entirely:\n%s", out)
-	}
-
-	// Bedrock OFF + ANTHROPIC_MODEL set (a lingering shell export) -> the
-	// per-bubble model still applies
-	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "0")
-	r4 := NewLocal()
-	r4.Bin = stub
-	s4, err := r4.Launch("0.4", dir, SpawnOpts{Persona: "w", Model: "opus"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r4.Kill("0.4")
-	if out := attachUntil(s4.(PTYSession), "ARGS:"); !strings.Contains(out, "--model opus") {
-		t.Fatalf("Bedrock off: per-bubble model should be passed despite ANTHROPIC_MODEL:\n%s", out)
+	out := launch("0.9", SpawnOpts{Persona: "z", Model: "sonnet"})
+	if !strings.Contains(out, "--model us.anthropic.claude-opus-4-6-v1[1m]") {
+		t.Fatalf("bedrock on: want --model = ANTHROPIC_MODEL, got:\n%s", out)
 	}
 }
 
