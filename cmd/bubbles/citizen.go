@@ -24,6 +24,7 @@ If you were granted the ability to spawn, you also OWN and manage your sub-bubbl
 spawn/edit/delete/introduce/broadcast only act on your own subtree — the bubbles you spawned (and theirs).
 
 Conventions:
+- Keep message BODIES short. A message is paid for twice — you spend tokens writing it, the recipient spends tokens reading it — so don't paste large content (file dumps, full plans, long logs) into a message. Put durable detail in your brain files (the .md files in your working folder) and send a terse message that references them by path/section ("decision in NOTES.md §Auth; need your call on X"). The recipient reads the file only if it needs the detail. Send the conclusion and the ask, not the raw material.
 - Report meaningful progress, blocking questions, and completion to root ("0") with send.
 - To answer someone, reply with send(..., reply_to=<id>) to their address; this marks their message answered.
 - Before re-sending to someone who hasn't replied, call status() — if it's "read, no reply", they saw it; don't nag. If still "delivered", they haven't seen it yet.
