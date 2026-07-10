@@ -232,6 +232,15 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolErr(msg.ID, err.Error())
 		}
 		return toolOK(msg.ID, fmt.Sprintf("broadcast to %d bubble(s) in your subtree", n))
+	case "control_webhook":
+		if !s.Spawnable {
+			return errResp(msg.ID, -32601, "tool not available: control_webhook")
+		}
+		url, err := s.B.ControlWebhook(s.Self, argBool("rotate"))
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "control webhook (spawns/deletes as you — keep secret): "+url)
 	case "assign_task":
 		if !s.Spawnable {
 			return errResp(msg.ID, -32601, "tool not available: assign_task")

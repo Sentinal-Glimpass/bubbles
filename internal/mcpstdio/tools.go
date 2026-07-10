@@ -16,6 +16,7 @@ type Backend interface {
 	Schedules(by string) []string
 	Webhook(by, target string) (string, error)       // incoming-webhook URL for target (self or a bubble in by's subtree)
 	WebhookRotate(by, target string) (string, error) // revoke + reissue target's URL (same authority)
+	ControlWebhook(by string, rotate bool) (string, error) // control-webhook URL that spawns/deletes bubbles as the caller
 	Spawn(by, name, description, dir, model string) (string, error)
 	Edit(by, addr, name, description, model string) error
 	Delete(by, addr string) (int, error) // returns how many bubbles were removed (target + subtree)
@@ -271,6 +272,17 @@ func (s *Server) tools() []Tool {
 				"type":       "object",
 				"properties": bcProps,
 				"required":   []string{"subject"},
+			},
+		})
+		ts = append(ts, Tool{
+			Name:        "control_webhook",
+			Description: "Get YOUR control-webhook URL (minted on first call, stable afterwards) — a programmatic endpoint that spawns and deletes bubbles as you, without you being in the loop. Any script/cron can POST JSON to it: {\"action\":\"spawn\",\"name\":\"...\",\"description\":\"charter\",\"dir\":\"...\",\"model\":\"opus\"} returns the new address + its message webhook; {\"action\":\"delete\",\"target\":\"0.3.1\"} removes a bubble in your subtree; {\"action\":\"list\"} lists your children. Uses your spawn authority — treat the URL as a secret. Pass rotate=true to revoke the old URL and issue a fresh one.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"rotate": map[string]any{
+					"type":        "boolean",
+					"description": "Revoke the current control URL and mint a new one (default false).",
+				}},
 			},
 		})
 		ts = append(ts, Tool{

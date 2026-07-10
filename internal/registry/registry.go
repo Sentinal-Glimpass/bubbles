@@ -35,6 +35,12 @@ type Bubble struct {
 	// URL is stable across restarts. Rotating it revokes the old URL.
 	WebhookToken string
 
+	// ControlToken is the secret in this bubble's CONTROL webhook URL
+	// (/c/<token>), which executes fleet actions (spawn/delete/list) as this
+	// bubble — minted only for spawn-granted bubbles. Kept separate from
+	// WebhookToken so a shared message-webhook never carries control authority.
+	ControlToken string
+
 	// Disabled parks a bubble: it's hidden from everyone's contacts and cannot be
 	// launched (dive/message/schedule/webhook are all no-ops) until re-enabled.
 	Disabled bool
@@ -162,6 +168,31 @@ func (r *Registry) ByWebhookToken(tok string) (*Bubble, bool) {
 	}
 	for _, b := range r.bubbles {
 		if b.WebhookToken == tok {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
+// SetControlToken sets (or rotates) a bubble's control-webhook secret.
+func (r *Registry) SetControlToken(a addr.Address, tok string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.ControlToken = tok
+		r.version++
+	}
+}
+
+// ByControlToken finds the bubble owning a control-webhook token.
+func (r *Registry) ByControlToken(tok string) (*Bubble, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if tok == "" {
+		return nil, false
+	}
+	for _, b := range r.bubbles {
+		if b.ControlToken == tok {
 			return b, true
 		}
 	}

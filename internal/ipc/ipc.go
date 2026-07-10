@@ -31,6 +31,7 @@ type Request struct {
 	Cmd       string `json:"cmd,omitempty"`       // assign_task check command
 	Checklist string `json:"checklist,omitempty"` // assign_task checklist (newline-separated)
 	Pass      bool   `json:"pass,omitempty"`      // verdict ruling
+	Rotate    bool   `json:"rotate,omitempty"`    // control_webhook: mint a fresh URL
 }
 
 // Reply is the result of handling a Request.

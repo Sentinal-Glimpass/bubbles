@@ -345,6 +345,17 @@ func (b *ipcBackend) Broadcast(by, subject, body string, urgent bool) (int, erro
 	return rep.ID, nil // ID = number of bubbles reached
 }
 
+func (b *ipcBackend) ControlWebhook(by string, rotate bool) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "control_webhook", From: by, Rotate: rotate})
+	if err != nil {
+		return "", err
+	}
+	if !rep.OK {
+		return "", errors.New(rep.Err)
+	}
+	return rep.Addr, nil // Addr carries the URL
+}
+
 func (b *ipcBackend) AssignTask(by, to, brief, checkCmd, checklist string) (string, error) {
 	rep, err := b.c.Do(ipc.Request{Op: "assign_task", From: by, To: to, Body: brief, Cmd: checkCmd, Checklist: checklist})
 	if err != nil {

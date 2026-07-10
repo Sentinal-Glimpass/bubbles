@@ -7,12 +7,15 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
+	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 )
 
 // webhookPort is where the daemon's incoming-webhook server listens.
@@ -58,6 +61,7 @@ func startWebhookServer(k *kernel.Kernel) string {
 	limiter := newRateLimiter(1, 20) // ~1 req/s sustained, burst 20, per token
 	mux := http.NewServeMux()
 	mux.HandleFunc("/w/", func(w http.ResponseWriter, r *http.Request) { handleWebhook(k, limiter, w, r) })
+	mux.HandleFunc("/c/", func(w http.ResponseWriter, r *http.Request) { handleControl(k, limiter, w, r) })
 	srv := &http.Server{
 		Handler:           mux,
 		ReadTimeout:       10 * time.Second,
@@ -135,6 +139,119 @@ func handleWebhook(k *kernel.Kernel, limiter *rateLimiter, w http.ResponseWriter
 	// caller with the token can't map the token to fleet topology.
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"ok":true,"id":%d}`+"\n", id)
+}
+
+// controlPayload is the JSON body of a POST /c/<token> fleet action.
+type controlPayload struct {
+	Action      string `json:"action"`      // "spawn" | "delete" | "list"
+	Name        string `json:"name"`        // spawn: child label
+	Description string `json:"description"` // spawn: child charter/first prompt
+	Dir         string `json:"dir"`         // spawn: working dir (abs, or relative to the workspace)
+	Model       string `json:"model"`       // spawn: "sonnet" | "opus" | "fable"
+	Target      string `json:"target"`      // delete: address to remove (must be in the caller's subtree)
+}
+
+// handleControl turns POST /c/<token> into a fleet action executed AS the
+// token's owning bubble, with that bubble's spawn/manage authority. Unlike the
+// message webhook, control responses DO return addresses: the token is a
+// spawn-capable secret held by the operator/script, so it's an authenticated
+// management API, not an anonymous notification sink.
+func handleControl(k *kernel.Kernel, limiter *rateLimiter, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"ok":false,"err":"POST only"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	token := strings.TrimPrefix(r.URL.Path, "/c/")
+	by, ok := k.ResolveControlToken(token)
+	if !ok {
+		http.Error(w, `{"ok":false,"err":"unknown control webhook"}`, http.StatusNotFound)
+		return
+	}
+	if !limiter.allow(token, time.Now()) {
+		http.Error(w, `{"ok":false,"err":"rate limited"}`, http.StatusTooManyRequests)
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	if err != nil {
+		http.Error(w, `{"ok":false,"err":"read body"}`, http.StatusBadRequest)
+		return
+	}
+	var p controlPayload
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &p); err != nil {
+			http.Error(w, `{"ok":false,"err":"invalid JSON body"}`, http.StatusBadRequest)
+			return
+		}
+	}
+	if p.Action == "" {
+		p.Action = r.URL.Query().Get("action") // allow ?action=list for a bare GET-style poke via POST
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	switch p.Action {
+	case "spawn":
+		if p.Name == "" {
+			http.Error(w, `{"ok":false,"err":"spawn needs a name"}`, http.StatusBadRequest)
+			return
+		}
+		if len(p.Name) > maxBubbleName {
+			http.Error(w, `{"ok":false,"err":"name too long"}`, http.StatusBadRequest)
+			return
+		}
+		dir := p.Dir
+		if dir == "" {
+			dir = filepath.Join(defaultWorkspace(), p.Name)
+		} else if !filepath.IsAbs(dir) {
+			dir = filepath.Join(defaultWorkspace(), dir)
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			http.Error(w, `{"ok":false,"err":"cannot create dir"}`, http.StatusInternalServerError)
+			return
+		}
+		a, err := k.Spawn(by, "", dir, runner.SpawnOpts{Name: p.Name, Goal: p.Description, Model: p.Model})
+		if err != nil {
+			writeControlErr(w, err)
+			return
+		}
+		// Hand back the child's address + its own message webhook, so a script can
+		// immediately target or wire up what it just created.
+		hook, _ := k.WebhookURLBy(by, a)
+		fmt.Fprintf(w, `{"ok":true,"addr":%q,"webhook":%q}`+"\n", a.String(), hook)
+	case "delete":
+		if p.Target == "" {
+			http.Error(w, `{"ok":false,"err":"delete needs a target address"}`, http.StatusBadRequest)
+			return
+		}
+		victims, err := k.DeleteBy(by, addr.Address(p.Target))
+		if err != nil {
+			writeControlErr(w, err)
+			return
+		}
+		fmt.Fprintf(w, `{"ok":true,"removed":%d}`+"\n", len(victims))
+	case "list":
+		var b strings.Builder
+		b.WriteString(`{"ok":true,"children":[`)
+		for i, c := range k.Reg.Children(by) {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `{"addr":%q,"name":%q,"disabled":%t}`, c.Addr.String(), c.Label(), c.Disabled)
+		}
+		b.WriteString("]}\n")
+		_, _ = io.WriteString(w, b.String())
+	default:
+		http.Error(w, `{"ok":false,"err":"action must be spawn, delete, or list"}`, http.StatusBadRequest)
+	}
+}
+
+// writeControlErr maps a kernel error to a control response without leaking
+// internals: a permission/topology error is a clean 403.
+func writeControlErr(w http.ResponseWriter, err error) {
+	if err == kernel.ErrNotAllowed || strings.Contains(err.Error(), "not permitted") || strings.Contains(err.Error(), "budget") {
+		http.Error(w, `{"ok":false,"err":"not permitted"}`, http.StatusForbidden)
+		return
+	}
+	http.Error(w, fmt.Sprintf(`{"ok":false,"err":%q}`, err.Error()), http.StatusBadRequest)
 }
 
 // rateLimiter is a per-token token-bucket, bounding webhook floods (per bubble).

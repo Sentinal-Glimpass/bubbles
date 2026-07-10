@@ -18,6 +18,7 @@ type fakeBackend struct {
 	submits   [][3]string // by, taskID, summary
 	verdicts  []verdictCall
 	decisions [][2]string // by, text
+	controls  []string    // callers who asked for a control webhook
 	intros      [][3]string // by, a, b
 	bcasts      [][3]string // by, subject, body
 	compacts    [][2]string // owner, focus
@@ -74,6 +75,14 @@ func (f *fakeBackend) Introduce(by, a, b string) error {
 func (f *fakeBackend) Broadcast(by, subject, body string, urgent bool) (int, error) {
 	f.bcasts = append(f.bcasts, [3]string{by, subject, body})
 	return 3, nil
+}
+
+func (f *fakeBackend) ControlWebhook(by string, rotate bool) (string, error) {
+	f.controls = append(f.controls, by)
+	if rotate {
+		return "http://127.0.0.1:8899/c/new-" + by, nil
+	}
+	return "http://127.0.0.1:8899/c/tok-" + by, nil
 }
 
 func (f *fakeBackend) AssignTask(by, to, brief, checkCmd, checklist string) (string, error) {
@@ -186,8 +195,8 @@ func TestSpawnGated(t *testing.T) {
 		t.Fatalf("base server should advertise 15 tools, got %d", len(base.tools()))
 	}
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 21 { // + spawn, edit, delete, introduce, broadcast, assign_task
-		t.Fatalf("spawnable server should advertise 21 tools, got %d", len(s.tools()))
+	if len(s.tools()) != 22 { // + spawn, edit, delete, introduce, broadcast, control_webhook, assign_task
+		t.Fatalf("spawnable server should advertise 22 tools, got %d", len(s.tools()))
 	}
 }
 

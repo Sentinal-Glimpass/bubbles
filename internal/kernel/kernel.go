@@ -835,6 +835,49 @@ func (k *Kernel) ResolveWebhookToken(tok string) (addr.Address, bool) {
 	return "", false
 }
 
+// ControlWebhookURL returns the CONTROL webhook URL for a spawn-granted bubble —
+// a distinct /c/<token> endpoint that runs fleet actions (spawn/delete/list) AS
+// that bubble, governed by its own spawn capability. Denied for a bubble that
+// cannot spawn, so only management-capable bubbles ever get a control surface.
+func (k *Kernel) ControlWebhookURL(by addr.Address) (string, error) {
+	if k.WebhookBase == "" {
+		return "", errors.New("kernel: webhook server not running (port busy or disabled)")
+	}
+	if !k.Caps.CanSpawn(by) {
+		return "", ErrNotAllowed
+	}
+	b, ok := k.Reg.Get(by)
+	if !ok {
+		return "", fmt.Errorf("kernel: no bubble at %s", by)
+	}
+	if b.ControlToken == "" {
+		k.Reg.SetControlToken(by, newWebhookToken())
+		b, _ = k.Reg.Get(by)
+	}
+	return k.WebhookBase + "/c/" + b.ControlToken, nil
+}
+
+// RotateControlWebhook revokes a bubble's control URL and issues a fresh one.
+func (k *Kernel) RotateControlWebhook(by addr.Address) (string, error) {
+	if !k.Caps.CanSpawn(by) {
+		return "", ErrNotAllowed
+	}
+	if _, ok := k.Reg.Get(by); !ok {
+		return "", fmt.Errorf("kernel: no bubble at %s", by)
+	}
+	k.Reg.SetControlToken(by, newWebhookToken())
+	return k.ControlWebhookURL(by)
+}
+
+// ResolveControlToken maps an incoming /c/<token> hit to the bubble that acts as
+// the caller — actions execute with this bubble's authority.
+func (k *Kernel) ResolveControlToken(tok string) (addr.Address, bool) {
+	if b, ok := k.Reg.ByControlToken(tok); ok {
+		return b.Addr, true
+	}
+	return "", false
+}
+
 // WebhookDeliver files a PROGRAMMATIC message (from a script/cron/external
 // service via the bubble's webhook URL) and wakes the target like any other
 // delivery. source labels the sender for display ("webhook (ci)"); there is no

@@ -138,3 +138,99 @@ func TestRateLimiter(t *testing.T) {
 		t.Fatal("a separate token should not share the bucket")
 	}
 }
+
+// TestControlWebhookHTTP: POST /c/<token> spawns and deletes bubbles as the
+// owning bubble, gated by its spawn authority; a non-spawn bubble gets no URL.
+func TestControlWebhookHTTP(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	probe.Close()
+	t.Setenv("BUBBLES_WEBHOOK_PORT", strconv.Itoa(port))
+	t.Setenv("BUBBLES_WEBHOOK_PUBLIC", "")
+	t.Setenv("BUBBLES_WEBHOOK_BASE", "")
+	t.Chdir(t.TempDir()) // default spawn dir is cwd; keep it out of the repo
+
+	k := kernel.New(runner.NewFake())
+	k.RelaunchProbe = 0
+	boss, _ := k.Spawn(addr.Root, "", t.TempDir(), runner.SpawnOpts{Name: "boss", GrantSpawn: true})
+	plain, _ := k.Spawn(addr.Root, "", t.TempDir(), runner.SpawnOpts{Name: "plain"})
+
+	base := startWebhookServer(k)
+	if base == "" {
+		t.Fatal("webhook server failed to start")
+	}
+	k.WebhookBase = base
+
+	// A non-spawn bubble is refused a control surface entirely.
+	if _, err := k.ControlWebhookURL(plain); err == nil {
+		t.Fatal("plain bubble should not get a control webhook")
+	}
+	ctl, err := k.ControlWebhookURL(boss)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(body string) (int, string) {
+		r, err := http.Post(ctl, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		buf := make([]byte, 4096)
+		n, _ := r.Body.Read(buf)
+		return r.StatusCode, string(buf[:n])
+	}
+	// wait for listener
+	waitUp := time.Now().Add(2 * time.Second)
+	for {
+		if r, err := http.Post(base+"/c/bogus", "application/json", strings.NewReader("{}")); err == nil {
+			r.Body.Close()
+			break
+		}
+		if time.Now().After(waitUp) {
+			t.Fatal("server did not come up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// spawn → a child appears under boss and its address is returned
+	code, body := post(`{"action":"spawn","name":"minion","description":"do the thing","model":"opus"}`)
+	if code != 200 || !strings.Contains(body, `"ok":true`) || !strings.Contains(body, `"addr":"0.1.1"`) {
+		t.Fatalf("spawn resp %d: %s", code, body)
+	}
+	if _, ok := k.Reg.Get("0.1.1"); !ok {
+		t.Fatal("spawned child not in registry")
+	}
+
+	// list → shows the child
+	code, body = post(`{"action":"list"}`)
+	if code != 200 || !strings.Contains(body, "0.1.1") || !strings.Contains(body, "minion") {
+		t.Fatalf("list resp %d: %s", code, body)
+	}
+
+	// delete → removes it
+	code, body = post(`{"action":"delete","target":"0.1.1"}`)
+	if code != 200 || !strings.Contains(body, `"removed":1`) {
+		t.Fatalf("delete resp %d: %s", code, body)
+	}
+	if _, ok := k.Reg.Get("0.1.1"); ok {
+		t.Fatal("child not removed")
+	}
+
+	// boss cannot delete something outside its subtree (plain is a sibling)
+	code, body = post(`{"action":"delete","target":"` + plain.String() + `"}`)
+	if code != http.StatusForbidden {
+		t.Fatalf("cross-subtree delete should be forbidden, got %d: %s", code, body)
+	}
+	if _, ok := k.Reg.Get(plain); !ok {
+		t.Fatal("sibling wrongly deleted")
+	}
+
+	// unknown action → 400
+	if code, _ := post(`{"action":"frobnicate"}`); code != http.StatusBadRequest {
+		t.Fatalf("unknown action got %d", code)
+	}
+}

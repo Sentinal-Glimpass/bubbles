@@ -256,3 +256,41 @@ func TestTasksFor(t *testing.T) {
 		t.Fatalf("tasks for boss: %v", ls)
 	}
 }
+
+func TestControlWebhookRequiresSpawnAndBase(t *testing.T) {
+	k := New(runner.NewFake())
+	k.RelaunchProbe = 0
+	// No webhook base configured → unavailable even for root.
+	if _, err := k.ControlWebhookURL(addr.Root); err == nil {
+		t.Fatal("expected error when webhook base is unset")
+	}
+	k.WebhookBase = "http://127.0.0.1:8899"
+
+	boss, _ := k.Spawn(addr.Root, "boss", "/tmp/boss", runner.SpawnOpts{Name: "boss", GrantSpawn: true})
+	worker, _ := k.Spawn(addr.Root, "worker", "/tmp/worker", runner.SpawnOpts{Name: "worker"}) // no spawn grant
+
+	// Spawn-capable bubble gets a stable /c/ URL; a fresh call returns the same.
+	u1, err := k.ControlWebhookURL(boss)
+	if err != nil || !strings.Contains(u1, "/c/") {
+		t.Fatalf("boss control url: %q err=%v", u1, err)
+	}
+	if u2, _ := k.ControlWebhookURL(boss); u2 != u1 {
+		t.Fatalf("control url not stable: %q vs %q", u1, u2)
+	}
+	// Resolves back to the owning bubble.
+	if got, ok := k.ResolveControlToken(strings.TrimPrefix(u1, "http://127.0.0.1:8899/c/")); !ok || got != boss {
+		t.Fatalf("resolve = %s ok=%v", got, ok)
+	}
+	// A non-spawn bubble is denied a control surface entirely.
+	if _, err := k.ControlWebhookURL(worker); err != ErrNotAllowed {
+		t.Fatalf("worker control url err = %v, want ErrNotAllowed", err)
+	}
+	// Rotation revokes the old token.
+	u3, err := k.RotateControlWebhook(boss)
+	if err != nil || u3 == u1 {
+		t.Fatalf("rotate: %q err=%v", u3, err)
+	}
+	if _, ok := k.ResolveControlToken(strings.TrimPrefix(u1, "http://127.0.0.1:8899/c/")); ok {
+		t.Fatal("old control token still resolves after rotate")
+	}
+}

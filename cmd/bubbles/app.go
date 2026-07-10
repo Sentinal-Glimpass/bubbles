@@ -475,6 +475,18 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}
 		return ipc.Reply{OK: true, Addr: url}
+	case "control_webhook":
+		var url string
+		var err error
+		if r.Rotate {
+			url, err = k.RotateControlWebhook(from)
+		} else {
+			url, err = k.ControlWebhookURL(from)
+		}
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: url}
 	case "assign_task":
 		var checklist []string
 		for _, ln := range strings.Split(r.Checklist, "\n") {
