@@ -191,6 +191,21 @@ func (s *Store) For(a addr.Address) []Task {
 	return out
 }
 
+// Active returns copies of tasks still in flight WITH a live verifier bubble
+// (state open/checking), oldest first — drives the TUI's task section, which
+// empties as verifiers are reaped on completion.
+func (s *Store) Active() []Task {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Task
+	for _, t := range s.all {
+		if t.Verifier != "" && (t.State == Open || t.State == Checking) {
+			out = append(out, *t)
+		}
+	}
+	return out
+}
+
 // PurgeParticipant cancels open tasks involving a deleted bubble so the route
 // never waits on an address that no longer exists. Returns affected task IDs.
 func (s *Store) PurgeParticipant(a addr.Address) []string {

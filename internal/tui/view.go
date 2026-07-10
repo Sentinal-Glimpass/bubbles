@@ -164,20 +164,40 @@ func usagePanel(u Model) []string {
 // overlayTopRight places panel lines flush-right over the top lines of body,
 // extending body if it has fewer lines than the panel. Widths are measured with
 // lipgloss so ANSI styling doesn't skew alignment.
+//
+// If the terminal is too narrow to seat the panel beside the body without
+// crowding the tree (every overlaid row would have < minGap columns of breathing
+// room), the panel is STACKED above the body instead — a resize no longer jams
+// the usage readout up against the bubble tree.
 func overlayTopRight(body string, panel []string, width int) string {
 	if len(panel) == 0 || width <= 0 {
 		return body
 	}
+	const minGap = 3 // columns that must separate the tree from the panel
+	panelW := 0
+	for _, p := range panel {
+		if w := lipgloss.Width(p); w > panelW {
+			panelW = w
+		}
+	}
 	lines := strings.Split(body, "\n")
+	// Widest body row that the panel would actually sit next to.
+	bodyW := 0
+	for i := 0; i < len(panel) && i < len(lines); i++ {
+		if w := lipgloss.Width(lines[i]); w > bodyW {
+			bodyW = w
+		}
+	}
+	if bodyW+minGap+panelW > width { // won't fit side by side → stack it on top
+		return strings.Join(panel, "\n") + "\n\n" + body
+	}
 	for len(lines) < len(panel) {
 		lines = append(lines, "")
 	}
 	for i, p := range panel {
-		pw := lipgloss.Width(p)
-		bw := lipgloss.Width(lines[i])
-		gap := width - pw - bw
-		if gap < 2 { // don't collide with a wide tree row
-			gap = 2
+		gap := width - panelW - lipgloss.Width(lines[i])
+		if gap < minGap {
+			gap = minGap
 		}
 		lines[i] = lines[i] + strings.Repeat(" ", gap) + p
 	}
@@ -276,6 +296,42 @@ func (m Model) View() string {
 		cursor := "  "
 		if i == m.cursor {
 			cursor = "> "
+		}
+
+		// Bottom-section divider (TASKS / DEACTIVATED): a plain bold header, not
+		// selectable as a bubble.
+		if r.sectionHead != "" {
+			b.WriteString("\n" + panelHead.Render(r.sectionHead) + "\n")
+			continue
+		}
+
+		// Task verifier row: shown only in the TASKS section, labelled by the
+		// task it guards. It disappears when the kernel reaps it on completion.
+		if r.section == "task" {
+			a := r.addr
+			status := "○"
+			if m.k.IsHot(a) {
+				status = "●"
+			}
+			name := ""
+			if bub, ok := m.k.Reg.Get(a); ok {
+				name = bub.Label()
+			}
+			line := fmt.Sprintf("%s  %s %s %s  ⟢ %s", cursor, status, a, name, r.task)
+			b.WriteString(line + "\n")
+			continue
+		}
+
+		// Deactivated row: shown only in the DEACTIVATED section, faint, with a
+		// hint that 'x' re-activates.
+		if r.section == "off" {
+			a := r.addr
+			name := ""
+			if bub, ok := m.k.Reg.Get(a); ok {
+				name = bub.Label()
+			}
+			b.WriteString(helpStyle.Render(fmt.Sprintf("%s  ⊘ %s %s  (x to re-activate)", cursor, a, name)) + "\n")
+			continue
 		}
 
 		// Group header row: an expandable node outside the main root.

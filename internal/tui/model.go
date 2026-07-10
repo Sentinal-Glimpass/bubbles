@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -144,10 +145,18 @@ type Model struct {
 // fleetRow is one line in the fleet view: a tree bubble, a group header, or a
 // member listed under an expanded group.
 type fleetRow struct {
-	addr   addr.Address // bubble address; "" only for a group header
+	addr   addr.Address // bubble address; "" only for a group/section header
 	group  string       // group name (header rows, and member rows for context)
 	header bool         // true => a group node (expandable, sibling of root)
 	depth  int          // indent
+
+	// Bottom sections. sectionHead names a section divider row (no addr);
+	// section tags a member row so the view renders it plainly (no tree toggle
+	// or child count): "task" for a live verifier bubble, "off" for a
+	// deactivated bubble.
+	sectionHead string
+	section     string
+	task        string // for section=="task" rows: the task id, for the label
 }
 
 // New builds a Model over a kernel. Root starts collapsed (minimized) and sits
@@ -191,6 +200,27 @@ func (m Model) fleetRows() []fleetRow {
 			sessions[g.Session] = true
 		}
 	}
+	// Task verifier bubbles are hidden from the tree — they belong to their own
+	// bottom section and vanish when the kernel reaps them on task completion.
+	active := m.k.Tasks.Active()
+	hidden := map[addr.Address]bool{}
+	for a := range sessions {
+		hidden[a] = true
+	}
+	for _, t := range active {
+		hidden[addr.Address(t.Verifier)] = true
+	}
+	// Deactivated bubbles are pulled out of the tree entirely into a bottom
+	// section, so root's view isn't cluttered by parked agents.
+	var offline []addr.Address
+	for _, b := range m.k.Reg.All() {
+		if b.Disabled {
+			hidden[b.Addr] = true
+			offline = append(offline, b.Addr)
+		}
+	}
+	sort.Slice(offline, func(i, j int) bool { return offline[i] < offline[j] })
+
 	var out []fleetRow
 	for _, g := range m.k.Groups.All() { // groups on top, outside the main root
 		out = append(out, fleetRow{group: g.Name, header: true})
@@ -200,11 +230,22 @@ func (m Model) fleetRows() []fleetRow {
 			}
 		}
 	}
-	for _, a := range buildRows(m.k.Reg, m.expanded) { // root subtree at the bottom
-		if sessions[a] {
-			continue
-		}
+	for _, a := range buildVisibleRows(m.k.Reg, m.expanded, hidden) { // root subtree, pruned of hidden subtrees
 		out = append(out, fleetRow{addr: a, depth: strings.Count(string(a), ".")})
+	}
+
+	// Bottom sections: live task verifiers, then deactivated agents.
+	if len(active) > 0 {
+		out = append(out, fleetRow{sectionHead: fmt.Sprintf("TASKS · %d verifying", len(active))})
+		for _, t := range active {
+			out = append(out, fleetRow{addr: addr.Address(t.Verifier), section: "task", task: t.ID, depth: 1})
+		}
+	}
+	if len(offline) > 0 {
+		out = append(out, fleetRow{sectionHead: fmt.Sprintf("DEACTIVATED · %d", len(offline))})
+		for _, a := range offline {
+			out = append(out, fleetRow{addr: a, section: "off", depth: 1})
+		}
 	}
 	return out
 }
@@ -229,6 +270,23 @@ func (m Model) curRow() fleetRow {
 
 func (m Model) curAddr() addr.Address { return m.curRow().addr }
 
+// step advances the cursor by dir (±1) with wrap, skipping non-selectable
+// section-divider rows so navigation never rests on one.
+func (m Model) step(dir int) int {
+	n := len(m.rows)
+	if n == 0 {
+		return 0
+	}
+	c := m.cursor
+	for i := 0; i < n; i++ {
+		c = (c + dir + n) % n
+		if m.rows[c].sectionHead == "" {
+			return c
+		}
+	}
+	return m.cursor // every row is a divider (impossible in practice)
+}
+
 func (m Model) Init() tea.Cmd { return blinkTick() }
 
 func blinkTick() tea.Cmd {
@@ -241,6 +299,31 @@ func buildRows(reg *registry.Registry, expanded map[addr.Address]bool) []addr.Ad
 	var out []addr.Address
 	var walk func(a addr.Address)
 	walk = func(a addr.Address) {
+		out = append(out, a)
+		if !expanded[a] {
+			return
+		}
+		ch := reg.Children(a)
+		sort.Slice(ch, func(i, j int) bool { return ch[i].Addr < ch[j].Addr })
+		for _, c := range ch {
+			walk(c.Addr)
+		}
+	}
+	walk(addr.Root)
+	return out
+}
+
+// buildVisibleRows is buildRows pruned of hidden subtrees: a hidden node (group
+// session, task verifier, or deactivated bubble) and everything under it is
+// omitted from the tree, so those bubbles show only in their own sections. Root
+// itself is never hidden.
+func buildVisibleRows(reg *registry.Registry, expanded map[addr.Address]bool, hidden map[addr.Address]bool) []addr.Address {
+	var out []addr.Address
+	var walk func(a addr.Address)
+	walk = func(a addr.Address) {
+		if hidden[a] && !a.IsRoot() {
+			return
+		}
 		out = append(out, a)
 		if !expanded[a] {
 			return
@@ -333,13 +416,9 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	case "up", "k": // cyclable: wraps to the bottom at the top
-		if n := len(m.rows); n > 0 {
-			m.cursor = (m.cursor - 1 + n) % n
-		}
+		m.cursor = m.step(-1)
 	case "down", "j": // cyclable: wraps to the top at the bottom
-		if n := len(m.rows); n > 0 {
-			m.cursor = (m.cursor + 1) % n
-		}
+		m.cursor = m.step(1)
 	case "right", "l": // expand the highlighted node (tree bubble or group)
 		r := m.curRow()
 		if r.header {

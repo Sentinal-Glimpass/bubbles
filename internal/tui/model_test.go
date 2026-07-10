@@ -621,3 +621,91 @@ func TestClaudeUsageRenders(t *testing.T) {
 		t.Fatal("should not render usage rows when not OK")
 	}
 }
+
+// TestDeactivatedSection: a parked bubble leaves the tree and appears only in
+// the bottom DEACTIVATED section.
+func TestDeactivatedSection(t *testing.T) {
+	k := newKernelWith(t, "scout", "docs")
+	k.SetEnabled(addr.Address("0.2"), false) // park "docs"
+	m := expandRoot(New(k))
+
+	var offRow, treeRow bool
+	for _, r := range m.rows {
+		if r.addr == "0.2" && r.section == "off" {
+			offRow = true
+		}
+		if r.addr == "0.2" && r.section == "" {
+			treeRow = true
+		}
+	}
+	if treeRow {
+		t.Fatal("parked bubble still shown in the tree")
+	}
+	if !offRow {
+		t.Fatal("parked bubble missing from the DEACTIVATED section")
+	}
+	// A section divider row exists and is skipped by cursor navigation.
+	var headIdx = -1
+	for i, r := range m.rows {
+		if r.sectionHead != "" {
+			headIdx = i
+		}
+	}
+	if headIdx < 0 {
+		t.Fatal("no section header row emitted")
+	}
+	m.cursor = headIdx - 1
+	if got := m.step(1); got == headIdx {
+		t.Fatalf("cursor landed on a non-selectable divider row %d", headIdx)
+	}
+}
+
+// TestTaskVerifierSection: a checklist task's verifier is hidden from the tree
+// and listed in the TASKS section; it vanishes when the task completes.
+func TestTaskVerifierSection(t *testing.T) {
+	k := kernel.New(runner.NewFake())
+	k.RelaunchProbe = 0
+	k.RunCheck = func(dir, cmd string) (bool, string) { return true, "" }
+	k.VerifierReap = func(a addr.Address) { k.DeleteBubble(a) }
+	boss, _ := k.Spawn(addr.Root, "boss", t.TempDir(), runner.SpawnOpts{Name: "boss", GrantSpawn: true})
+	k.Caps.GrantSpawnDepth(boss, 2)
+	worker, _ := k.SpawnUnder(boss, boss, "worker", t.TempDir(), runner.SpawnOpts{Name: "worker"})
+	id, err := k.AssignTask(boss, worker, "write docs", "", []string{"covers every tool"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk, _ := k.Tasks.Get(id)
+
+	m := expandRoot(New(k))
+	var inTask, inTree bool
+	for _, r := range m.rows {
+		if r.addr == addr.Address(tk.Verifier) {
+			if r.section == "task" && r.task == id {
+				inTask = true
+			}
+			if r.section == "" {
+				inTree = true
+			}
+		}
+	}
+	if inTree {
+		t.Fatal("verifier shown in the tree")
+	}
+	if !inTask {
+		t.Fatal("verifier missing from the TASKS section")
+	}
+
+	// Complete the task → verifier reaped → section empties.
+	if _, err := k.SubmitTask(worker, id, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.TaskVerdict(tk.Verifier, id, true, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	m.rows = m.fleetRows()
+	for _, r := range m.rows {
+		if r.section == "task" {
+			t.Fatal("TASKS section not emptied after completion")
+		}
+	}
+}

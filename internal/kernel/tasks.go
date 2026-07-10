@@ -89,7 +89,6 @@ func (k *Kernel) AssignTask(by, worker addr.Address, brief, checkCmd string, che
 		k.Caps.AddContact(by, vb.Addr)
 		k.Tasks.SetVerifier(t.ID, vb.Addr)
 		t.Verifier = vb.Addr
-		k.Groups.Create("task:"+t.ID, []addr.Address{worker, vb.Addr})
 	}
 
 	k.fileAndNotify(by, worker, "📋 assigned task "+t.ID, assignmentBody(t, by), 0, false)
@@ -186,7 +185,6 @@ func (k *Kernel) completeTask(t tasks.Task, notes string) {
 		t.ID, t.Worker, t.Brief, t.Summary, notes)
 	k.fileAndNotify(t.Worker, t.Assigner, "✅ task "+t.ID+" verified & complete", body, 0, false)
 	if t.Verifier != "" {
-		k.Groups.Delete("task:" + t.ID)
 		v := t.Verifier
 		reap := func() { k.DeleteBubble(v) }
 		if k.VerifierReap != nil {
@@ -213,7 +211,6 @@ func (k *Kernel) CancelTask(by addr.Address, taskID string) error {
 	k.Tasks.SetState(t.ID, tasks.Cancelled)
 	k.fileAndNotify(by, t.Worker, "task "+t.ID+" cancelled", "Task "+t.ID+" was cancelled by "+by.String()+". Stand down; no submission needed.", 0, false)
 	if t.Verifier != "" {
-		k.Groups.Delete("task:" + t.ID)
 		k.DeleteBubble(t.Verifier)
 	}
 	return nil

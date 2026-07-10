@@ -130,8 +130,8 @@ func TestChecklistRouteThroughVerifier(t *testing.T) {
 	if !ok || vb.Label() != "verify:"+id || !strings.Contains(vb.Goal, "INDEPENDENT VERIFIER") {
 		t.Fatalf("verifier bubble: %+v", vb)
 	}
-	if _, ok := k.Groups.Get("task:" + id); !ok {
-		t.Fatal("task group missing")
+	if act := k.Tasks.Active(); len(act) != 1 || act[0].ID != id {
+		t.Fatalf("active tasks = %+v", act)
 	}
 
 	// Submission goes to the VERIFIER, not the assigner.
@@ -175,8 +175,8 @@ func TestChecklistRouteThroughVerifier(t *testing.T) {
 	if _, ok := k.Reg.Get(tk.Verifier); ok {
 		t.Fatal("verifier bubble still registered")
 	}
-	if _, ok := k.Groups.Get("task:" + id); ok {
-		t.Fatal("task group not deleted")
+	if act := k.Tasks.Active(); len(act) != 0 {
+		t.Fatalf("task still active after completion: %+v", act)
 	}
 }
 
