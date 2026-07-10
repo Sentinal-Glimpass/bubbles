@@ -344,3 +344,52 @@ func (b *ipcBackend) Broadcast(by, subject, body string, urgent bool) (int, erro
 	}
 	return rep.ID, nil // ID = number of bubbles reached
 }
+
+func (b *ipcBackend) AssignTask(by, to, brief, checkCmd, checklist string) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "assign_task", From: by, To: to, Body: brief, Cmd: checkCmd, Checklist: checklist})
+	if err != nil {
+		return "", err
+	}
+	if !rep.OK {
+		return "", errors.New(rep.Err)
+	}
+	return rep.Addr, nil // Addr carries the task id
+}
+
+func (b *ipcBackend) SubmitTask(by, taskID, summary string) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "submit_task", From: by, Task: taskID, Body: summary})
+	if err != nil {
+		return "", err
+	}
+	if !rep.OK {
+		return "", errors.New(rep.Err)
+	}
+	return rep.Addr, nil // Addr carries the result text
+}
+
+func (b *ipcBackend) Verdict(by, taskID string, pass bool, notes string) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "verdict", From: by, Task: taskID, Pass: pass, Body: notes})
+	if err != nil {
+		return "", err
+	}
+	if !rep.OK {
+		return "", errors.New(rep.Err)
+	}
+	return rep.Addr, nil // Addr carries the result text
+}
+
+func (b *ipcBackend) Tasks(by string) []string {
+	rep, _ := b.c.Do(ipc.Request{Op: "tasks", From: by})
+	return rep.Messages
+}
+
+func (b *ipcBackend) LogDecision(by, text string) error {
+	rep, err := b.c.Do(ipc.Request{Op: "log_decision", From: by, Body: text})
+	if err != nil {
+		return err
+	}
+	if !rep.OK {
+		return errors.New(rep.Err)
+	}
+	return nil
+}

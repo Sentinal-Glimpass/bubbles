@@ -45,6 +45,7 @@ type LocalRunner struct {
 	AllowAll      *bool                     // shared toggle: true => --dangerously-skip-permissions
 	MemMaxMB      int                       // default per-bubble RAM ceiling (0 = uncapped); each bubble runs in its own memory-capped cgroup so a runaway dies alone
 	SessionFile   func(addr.Address) string // per-bubble file where a hook records the live session id (nil = no session-id tracking)
+	BrainDir      func(addr.Address) string // per-bubble private brain folder, told to the bubble via its system prompt (nil = none)
 
 	// StrictMCP passes --strict-mcp-config so a bubble sees ONLY our MCP server,
 	// not the operator's inherited ones (github/playwright/gmail/…) — no context
@@ -272,9 +273,16 @@ func (r *LocalRunner) Kill(a addr.Address) error {
 	return s.Close()
 }
 
-// citizen embeds the bubble's address into the citizen system prompt.
+// citizen embeds the bubble's address (and its private brain folder, when
+// configured) into the citizen system prompt.
 func (r *LocalRunner) citizen(a addr.Address) string {
-	return r.CitizenPrompt + "\nYou are bubble " + a.String() + ". Root (the human) is address 0."
+	p := r.CitizenPrompt + "\nYou are bubble " + a.String() + ". Root (the human) is address 0."
+	if r.BrainDir != nil {
+		if d := r.BrainDir(a); d != "" {
+			p += "\nYour PRIVATE brain folder is " + d + " (start with BRAIN.md there). Keep durable notes, decisions, and state in it — your working directory may be shared with other bubbles, but this folder is yours alone."
+		}
+	}
+	return p
 }
 
 func initialPrompt(o SpawnOpts) string {

@@ -13,6 +13,11 @@ type fakeBackend struct {
 	edits   [][5]string // by, addr, name, description, model
 	deletes [][2]string // by, addr
 	forgets [][2]string // by, addr
+
+	assigns   [][5]string // by, to, brief, checkCmd, checklist
+	submits   [][3]string // by, taskID, summary
+	verdicts  []verdictCall
+	decisions [][2]string // by, text
 	intros      [][3]string // by, a, b
 	bcasts      [][3]string // by, subject, body
 	compacts    [][2]string // owner, focus
@@ -71,6 +76,34 @@ func (f *fakeBackend) Broadcast(by, subject, body string, urgent bool) (int, err
 	return 3, nil
 }
 
+func (f *fakeBackend) AssignTask(by, to, brief, checkCmd, checklist string) (string, error) {
+	f.assigns = append(f.assigns, [5]string{by, to, brief, checkCmd, checklist})
+	return "t1", nil
+}
+
+func (f *fakeBackend) SubmitTask(by, taskID, summary string) (string, error) {
+	f.submits = append(f.submits, [3]string{by, taskID, summary})
+	return "task " + taskID + " check passed — completion delivered", nil
+}
+
+func (f *fakeBackend) Verdict(by, taskID string, pass bool, notes string) (string, error) {
+	f.verdicts = append(f.verdicts, verdictCall{by, taskID, pass, notes})
+	return "task " + taskID + " ruled", nil
+}
+
+func (f *fakeBackend) Tasks(by string) []string { return []string{"t1 [open] you=worker"} }
+
+func (f *fakeBackend) LogDecision(by, text string) error {
+	f.decisions = append(f.decisions, [2]string{by, text})
+	return nil
+}
+
+type verdictCall struct {
+	by, task string
+	pass     bool
+	notes    string
+}
+
 func TestServeFlow(t *testing.T) {
 	in := strings.NewReader(strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
@@ -125,7 +158,7 @@ func TestServeFlow(t *testing.T) {
 	for _, tdef := range listR.Tools {
 		names = append(names, tdef.Name)
 	}
-	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact,schedule,unschedule,schedules,webhook,webhook_rotate" {
+	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact,schedule,unschedule,schedules,webhook,webhook_rotate,submit_task,verdict,tasks,log_decision" {
 		t.Fatalf("tools = %v", names)
 	}
 
@@ -149,12 +182,12 @@ func TestServeFlow(t *testing.T) {
 
 func TestSpawnGated(t *testing.T) {
 	base := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: false}
-	if len(base.tools()) != 11 { // send..schedules + webhook + webhook_rotate
-		t.Fatalf("base server should advertise 11 tools, got %d", len(base.tools()))
+	if len(base.tools()) != 15 { // send..webhook_rotate + submit_task, verdict, tasks, log_decision
+		t.Fatalf("base server should advertise 15 tools, got %d", len(base.tools()))
 	}
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 16 { // + spawn, edit, delete, introduce, broadcast
-		t.Fatalf("spawnable server should advertise 16 tools, got %d", len(s.tools()))
+	if len(s.tools()) != 21 { // + spawn, edit, delete, introduce, broadcast, assign_task
+		t.Fatalf("spawnable server should advertise 21 tools, got %d", len(s.tools()))
 	}
 }
 
@@ -256,5 +289,49 @@ func TestIntroduceBroadcastTools(t *testing.T) {
 	}
 	if len(fb2.intros) != 0 || !strings.Contains(out2.String(), "not available") {
 		t.Fatalf("non-spawnable server must refuse introduce: %v %s", fb2.intros, out2.String())
+	}
+}
+
+func TestTaskTools(t *testing.T) {
+	in := strings.NewReader(strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"assign_task","arguments":{"to":"0.1.1","brief":"fix adder","check_cmd":"go test ./...","checklist":"a\nb"}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"submit_task","arguments":{"task_id":"t1","summary":"done"}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"verdict","arguments":{"task_id":"t1","pass":true,"notes":"all good"}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"tasks","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"log_decision","arguments":{"text":"use sqlite — simpler"}}}`,
+	}, "\n"))
+	fb := &fakeBackend{}
+	s := &Server{Self: "0.1", B: fb, Spawnable: true}
+	var out bytes.Buffer
+	if err := s.Serve(in, &out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if len(fb.assigns) != 1 || fb.assigns[0] != [5]string{"0.1", "0.1.1", "fix adder", "go test ./...", "a\nb"} {
+		t.Fatalf("assigns = %v", fb.assigns)
+	}
+	if len(fb.submits) != 1 || fb.submits[0] != [3]string{"0.1", "t1", "done"} {
+		t.Fatalf("submits = %v", fb.submits)
+	}
+	if len(fb.verdicts) != 1 || !fb.verdicts[0].pass || fb.verdicts[0].notes != "all good" {
+		t.Fatalf("verdicts = %+v", fb.verdicts)
+	}
+	if len(fb.decisions) != 1 || fb.decisions[0][1] != "use sqlite — simpler" {
+		t.Fatalf("decisions = %v", fb.decisions)
+	}
+}
+
+func TestAssignTaskRequiresSpawnable(t *testing.T) {
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"assign_task","arguments":{"to":"0.2","brief":"x"}}}`)
+	fb := &fakeBackend{}
+	s := &Server{Self: "0.1", B: fb, Spawnable: false}
+	var out bytes.Buffer
+	if err := s.Serve(in, &out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if len(fb.assigns) != 0 {
+		t.Fatalf("assign went through for non-spawnable bubble: %v", fb.assigns)
+	}
+	if !strings.Contains(out.String(), "not available") {
+		t.Fatalf("expected not-available error, got %s", out.String())
 	}
 }

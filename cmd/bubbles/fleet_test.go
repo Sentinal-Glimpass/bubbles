@@ -11,6 +11,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
+	"github.com/Sentinal-Glimpass/bubbles/internal/tasks"
 )
 
 func TestFleetSaveRestore(t *testing.T) {
@@ -144,4 +145,23 @@ func TestInboxPersistRoundTrip(t *testing.T) {
 
 func inboxMsg(from, to addr.Address, subj, body string, replyTo int) inbox.Message {
 	return inbox.Message{From: from, To: to, Subject: subj, Body: body, ReplyTo: replyTo}
+}
+
+func TestTasksPersistRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	k := kernel.New(runner.NewFake())
+	k.Tasks.Create(tasks.Task{Assigner: "0", Worker: "0.1", Brief: "fix adder", CheckCmd: "go test ./..."})
+	if err := saveTasks(dir, k); err != nil {
+		t.Fatal(err)
+	}
+	k2 := kernel.New(runner.NewFake())
+	loadTasks(dir, k2)
+	got, ok := k2.Tasks.Get("t1")
+	if !ok || got.Brief != "fix adder" || got.State != tasks.Open {
+		t.Fatalf("restored task = %+v ok=%v", got, ok)
+	}
+	// The ID sequence continues after restore.
+	if n := k2.Tasks.Create(tasks.Task{Worker: "0.2"}); n.ID != "t2" {
+		t.Fatalf("sequence after restore: %s", n.ID)
+	}
 }

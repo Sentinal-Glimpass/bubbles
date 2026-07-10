@@ -95,6 +95,12 @@ func runApp() {
 	lr.AllowAll = &allowAll
 	lr.MemMaxMB = 0 // no per-session hard cap (it was killing legit busy sessions); each runs in its own cgroup scope for measurement, bounded only by the global budget below
 	k := kernel.New(lr)
+	// Harness wiring: every spawn gets a private brain folder (keyed by address —
+	// shared workspaces still mean separate brains), and durable fleet decisions
+	// go through the kernel-serialized ledger, not concurrent file writes.
+	k.BrainBase = filepath.Join(baseDir, ".bubbles", "brains")
+	k.DecisionsPath = filepath.Join(baseDir, ".bubbles", "memory", "decisions.md")
+	lr.BrainDir = func(a addr.Address) string { return filepath.Join(k.BrainBase, a.String()) }
 	k.MemBudget = 45 << 30       // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
 	k.IdleTimeout = 30 * time.Minute  // page out sessions silent (no output) this long; they resume on next use
 	k.TypingWindow = 10 * time.Second // hold a focused bubble's messages while you're typing; deliver once you pause this long
@@ -159,6 +165,17 @@ func runApp() {
 			k.FireDue()
 		}
 	}()
+	go func() { // persist the task ledger shortly after it changes, so enforced routes survive a restart
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		var lastVer int64 = -1
+		for range t.C {
+			if v := k.Tasks.Version(); v != lastVer {
+				lastVer = v
+				_ = saveTasks(baseDir, k)
+			}
+		}
+	}()
 	go func() { // persist schedules shortly after they change, so wakes survive a restart
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
@@ -212,6 +229,7 @@ func runApp() {
 	marks := restoreFleet(baseDir, k) // rehydrate a saved fleet (empty if none)
 	inboxExisted, inboxOK := loadInbox(baseDir, k)
 	loadSchedules(baseDir, k)
+	loadTasks(baseDir, k)
 	// After a restart, wake and re-notify every bubble that still has unread mail,
 	// so a message that arrived before the stop lands in its terminal too. Delayed
 	// a few seconds so the fleet and webhook/tunnel setup settle first.
@@ -455,6 +473,37 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}
 		return ipc.Reply{OK: true, Addr: url}
+	case "assign_task":
+		var checklist []string
+		for _, ln := range strings.Split(r.Checklist, "\n") {
+			if ln = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ln), "-")); ln != "" {
+				checklist = append(checklist, ln)
+			}
+		}
+		id, err := k.AssignTask(from, addr.Address(r.To), r.Body, r.Cmd, checklist)
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: id}
+	case "submit_task":
+		out, err := k.SubmitTask(from, r.Task, r.Body)
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: out}
+	case "verdict":
+		out, err := k.TaskVerdict(from, r.Task, r.Pass, r.Body)
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: out}
+	case "tasks":
+		return ipc.Reply{OK: true, Messages: k.TasksFor(from)}
+	case "log_decision":
+		if err := k.LogDecision(from, r.Body); err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true}
 	default:
 		return ipc.Reply{OK: false, Err: "unknown op: " + r.Op}
 	}

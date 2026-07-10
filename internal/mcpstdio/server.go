@@ -232,6 +232,38 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolErr(msg.ID, err.Error())
 		}
 		return toolOK(msg.ID, fmt.Sprintf("broadcast to %d bubble(s) in your subtree", n))
+	case "assign_task":
+		if !s.Spawnable {
+			return errResp(msg.ID, -32601, "tool not available: assign_task")
+		}
+		id, err := s.B.AssignTask(s.Self, arg("to"), arg("brief"), arg("check_cmd"), arg("checklist"))
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "assigned "+id+" to "+arg("to")+" — you'll receive a '✅ task "+id+" verified' notice only after its contract passes; check tasks() for authoritative state")
+	case "submit_task":
+		out, err := s.B.SubmitTask(s.Self, arg("task_id"), arg("summary"))
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, out)
+	case "verdict":
+		out, err := s.B.Verdict(s.Self, arg("task_id"), argBool("pass"), arg("notes"))
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, out)
+	case "tasks":
+		ts := s.B.Tasks(s.Self)
+		if len(ts) == 0 {
+			return toolOK(msg.ID, "(no tasks)")
+		}
+		return toolOK(msg.ID, strings.Join(ts, "\n"))
+	case "log_decision":
+		if err := s.B.LogDecision(s.Self, arg("text")); err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "logged to the decisions ledger")
 	default:
 		return errResp(msg.ID, -32602, "unknown tool: "+p.Name)
 	}

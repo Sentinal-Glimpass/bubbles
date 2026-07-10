@@ -13,6 +13,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
+	"github.com/Sentinal-Glimpass/bubbles/internal/tasks"
 )
 
 // bubbleRec is a persisted bubble (one entry in the fleet manifest).
@@ -58,6 +59,43 @@ func inboxPath(baseDir string) string {
 type inboxManifest struct {
 	Seq      int             `json:"seq"`
 	Messages []inbox.Message `json:"messages"`
+}
+
+// tasksManifest is the on-disk task ledger: every task plus the ID sequence, so
+// open tasks (and their enforced routes) survive a restart.
+type tasksManifest struct {
+	Seq   int          `json:"seq"`
+	Tasks []tasks.Task `json:"tasks"`
+}
+
+func tasksPath(baseDir string) string {
+	return filepath.Join(baseDir, ".bubbles", "tasks.json")
+}
+
+// saveTasks persists the task ledger so enforced routes survive a restart.
+func saveTasks(baseDir string, k *kernel.Kernel) error {
+	ts, seq := k.Tasks.Snapshot()
+	data, err := json.MarshalIndent(tasksManifest{Seq: seq, Tasks: ts}, "", "  ")
+	if err != nil {
+		return err
+	}
+	p := tasksPath(baseDir)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0o644)
+}
+
+// loadTasks restores the task ledger on startup (no-op if none saved).
+func loadTasks(baseDir string, k *kernel.Kernel) {
+	data, err := os.ReadFile(tasksPath(baseDir))
+	if err != nil {
+		return
+	}
+	var m tasksManifest
+	if json.Unmarshal(data, &m) == nil {
+		k.Tasks.Load(m.Tasks, m.Seq)
+	}
 }
 
 func schedPath(baseDir string) string {

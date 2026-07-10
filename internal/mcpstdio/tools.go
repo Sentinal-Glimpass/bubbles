@@ -22,6 +22,14 @@ type Backend interface {
 	Forget(by, addr string) error        // drop a contact from the caller's own list
 	Introduce(by, a, b string) error     // make two of the caller's sub-bubbles mutual contacts
 	Broadcast(by, subject, body string, urgent bool) (int, error) // message the caller's whole subtree
+
+	// Harnessed tasks: assigned work travels worker → checks → (verifier) →
+	// assigner, a route the kernel enforces.
+	AssignTask(by, to, brief, checkCmd, checklist string) (string, error) // checklist: newline-separated items
+	SubmitTask(by, taskID, summary string) (string, error)
+	Verdict(by, taskID string, pass bool, notes string) (string, error)
+	Tasks(by string) []string
+	LogDecision(by, text string) error // serialized append to the shared decisions ledger
 }
 
 // Tool is an MCP tool definition advertised by tools/list.
@@ -150,6 +158,48 @@ func (s *Server) tools() []Tool {
 				}},
 			},
 		},
+		{
+			Name:        "submit_task",
+			Description: "Submit your completion of an assigned task. The kernel runs the task's check command in your dir FIRST — failures come straight back to you with output and nothing reaches the assigner. If the task has a checklist, your submission goes to its independent verifier; only an approved submission is delivered to the assigner as verified. This is the ONLY way to complete a task — a plain send() claiming completion is marked unverified.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"task_id": map[string]any{"type": "string", "description": "The task id from your assignment message, e.g. \"t3\"."},
+					"summary": map[string]any{"type": "string", "description": "What you did — included in the verified completion the assigner receives."},
+				},
+				"required": []string{"task_id", "summary"},
+			},
+		},
+		{
+			Name:        "verdict",
+			Description: "Rule on a task submission (task verifiers; assigners may override). pass=true delivers the verified completion to the assigner and closes the task; pass=false sends your notes to the worker as fix-it feedback and reopens the task.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"task_id": map[string]any{"type": "string", "description": "The task id, e.g. \"t3\"."},
+					"pass":    map[string]any{"type": "boolean", "description": "true = approve, false = reject."},
+					"notes":   map[string]any{"type": "string", "description": "Per-item findings; on reject, the SPECIFIC fixes the worker should make."},
+				},
+				"required": []string{"task_id", "pass", "notes"},
+			},
+		},
+		{
+			Name:        "tasks",
+			Description: "List the tasks you participate in (as assigner, worker, or verifier) with their authoritative state — trust this over any completion claim in a message.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "log_decision",
+			Description: "Append one durable decision to the fleet's shared ledger (.bubbles/memory/decisions.md): what was decided and why. The kernel serializes writes — use this instead of editing the file.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"text": map[string]any{
+					"type":        "string",
+					"description": "One decision: \"<decision> — <why>\".",
+				}},
+				"required": []string{"text"},
+			},
+		},
 	}
 	if s.Spawnable {
 		spawnProps := strProp("dir")
@@ -221,6 +271,20 @@ func (s *Server) tools() []Tool {
 				"type":       "object",
 				"properties": bcProps,
 				"required":   []string{"subject"},
+			},
+		})
+		ts = append(ts, Tool{
+			Name:        "assign_task",
+			Description: "Assign a task with a kernel-enforced acceptance contract to a bubble in YOUR subtree. Give a check_cmd (shell command that must exit 0 in the worker's dir — tests, lint, build), a checklist (newline-separated items judged by an independent verifier bubble the kernel spawns), or both. The worker completes via submit_task; you receive a '✅ task verified' notice ONLY after the contract passes — the worker cannot deliver an unverified 'done'.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"to":        map[string]any{"type": "string", "description": "Worker bubble's address (must be in your subtree)."},
+					"brief":     map[string]any{"type": "string", "description": "The task: what to do and what done means."},
+					"check_cmd": map[string]any{"type": "string", "description": "Optional shell command that must exit 0 in the worker's dir, e.g. \"go test ./...\"."},
+					"checklist": map[string]any{"type": "string", "description": "Optional acceptance checklist, one item per line — an independent verifier bubble judges these."},
+				},
+				"required": []string{"to", "brief"},
 			},
 		})
 	}

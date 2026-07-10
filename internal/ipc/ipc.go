@@ -26,6 +26,11 @@ type Request struct {
 	Model   string `json:"model,omitempty"`
 	Every   string `json:"every,omitempty"` // schedule interval ("15m")
 	Daily   string `json:"daily,omitempty"` // schedule daily time ("08:00")
+
+	Task      string `json:"task,omitempty"`      // task id (submit_task / verdict)
+	Cmd       string `json:"cmd,omitempty"`       // assign_task check command
+	Checklist string `json:"checklist,omitempty"` // assign_task checklist (newline-separated)
+	Pass      bool   `json:"pass,omitempty"`      // verdict ruling
 }
 
 // Reply is the result of handling a Request.

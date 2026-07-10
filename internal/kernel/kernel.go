@@ -20,6 +20,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
+	"github.com/Sentinal-Glimpass/bubbles/internal/tasks"
 )
 
 // ErrNotContact is returned by Send when from may not message to.
@@ -39,6 +40,25 @@ type Kernel struct {
 	Store  *inbox.Store
 	Groups *groups.Store
 	Sched  *sched.Store
+	Tasks  *tasks.Store
+
+	// RunCheck runs a task contract's deterministic check command in a dir and
+	// returns pass + (LLM-optimized) output. nil = real `sh -c` with a timeout;
+	// tests inject a fake.
+	RunCheck func(dir, cmd string) (pass bool, output string)
+
+	// VerifierReap, when set (tests), replaces the delayed post-verdict deletion
+	// of a task's verifier bubble with an inline call.
+	VerifierReap func(addr.Address)
+
+	// BrainBase is where per-bubble private brain folders live (keyed by
+	// address). "" = brain seeding off.
+	BrainBase string
+
+	// DecisionsPath is the fleet's shared decisions ledger, appended through
+	// LogDecision only (kernel-serialized). "" = ledger off.
+	DecisionsPath string
+	decisionsMu   sync.Mutex
 
 	// RelaunchProbe is how long EnsureAlive waits to see if a *resumed* session
 	// survives before falling back to a fresh one (a doomed --resume exits fast).
@@ -214,6 +234,7 @@ func New(r runner.Runner) *Kernel {
 		Store:         inbox.New(),
 		Groups:        groups.New(),
 		Sched:         sched.New(),
+		Tasks:         tasks.New(),
 		RelaunchProbe: 800 * time.Millisecond,
 		runner:        r,
 		sessions:      map[addr.Address]runner.Session{},
@@ -427,6 +448,13 @@ func (k *Kernel) Send(from, to addr.Address, subject, body string, replyTo int, 
 		if b, ok := k.Reg.Get(to); ok && b.Disabled {
 			return 0, ErrDisabled
 		}
+	}
+	// Enforced route, cheap half: a worker with an open task cannot pass an
+	// unverified "done" off to its assigner — the subject is annotated so only
+	// the kernel's own "✅ task verified" notice reads as completion. (One map
+	// scan; send stays fast and is never blocked.)
+	if tid := k.Tasks.OpenBetween(from, to); tid != "" {
+		subject = "[task " + tid + " open — unverified] " + subject
 	}
 	return k.fileAndNotify(from, to, subject, body, replyTo, urgent), nil
 }
@@ -973,6 +1001,7 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 	} else if d := k.Caps.SpawnDepth(by); d > 1 {
 		k.Caps.GrantSpawnDepth(b.Addr, d-1)
 	}
+	k.SeedBrain(b.Addr) // guaranteed private brain skeleton, keyed by address (workspaces may be shared)
 	return b.Addr, nil
 }
 
@@ -1079,6 +1108,7 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 		k.Groups.PurgeMember(v)
 		k.Caps.Purge(v)        // drop it from EVERY bubble's contacts, so no ghost lingers
 		k.Sched.PurgeBubble(v) // drop any wake schedules for/by it
+		k.Tasks.PurgeParticipant(v) // cancel its open tasks / degrade tasks it verified
 	}
 	return victims
 }
@@ -1184,8 +1214,22 @@ func (k *Kernel) StartRoot(dir string) error {
 func formatNotify(from addr.Address, name, subject string, unread int) string {
 	f := from.String()
 	if name != "" {
-		f += " (" + name + ")"
+		f += " (" + sanitizePTY(name) + ")"
 	}
 	// single line (no newlines) so it isn't treated as a multi-line paste
-	return fmt.Sprintf("📬 New message from %s: %q — you have %d unread. Call the inbox() tool to read.", f, subject, unread)
+	return fmt.Sprintf("📬 New message from %s: %q — you have %d unread. Call the inbox() tool to read.", f, sanitizePTY(subject), unread)
+}
+
+// sanitizePTY strips control characters from text that gets TYPED into another
+// bubble's terminal (names, subjects). Without this, a crafted subject could
+// inject escape sequences or extra keystrokes into the recipient's session —
+// one agent puppeting another. Bodies are safe (read via the inbox() tool, not
+// typed), so only the typed fields are scrubbed.
+func sanitizePTY(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f { // C0 controls (incl. ESC, CR, LF, TAB) + DEL
+			return ' '
+		}
+		return r
+	}, s)
 }
