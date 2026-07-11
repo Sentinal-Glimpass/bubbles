@@ -509,8 +509,9 @@ func TestEditBubbleSettings(t *testing.T) {
 		tm.Send(tea.KeyMsg{Type: tea.KeyBackspace})
 	}
 	tm.Type("boss")
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> model field
-	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // sonnet (default) -> opus
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> model field (default opus)
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // opus -> fable
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // fable -> opus
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> grant field
 	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // grant ON
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save

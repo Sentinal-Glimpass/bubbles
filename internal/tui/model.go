@@ -531,7 +531,7 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.editing, m.editAddr, m.editField = true, a, 0
 				m.editPersona, m.editModel, m.editGrant = b.Label(), b.Model, m.k.Caps.CanSpawn(a)
 				if m.editModel == "" {
-					m.editModel = "sonnet" // picker default when no model is set
+					m.editModel = spawnModels[0] // picker default when no model is set
 				}
 			}
 		}
