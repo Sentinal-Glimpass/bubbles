@@ -504,6 +504,11 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 		return ipc.Reply{OK: true, Addr: out}
 	case "tasks":
 		return ipc.Reply{OK: true, Messages: k.TasksFor(from)}
+	case "cancel_task":
+		if err := k.CancelTask(from, r.Task); err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true}
 	case "log_decision":
 		if err := k.LogDecision(from, r.Body); err != nil {
 			return ipc.Reply{OK: false, Err: err.Error()}

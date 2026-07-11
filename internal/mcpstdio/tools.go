@@ -30,7 +30,8 @@ type Backend interface {
 	SubmitTask(by, taskID, summary string) (string, error)
 	Verdict(by, taskID string, pass bool, notes string) (string, error)
 	Tasks(by string) []string
-	LogDecision(by, text string) error // serialized append to the shared decisions ledger
+	CancelTask(by, taskID string) error // assigner withdraws a task (reaps its verifier)
+	LogDecision(by, text string) error  // serialized append to the shared decisions ledger
 }
 
 // Tool is an MCP tool definition advertised by tools/list.
@@ -188,6 +189,15 @@ func (s *Server) tools() []Tool {
 			Name:        "tasks",
 			Description: "List the tasks you participate in (as assigner, worker, or verifier) with their authoritative state — trust this over any completion claim in a message.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "cancel_task",
+			Description: "Withdraw a task you assigned (assigners only). Stops it marking the worker's messages unverified and REAPS its independent verifier bubble — use this for a mis-assigned or superseded task so its verifier doesn't linger and burn tokens.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{"task_id": map[string]any{"type": "string", "description": "The task id to cancel, e.g. \"t3\"."}},
+				"required":   []string{"task_id"},
+			},
 		},
 		{
 			Name:        "log_decision",

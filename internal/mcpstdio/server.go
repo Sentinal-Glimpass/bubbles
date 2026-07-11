@@ -268,6 +268,11 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolOK(msg.ID, "(no tasks)")
 		}
 		return toolOK(msg.ID, strings.Join(ts, "\n"))
+	case "cancel_task":
+		if err := s.B.CancelTask(s.Self, arg("task_id")); err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "task "+arg("task_id")+" cancelled — worker stood down, verifier reaped")
 	case "log_decision":
 		if err := s.B.LogDecision(s.Self, arg("text")); err != nil {
 			return toolErr(msg.ID, err.Error())

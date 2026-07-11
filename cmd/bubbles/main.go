@@ -394,6 +394,17 @@ func (b *ipcBackend) Tasks(by string) []string {
 	return rep.Messages
 }
 
+func (b *ipcBackend) CancelTask(by, taskID string) error {
+	rep, err := b.c.Do(ipc.Request{Op: "cancel_task", From: by, Task: taskID})
+	if err != nil {
+		return err
+	}
+	if !rep.OK {
+		return errors.New(rep.Err)
+	}
+	return nil
+}
+
 func (b *ipcBackend) LogDecision(by, text string) error {
 	rep, err := b.c.Do(ipc.Request{Op: "log_decision", From: by, Body: text})
 	if err != nil {
