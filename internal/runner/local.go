@@ -160,13 +160,6 @@ func NewLocal() *LocalRunner {
 	}
 }
 
-// knownModelAlias is the set of Claude Code --model aliases a bubble may pick.
-// A requested alias is passed through as-is so cheap tiers (sonnet/haiku) are
-// honored instead of collapsing to opus; anything else uses DefaultModel.
-var knownModelAlias = map[string]bool{
-	"haiku": true, "sonnet": true, "opus": true, "fable": true,
-}
-
 // Launch starts claude in a PTY in dir, seeded with the persona/goal.
 func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session, error) {
 	var args []string
@@ -198,21 +191,19 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 		args = append(args, "--disallowed-tools")
 		args = append(args, r.DisallowedTools...)
 	}
-	// Every launch gets an explicit --model.
-	//   Bedrock ON  -> ANTHROPIC_MODEL from env (a Bedrock inference-profile id).
-	//   Bedrock OFF -> the per-bubble alias, passed through so cheap tiers are
-	//                  honored (a "sonnet"/"haiku" bubble no longer burns opus).
-	//                  Unknown/unset falls back to DefaultModel.
-	var model string
-	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
-		model = os.Getenv("ANTHROPIC_MODEL")
-	} else if knownModelAlias[opts.Model] {
-		model = opts.Model
+	// FLEET POLICY: every bubble runs the env-configured model UNIFORMLY.
+	//   ANTHROPIC_MODEL set (Bedrock on OR off) -> let it drive; do NOT pass
+	//     --model, which would override it. This is how the whole fleet gets the
+	//     1M-context model (us.anthropic.claude-opus-4-6-v1[1m]) — a bare --model
+	//     alias like "opus" does NOT carry the [1m] context.
+	//   ANTHROPIC_MODEL unset -> fall back to a --model alias (fable stays fable;
+	//     everything else -> opus). Cheap tiers (sonnet/haiku) are never used.
+	if os.Getenv("ANTHROPIC_MODEL") != "" {
+		// no --model: the env value (the 1M model) applies to every bubble
+	} else if opts.Model == "fable" {
+		args = append(args, "--model", "fable")
 	} else {
-		model = DefaultModel
-	}
-	if model != "" {
-		args = append(args, "--model", model)
+		args = append(args, "--model", "opus")
 	}
 	if r.AllowAll != nil && *r.AllowAll {
 		args = append(args, "--dangerously-skip-permissions")

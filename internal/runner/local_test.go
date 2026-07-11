@@ -233,10 +233,11 @@ func aliveCmd(t *testing.T) *exec.Cmd {
 	return c
 }
 
-// TestModelResolution: every launch gets an explicit --model.
-//   Bedrock OFF -> the requested alias is honored (cheap tiers included);
-//                  unknown/unset falls back to DefaultModel ("sonnet").
-//   Bedrock ON  -> ANTHROPIC_MODEL from env.
+// TestModelResolution: the fleet runs the env-configured model UNIFORMLY.
+//   ANTHROPIC_MODEL set   -> it drives every bubble; NO --model is passed (so
+//                            the 1M-context model actually applies).
+//   ANTHROPIC_MODEL unset -> fall back to a --model alias: fable stays fable,
+//                            everything else -> opus. Cheap tiers never used.
 func TestModelResolution(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "stub.sh")
@@ -255,29 +256,29 @@ func TestModelResolution(t *testing.T) {
 		return attachUntil(s.(PTYSession), "ARGS:")
 	}
 
-	// Bedrock OFF: each requested alias is honored; unset/unknown -> DefaultModel.
+	// ANTHROPIC_MODEL set (the 1M model): NO --model for ANY bubble, so the env
+	// value applies to all of them (a bare --model alias would override it).
 	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "0")
-	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]") // lingering shell export, must be ignored
-	for i, tc := range []struct{ in, want string }{
-		{"", DefaultModel},
-		{"haiku", "haiku"},
-		{"sonnet", "sonnet"},
-		{"opus", "opus"},
-		{"fable", "fable"},
-		{"bogus", DefaultModel},
-	} {
-		out := launch(fmt.Sprintf("0.%d", i+1), SpawnOpts{Persona: "x", Model: tc.in})
-		if !strings.Contains(out, "--model "+tc.want) {
-			t.Fatalf("bedrock off, model=%q: want --model %s, got:\n%s", tc.in, tc.want, out)
+	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]")
+	for i, m := range []string{"", "sonnet", "opus", "fable"} {
+		out := launch(fmt.Sprintf("0.%d", i+1), SpawnOpts{Persona: "x", Model: m})
+		if strings.Contains(out, "--model") {
+			t.Fatalf("ANTHROPIC_MODEL set, model=%q: expected NO --model (env drives), got:\n%s", m, out)
 		}
 	}
 
-	// Bedrock ON: --model is ANTHROPIC_MODEL, regardless of per-bubble model
-	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
-	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]")
-	out := launch("0.9", SpawnOpts{Persona: "z", Model: "sonnet"})
-	if !strings.Contains(out, "--model us.anthropic.claude-opus-4-6-v1[1m]") {
-		t.Fatalf("bedrock on: want --model = ANTHROPIC_MODEL, got:\n%s", out)
+	// ANTHROPIC_MODEL unset: fall back to fable/opus aliases.
+	t.Setenv("ANTHROPIC_MODEL", "")
+	for i, tc := range []struct{ in, want string }{
+		{"", "opus"},
+		{"sonnet", "opus"},
+		{"opus", "opus"},
+		{"fable", "fable"},
+	} {
+		out := launch(fmt.Sprintf("0.1%d", i+1), SpawnOpts{Persona: "y", Model: tc.in})
+		if !strings.Contains(out, "--model "+tc.want) {
+			t.Fatalf("ANTHROPIC_MODEL unset, model=%q: want --model %s, got:\n%s", tc.in, tc.want, out)
+		}
 	}
 }
 
