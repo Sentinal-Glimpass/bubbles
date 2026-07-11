@@ -234,7 +234,8 @@ func aliveCmd(t *testing.T) *exec.Cmd {
 }
 
 // TestModelResolution: every launch gets an explicit --model.
-//   Bedrock OFF -> "fable" stays "fable"; everything else collapses to "opus".
+//   Bedrock OFF -> the requested alias is honored (cheap tiers included);
+//                  unknown/unset falls back to DefaultModel ("sonnet").
 //   Bedrock ON  -> ANTHROPIC_MODEL from env.
 func TestModelResolution(t *testing.T) {
 	dir := t.TempDir()
@@ -254,14 +255,16 @@ func TestModelResolution(t *testing.T) {
 		return attachUntil(s.(PTYSession), "ARGS:")
 	}
 
-	// Bedrock OFF: unset/sonnet/opus -> opus; fable -> fable
+	// Bedrock OFF: each requested alias is honored; unset/unknown -> DefaultModel.
 	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "0")
 	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]") // lingering shell export, must be ignored
 	for i, tc := range []struct{ in, want string }{
-		{"", "opus"},
-		{"sonnet", "opus"},
+		{"", DefaultModel},
+		{"haiku", "haiku"},
+		{"sonnet", "sonnet"},
 		{"opus", "opus"},
 		{"fable", "fable"},
+		{"bogus", DefaultModel},
 	} {
 		out := launch(fmt.Sprintf("0.%d", i+1), SpawnOpts{Persona: "x", Model: tc.in})
 		if !strings.Contains(out, "--model "+tc.want) {

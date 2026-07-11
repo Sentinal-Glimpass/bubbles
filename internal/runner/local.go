@@ -160,6 +160,13 @@ func NewLocal() *LocalRunner {
 	}
 }
 
+// knownModelAlias is the set of Claude Code --model aliases a bubble may pick.
+// A requested alias is passed through as-is so cheap tiers (sonnet/haiku) are
+// honored instead of collapsing to opus; anything else uses DefaultModel.
+var knownModelAlias = map[string]bool{
+	"haiku": true, "sonnet": true, "opus": true, "fable": true,
+}
+
 // Launch starts claude in a PTY in dir, seeded with the persona/goal.
 func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session, error) {
 	var args []string
@@ -193,16 +200,16 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	}
 	// Every launch gets an explicit --model.
 	//   Bedrock ON  -> ANTHROPIC_MODEL from env (a Bedrock inference-profile id).
-	//   Bedrock OFF -> the per-bubble model, collapsed to two subscription aliases:
-	//                  "fable" stays "fable"; everything else (unset/sonnet/opus)
-	//                  becomes "opus".
+	//   Bedrock OFF -> the per-bubble alias, passed through so cheap tiers are
+	//                  honored (a "sonnet"/"haiku" bubble no longer burns opus).
+	//                  Unknown/unset falls back to DefaultModel.
 	var model string
 	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
 		model = os.Getenv("ANTHROPIC_MODEL")
-	} else if opts.Model == "fable" {
-		model = "fable"
+	} else if knownModelAlias[opts.Model] {
+		model = opts.Model
 	} else {
-		model = "opus"
+		model = DefaultModel
 	}
 	if model != "" {
 		args = append(args, "--model", model)

@@ -884,7 +884,7 @@ func (m Model) clearSpawn() Model {
 
 // spawnModels is the model picker's cycle order (aliases track the latest of
 // each family).
-var spawnModels = []string{"sonnet", "opus", "fable"}
+var spawnModels = []string{"haiku", "sonnet", "opus", "fable"}
 
 func cycleModel(cur string, delta int) string {
 	i := 0
