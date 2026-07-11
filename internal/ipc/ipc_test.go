@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -42,5 +43,44 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if rep, _ := c.Do(Request{Op: "bogus"}); rep.OK {
 		t.Fatalf("bogus op should not be OK")
+	}
+}
+
+// TestReconnectAfterServerRestart models a daemon restart: the server that the
+// client dialed goes away and a NEW server binds the SAME (stable) socket path.
+// The client's persistent connection is dead, but Do must reconnect and succeed
+// instead of failing every call — the fix for post-restart send-failures.
+func TestReconnectAfterServerRestart(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "b.sock")
+	handler := func(r Request) Reply { return Reply{OK: true, Addr: r.Op} }
+
+	ln1, err := Serve(sock, handler)
+	if err != nil {
+		t.Fatalf("Serve1: %v", err)
+	}
+	c, err := Dial(sock)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	if rep, err := c.Do(Request{Op: "send"}); err != nil || !rep.OK {
+		t.Fatalf("pre-restart send: %+v err=%v", rep, err)
+	}
+
+	// "Restart": kill the first server, remove the socket, bind a new one on the
+	// same path (what the daemon now does with a stable path).
+	ln1.Close()
+	_ = os.Remove(sock)
+	ln2, err := Serve(sock, handler)
+	if err != nil {
+		t.Fatalf("Serve2 (restart): %v", err)
+	}
+	defer ln2.Close()
+
+	// The client still points at the dead connection; Do must transparently
+	// reconnect and succeed.
+	rep, err := c.Do(Request{Op: "spawn"})
+	if err != nil || !rep.OK || rep.Addr != "spawn" {
+		t.Fatalf("post-restart call did not heal: %+v err=%v", rep, err)
 	}
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -70,7 +72,11 @@ func markAction(marks map[int]addr.Address, slot int, current addr.Address) addr
 
 func runApp() {
 	baseDir := defaultWorkspace() // dir where `bubbles` was launched
-	sock := filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-%d.sock", os.Getpid()))
+	// STABLE per-workspace IPC socket (was bubbles-<pid>.sock). A pid-based path
+	// changed on every daemon restart, orphaning every live session's MCP bridge
+	// on the dead socket → loud send-failures until relaunch. A stable path lets a
+	// session's bridge reconnect (ipc.Client.Do) to the restarted daemon.
+	sock := ipcSockPath(baseDir)
 	self, _ := os.Executable()
 
 	// Token-compression proxy (opt-in, off by default). Started here so it warms
@@ -183,6 +189,7 @@ func runApp() {
 	go runClaudeUsage(&curProg)   // account /usage in the dashboard, polled directly (no claude session)
 	go runHeadroomStats(&curProg) // token-compression savings in the dashboard (no-op unless --headroom)
 
+	_ = os.Remove(sock) // clear a stale socket a crashed daemon left, so the stable path can bind
 	ln, err := ipc.Serve(sock, func(r ipc.Request) ipc.Reply { return handleIPC(k, r) })
 	if err != nil {
 		fatal(err)
@@ -889,6 +896,19 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (nex
 
 // defaultWorkspace is the directory where `bubbles` was launched; bubble folders
 // are created downstream of it.
+// ipcSockPath is the STABLE per-workspace IPC socket path — derived from the
+// workspace dir, not the daemon PID, so it's identical across restarts. A live
+// session's MCP bridge (which has this path in BUBBLE_SOCK) can therefore
+// reconnect to a restarted daemon instead of being stranded on a dead pid path.
+func ipcSockPath(baseDir string) string {
+	abs, err := filepath.Abs(baseDir)
+	if err != nil {
+		abs = baseDir
+	}
+	sum := sha256.Sum256([]byte(abs))
+	return filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-%s.sock", hex.EncodeToString(sum[:8])))
+}
+
 func defaultWorkspace() string {
 	cwd, err := os.Getwd()
 	if err != nil {

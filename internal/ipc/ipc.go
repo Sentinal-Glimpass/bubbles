@@ -92,6 +92,7 @@ func (l *Listener) Close() error { return l.ln.Close() }
 // Client dials a served socket and issues Requests.
 type Client struct {
 	mu   sync.Mutex
+	sock string // kept so Do can reconnect after a daemon restart
 	conn net.Conn
 	dec  *json.Decoder
 	enc  *json.Encoder
@@ -99,17 +100,48 @@ type Client struct {
 
 // Dial connects to a served socket.
 func Dial(sock string) (*Client, error) {
-	conn, err := net.Dial("unix", sock)
-	if err != nil {
+	c := &Client{sock: sock}
+	if err := c.redial(); err != nil {
 		return nil, err
 	}
-	return &Client{conn: conn, dec: json.NewDecoder(conn), enc: json.NewEncoder(conn)}, nil
+	return c, nil
+}
+
+// redial (re)establishes the connection to the socket. Callers hold c.mu (Do)
+// or are single-threaded (Dial).
+func (c *Client) redial() error {
+	conn, err := net.Dial("unix", c.sock)
+	if err != nil {
+		return err
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.conn = conn
+	c.dec = json.NewDecoder(conn)
+	c.enc = json.NewEncoder(conn)
+	return nil
 }
 
 // Do sends a Request and returns the Reply. Safe for concurrent use.
 func (c *Client) Do(req Request) (Reply, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	rep, err := c.exchange(req)
+	if err == nil {
+		return rep, nil
+	}
+	// The daemon may have restarted (new process, same STABLE socket path). A
+	// persistent connection to the old daemon is now dead — reconnect once and
+	// retry so a live session heals instead of failing every tool call until it
+	// is relaunched. This is the fix for post-restart "loud send-failures".
+	if rerr := c.redial(); rerr != nil {
+		return Reply{}, err // daemon still unreachable: surface the original error
+	}
+	return c.exchange(req)
+}
+
+func (c *Client) exchange(req Request) (Reply, error) {
 	if err := c.enc.Encode(req); err != nil {
 		return Reply{}, err
 	}
