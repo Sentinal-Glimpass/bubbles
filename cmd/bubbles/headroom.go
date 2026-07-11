@@ -155,10 +155,14 @@ func (h *headroomProc) routeWhenReady(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if h.healthy() {
-			key := "ANTHROPIC_BASE_URL"
+			// Route only non-Bedrock traffic through the proxy. The 1M Bedrock
+			// model fails when proxied ("not available on your bedrock deployment")
+			// — headroom v0.30 can't route it. Bedrock talks directly to AWS.
 			if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
-				key = "ANTHROPIC_BEDROCK_BASE_URL"
+				fmt.Fprintf(os.Stderr, "bubbles: headroom skipped for Bedrock (direct AWS path)\n")
+				return false
 			}
+			key := "ANTHROPIC_BASE_URL"
 			_ = os.Setenv(key, h.url)
 			// With a custom base URL, Claude Code otherwise inlines every MCP tool
 			// schema into context. Keep schema deferral on (bubbles loads many MCP
