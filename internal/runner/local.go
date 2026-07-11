@@ -160,6 +160,11 @@ func NewLocal() *LocalRunner {
 	}
 }
 
+// opusOneM is the 1M-context opus alias used for every non-fable bubble on the
+// non-Bedrock (subscription) path — a bare "opus" would NOT carry the [1m]
+// context. Change here if the model id revs.
+const opusOneM = "claude-opus-4-8[1m]"
+
 // Launch starts claude in a PTY in dir, seeded with the persona/goal.
 func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session, error) {
 	var args []string
@@ -191,19 +196,21 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 		args = append(args, "--disallowed-tools")
 		args = append(args, r.DisallowedTools...)
 	}
-	// FLEET POLICY: every bubble runs the env-configured model UNIFORMLY.
-	//   ANTHROPIC_MODEL set (Bedrock on OR off) -> let it drive; do NOT pass
-	//     --model, which would override it. This is how the whole fleet gets the
-	//     1M-context model (us.anthropic.claude-opus-4-6-v1[1m]) — a bare --model
-	//     alias like "opus" does NOT carry the [1m] context.
-	//   ANTHROPIC_MODEL unset -> fall back to a --model alias (fable stays fable;
-	//     everything else -> opus). Cheap tiers (sonnet/haiku) are never used.
-	if os.Getenv("ANTHROPIC_MODEL") != "" {
-		// no --model: the env value (the 1M model) applies to every bubble
+	// Every launch gets an explicit --model.
+	//   Bedrock ON (CLAUDE_CODE_USE_BEDROCK=1) -> ANTHROPIC_MODEL from env drives
+	//     (a Bedrock inference-profile id). ANTHROPIC_MODEL is consulted ONLY here.
+	//   Bedrock OFF -> "fable" stays "fable"; everything else (unset/sonnet/opus)
+	//     becomes the 1M-context opus (opusOneM). No bubble runs a non-1M tier.
+	var model string
+	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
+		model = os.Getenv("ANTHROPIC_MODEL")
 	} else if opts.Model == "fable" {
-		args = append(args, "--model", "fable")
+		model = "fable"
 	} else {
-		args = append(args, "--model", "opus")
+		model = opusOneM
+	}
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	if r.AllowAll != nil && *r.AllowAll {
 		args = append(args, "--dangerously-skip-permissions")
