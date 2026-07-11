@@ -149,17 +149,6 @@ func runApp() {
 			k.RecoverUnread(true)
 		}
 	}()
-	go func() { // persist the message store shortly after it changes, so mail survives a restart
-		t := time.NewTicker(2 * time.Second)
-		defer t.Stop()
-		var lastVer int64 = -1
-		for range t.C {
-			if v := k.Store.Version(); v != lastVer {
-				lastVer = v
-				_ = saveInbox(baseDir, k)
-			}
-		}
-	}()
 	go func() { // fire durable wake schedules: the always-alive daemon wakes bubbles on their triggers
 		t := time.NewTicker(20 * time.Second)
 		defer t.Stop()
@@ -167,28 +156,10 @@ func runApp() {
 			k.FireDue()
 		}
 	}()
-	go func() { // persist the task ledger shortly after it changes, so enforced routes survive a restart
-		t := time.NewTicker(2 * time.Second)
-		defer t.Stop()
-		var lastVer int64 = -1
-		for range t.C {
-			if v := k.Tasks.Version(); v != lastVer {
-				lastVer = v
-				_ = saveTasks(baseDir, k)
-			}
-		}
-	}()
-	go func() { // persist schedules shortly after they change, so wakes survive a restart
-		t := time.NewTicker(2 * time.Second)
-		defer t.Stop()
-		var lastVer int64 = -1
-		for range t.C {
-			if v := k.Sched.Version(); v != lastVer {
-				lastVer = v
-				_ = saveSchedules(baseDir, k)
-			}
-		}
-	}()
+	// NOTE: the inbox/tasks/schedules SAVERS are started later — AFTER the initial
+	// load below — so a slow boot can't let a saver overwrite a persisted file with
+	// empty in-memory state before it's been loaded (that race wiped schedules and
+	// mail on large, slow-booting fleets).
 
 	// Incoming webhooks: per-bubble secret URLs so scripts/crons/external
 	// services can message (and wake) a bubble programmatically.
@@ -232,6 +203,26 @@ func runApp() {
 	inboxExisted, inboxOK := loadInbox(baseDir, k)
 	loadSchedules(baseDir, k)
 	loadTasks(baseDir, k)
+
+	// Start the persistence savers ONLY now that the initial load is done — see the
+	// NOTE above. Each writes on a version change, so the first tick re-saves the
+	// just-loaded state (idempotent) rather than clobbering it with an empty store.
+	startSaver := func(version func() int64, save func(string, *kernel.Kernel) error) {
+		go func() {
+			t := time.NewTicker(2 * time.Second)
+			defer t.Stop()
+			var last int64 = -1
+			for range t.C {
+				if v := version(); v != last {
+					last = v
+					_ = save(baseDir, k)
+				}
+			}
+		}()
+	}
+	startSaver(k.Store.Version, saveInbox)
+	startSaver(k.Tasks.Version, saveTasks)
+	startSaver(k.Sched.Version, saveSchedules)
 	// After a restart, wake and re-notify every bubble that still has unread mail,
 	// so a message that arrived before the stop lands in its terminal too. Delayed
 	// a few seconds so the fleet and webhook/tunnel setup settle first.
