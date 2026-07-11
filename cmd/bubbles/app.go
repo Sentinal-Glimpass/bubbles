@@ -3,14 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -671,55 +669,6 @@ func mcpConfigJSON(exe, sock string, a addr.Address, spawnable bool, extra map[s
 
 // diveInto hands the terminal to a bubble's PTY. It returns "" to go back to the
 // fleet, or the address of another bubble to switch directly into (Ctrl-Q num).
-// diveStatus paints a persistent one-line footer identifying the bubble the
-// operator is diving in. The bubble's PTY is sized one row short of the physical
-// terminal and a scroll region protects that last row, so claude never draws
-// over or scrolls away the footer. All writes to the terminal (claude's output
-// and our repaints) go through here under one mutex, so they never interleave
-// mid-escape-sequence.
-type diveStatus struct {
-	mu    sync.Mutex
-	out   io.Writer
-	label string
-	cols  int
-	rows  int // physical rows; the footer sits on row `rows`
-	last  time.Time
-}
-
-func (d *diveStatus) Write(p []byte) (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	n, err := d.out.Write(p)
-	d.paintLocked(false)
-	return n, err
-}
-
-// paintLocked redraws the footer (throttled unless forced). It re-asserts the
-// scroll region each time so a claude `ESC[r` (region reset) can't leave the
-// footer exposed to scrolling. Cursor is saved/restored around the paint so
-// claude's own cursor position is undisturbed.
-func (d *diveStatus) paintLocked(force bool) {
-	if d.rows < 3 || d.cols < 1 {
-		return
-	}
-	if !force && time.Since(d.last) < 120*time.Millisecond {
-		return
-	}
-	d.last = time.Now()
-	text := d.label
-	if len([]rune(text)) > d.cols {
-		text = string([]rune(text)[:d.cols])
-	}
-	fmt.Fprintf(d.out, "\x1b7\x1b[1;%dr\x1b[%d;1H\x1b[7m\x1b[2K%s\x1b[0m\x1b8", d.rows-1, d.rows, text)
-}
-
-func (d *diveStatus) resize(cols, rows int) {
-	d.mu.Lock()
-	d.cols, d.rows = cols, rows
-	d.paintLocked(true)
-	d.mu.Unlock()
-}
-
 // EnsureAlive heals a dead session first, so diving into a crashed bubble (or
 // one whose resume id vanished) transparently relaunches it.
 func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (next addr.Address, launched bool) {
@@ -734,44 +683,22 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (nex
 	defer k.UnsetFocus(a)
 	f := ps.PTY()
 
-	// Footer identifying which bubble you're in, pinned to a reserved bottom row.
-	label := " ● " + a.String()
+	// Show which bubble you're in via the TERMINAL TITLE (OSC 2) — safe, off the
+	// screen, so it never fights claude's live rendering. Reset on the way out.
+	title := a.String()
 	if b, ok := k.Reg.Get(a); ok && b.Label() != "" {
-		label += "  " + b.Label()
+		title += " · " + b.Label()
 	}
-	label += "   —  Ctrl-\\ Ctrl-\\ back to fleet"
+	fmt.Printf("\x1b]2;bubble %s\x07", title)
+	defer fmt.Print("\x1b]2;\x07")
 
-	// Reserve the footer only when the terminal is tall enough to spare a row.
-	var status *diveStatus
-	if ws, err := pty.GetsizeFull(os.Stdin); err == nil && ws.Rows >= 3 {
-		status = &diveStatus{out: os.Stdout, label: label, cols: int(ws.Cols), rows: int(ws.Rows)}
-	}
-
-	// sizeChild fills the bubble's PTY with the real terminal, minus the reserved
-	// footer row when the footer is active, so claude never renders over it.
-	sizeChild := func() {
-		ws, err := pty.GetsizeFull(os.Stdin)
-		if err != nil {
-			return
-		}
-		child := *ws
-		if status != nil && child.Rows > 1 {
-			child.Rows--
-		}
-		_ = pty.Setsize(f, &child)
-	}
-
-	// Keep the child sized (and the footer repainted) across window resizes.
+	// Size the bubble's PTY to fill the real terminal, and keep it synced on
+	// window resize, so claude renders full-screen instead of in an 80x24 box.
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	go func() {
 		for range winch {
-			sizeChild()
-			if status != nil {
-				if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
-					status.resize(int(ws.Cols), int(ws.Rows))
-				}
-			}
+			_ = pty.InheritSize(os.Stdin, f)
 		}
 	}()
 	defer signal.Stop(winch)
@@ -782,43 +709,27 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (nex
 	fmt.Print("\x1b[?25h\x1b[2J\x1b[H") // show cursor (Bubbletea's alt-screen hides it) + clear for claude's redraw
 	// On the way out, disable any mouse reporting / bracketed paste claude turned on.
 	defer fmt.Print("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\r\n")
-	if status != nil {
-		defer fmt.Print("\x1b[r") // release the scroll region so the fleet view uses the full screen
-		status.resize(status.cols, status.rows)
-	}
 
 	// Subscribe to the session's persistent output stream (replays recent
 	// scrollback first, so we see claude's current frame, not a black screen).
 	// We do NOT read f directly — the drainer owns the read side so claude is
-	// always drained and never stalls, viewed or not. All terminal writes route
-	// through `status` (when active) so claude's output and footer repaints share
-	// one lock and never interleave.
-	var out io.Writer = os.Stdout
-	if status != nil {
-		out = status
-	}
-	detach := ps.Attach(out)
+	// always drained and never stalls, viewed or not.
+	detach := ps.Attach(os.Stdout)
 	defer detach()
 
 	// Force claude (an Ink TUI) to repaint — it only redraws on a size change, so
-	// re-entering an idle bubble would otherwise show a stale frame. Nudge the
-	// size, pause so Ink renders, then settle back to the correct child size.
-	sizeChild()
+	// re-entering an idle bubble would otherwise show a stale frame. Shrink a row,
+	// pause so Ink renders, then restore.
 	if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
-		reserve := 0
-		if status != nil {
-			reserve = 1
+		smaller := *ws
+		if smaller.Rows > 1 {
+			smaller.Rows--
 		}
-		jitter := *ws
-		if int(jitter.Rows) > reserve+1 {
-			jitter.Rows = uint16(int(jitter.Rows) - reserve - 1)
-		}
-		_ = pty.Setsize(f, &jitter)
+		_ = pty.Setsize(f, &smaller)
 		time.Sleep(60 * time.Millisecond)
-		sizeChild()
-	}
-	if status != nil {
-		status.resize(status.cols, status.rows)
+		_ = pty.Setsize(f, ws)
+	} else {
+		_ = pty.InheritSize(os.Stdin, f)
 	}
 
 	// Input loop. Esc and everything else go straight to claude; the leader keys
