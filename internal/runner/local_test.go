@@ -233,10 +233,9 @@ func aliveCmd(t *testing.T) *exec.Cmd {
 	return c
 }
 
-// TestModelResolution: every launch gets an explicit --model.
-//   Bedrock ON  -> --model is ANTHROPIC_MODEL (regardless of per-bubble model).
-//   Bedrock OFF -> ANTHROPIC_MODEL is IGNORED; "fable" stays "fable", everything
-//                  else (unset/sonnet/opus) becomes the 1M-context opus.
+// TestModelResolution:
+//   Bedrock ON  -> NO --model passed (env ANTHROPIC_MODEL drives via inheritance).
+//   Bedrock OFF -> "fable" stays "fable"; everything else -> opusOneM (1M alias).
 func TestModelResolution(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "stub.sh")
@@ -270,12 +269,13 @@ func TestModelResolution(t *testing.T) {
 		}
 	}
 
-	// Bedrock ON: --model is ANTHROPIC_MODEL for every bubble.
+	// Bedrock ON: NO --model at all (env ANTHROPIC_MODEL drives via inheritance;
+	// passing a raw Bedrock ID as --model breaks claude).
 	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
 	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]")
 	out := launch("0.9", SpawnOpts{Persona: "z", Model: "sonnet"})
-	if !strings.Contains(out, "--model us.anthropic.claude-opus-4-6-v1[1m]") {
-		t.Fatalf("bedrock on: want --model = ANTHROPIC_MODEL, got:\n%s", out)
+	if strings.Contains(out, "--model") {
+		t.Fatalf("bedrock on: expected NO --model (env drives), got:\n%s", out)
 	}
 }
 

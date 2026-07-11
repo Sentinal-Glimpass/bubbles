@@ -196,21 +196,20 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 		args = append(args, "--disallowed-tools")
 		args = append(args, r.DisallowedTools...)
 	}
-	// Every launch gets an explicit --model.
-	//   Bedrock ON (CLAUDE_CODE_USE_BEDROCK=1) -> ANTHROPIC_MODEL from env drives
-	//     (a Bedrock inference-profile id). ANTHROPIC_MODEL is consulted ONLY here.
-	//   Bedrock OFF -> "fable" stays "fable"; everything else (unset/sonnet/opus)
-	//     becomes the 1M-context opus (opusOneM). No bubble runs a non-1M tier.
-	var model string
-	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
-		model = os.Getenv("ANTHROPIC_MODEL")
-	} else if opts.Model == "fable" {
-		model = "fable"
-	} else {
-		model = opusOneM
-	}
-	if model != "" {
-		args = append(args, "--model", model)
+	// Model routing:
+	//   Bedrock ON (CLAUDE_CODE_USE_BEDROCK=1) -> pass NO --model. The child
+	//     inherits ANTHROPIC_MODEL from the env (a Bedrock inference-profile id
+	//     like us.anthropic.claude-opus-4-6-v1[1m]). A --model flag does NOT
+	//     accept raw Bedrock IDs — it expects subscription aliases — so passing
+	//     it breaks ("model not available on your bedrock deployment").
+	//   Bedrock OFF -> "fable" stays "fable"; everything else -> opusOneM (the
+	//     1M-context subscription alias). No bubble runs a non-1M tier.
+	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") != "1" {
+		if opts.Model == "fable" {
+			args = append(args, "--model", "fable")
+		} else {
+			args = append(args, "--model", opusOneM)
+		}
 	}
 	if r.AllowAll != nil && *r.AllowAll {
 		args = append(args, "--dangerously-skip-permissions")
