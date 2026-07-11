@@ -8,6 +8,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var (
@@ -161,19 +162,16 @@ func usagePanel(u Model) []string {
 	return lines
 }
 
-// overlayTopRight places panel lines flush-right over the top lines of body,
-// extending body if it has fewer lines than the panel. Widths are measured with
-// lipgloss so ANSI styling doesn't skew alignment.
-//
-// If the terminal is too narrow to seat the panel beside the body without
-// crowding the tree (every overlaid row would have < minGap columns of breathing
-// room), the panel is STACKED above the body instead — a resize no longer jams
-// the usage readout up against the bubble tree.
+// overlayTopRight keeps the usage panel pinned to the TOP-RIGHT corner over the
+// top lines of body. To stop the tree from ever running into the metrics on a
+// narrow terminal, each overlaid body row is ANSI-safely CLIPPED to the columns
+// left of the panel (so a long row ends in an ellipsis instead of colliding).
+// Widths are measured with lipgloss so styling doesn't skew alignment.
 func overlayTopRight(body string, panel []string, width int) string {
 	if len(panel) == 0 || width <= 0 {
 		return body
 	}
-	const minGap = 3 // columns that must separate the tree from the panel
+	const minGap = 2 // columns between the tree and the panel
 	panelW := 0
 	for _, p := range panel {
 		if w := lipgloss.Width(p); w > panelW {
@@ -181,25 +179,20 @@ func overlayTopRight(body string, panel []string, width int) string {
 		}
 	}
 	lines := strings.Split(body, "\n")
-	// Widest body row that the panel would actually sit next to.
-	bodyW := 0
-	for i := 0; i < len(panel) && i < len(lines); i++ {
-		if w := lipgloss.Width(lines[i]); w > bodyW {
-			bodyW = w
-		}
-	}
-	if bodyW+minGap+panelW > width { // won't fit side by side → stack it on top
-		return strings.Join(panel, "\n") + "\n\n" + body
-	}
 	for len(lines) < len(panel) {
 		lines = append(lines, "")
 	}
+	avail := width - panelW - minGap // columns the tree may use on an overlaid row
 	for i, p := range panel {
-		gap := width - panelW - lipgloss.Width(lines[i])
-		if gap < minGap {
-			gap = minGap
+		if avail < 1 { // terminal too narrow for both: show the panel row alone
+			lines[i] = p
+			continue
 		}
-		lines[i] = lines[i] + strings.Repeat(" ", gap) + p
+		bl := lines[i]
+		if lipgloss.Width(bl) > avail {
+			bl = ansi.Truncate(bl, avail, "…") // ANSI-aware, so color codes aren't cut mid-sequence
+		}
+		lines[i] = bl + strings.Repeat(" ", width-panelW-lipgloss.Width(bl)) + p
 	}
 	return strings.Join(lines, "\n")
 }
@@ -298,10 +291,14 @@ func (m Model) View() string {
 			cursor = "> "
 		}
 
-		// Bottom-section divider (TASKS / DEACTIVATED): a plain bold header, not
-		// selectable as a bubble.
+		// Bottom-section header (TASKS / DEACTIVATED): selectable, collapsible with
+		// →/←/enter.
 		if r.sectionHead != "" {
-			b.WriteString("\n" + panelHead.Render(r.sectionHead) + "\n")
+			toggle := "▾"
+			if m.sectionCollapsed[r.section] {
+				toggle = "▸"
+			}
+			b.WriteString("\n" + cursor + toggle + " " + panelHead.Render(r.sectionHead) + "\n")
 			continue
 		}
 
@@ -317,7 +314,8 @@ func (m Model) View() string {
 			if bub, ok := m.k.Reg.Get(a); ok {
 				name = bub.Label()
 			}
-			line := fmt.Sprintf("%s  %s %s %s  ⟢ %s", cursor, status, a, name, r.task)
+			// ⟢ <task id> (<assigner> → <worker>) — who assigned it and to whom.
+			line := fmt.Sprintf("%s  %s %s %s  ⟢ %s (%s → %s)", cursor, status, a, name, r.task, r.taskFrom, r.taskTo)
 			b.WriteString(line + "\n")
 			continue
 		}

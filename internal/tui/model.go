@@ -85,8 +85,9 @@ type Model struct {
 	cursor        int
 	pings         map[addr.Address]string
 	blinkOn       bool
-	expanded      map[addr.Address]bool // which tree nodes show their children (root open by default)
-	groupExpanded map[string]bool       // which group nodes show their members
+	expanded        map[addr.Address]bool // which tree nodes show their children (root open by default)
+	groupExpanded   map[string]bool       // which group nodes show their members
+	sectionCollapsed map[string]bool      // bottom sections (task/off) that are collapsed (default expanded)
 	markSet       bool                  // armed by `m`: next digit (re)assigns the cursor bubble to that slot
 
 	spawnStage     int          // 0 = none, 1 = persona, 2 = folder, 3 = options (model + grant)
@@ -155,8 +156,10 @@ type fleetRow struct {
 	// or child count): "task" for a live verifier bubble, "off" for a
 	// deactivated bubble.
 	sectionHead string
-	section     string
-	task        string // for section=="task" rows: the task id, for the label
+	section     string       // "task" | "off" — tags header + member rows of a bottom section
+	task        string       // for section=="task" rows: the task id
+	taskFrom    addr.Address // task assigner (for the "who → whom" bracket)
+	taskTo      addr.Address // task worker
 }
 
 // New builds a Model over a kernel. Root starts collapsed (minimized) and sits
@@ -165,8 +168,9 @@ func New(k *kernel.Kernel) Model {
 	m := Model{
 		k:             k,
 		pings:         map[addr.Address]string{},
-		expanded:      map[addr.Address]bool{}, // root collapsed by default
-		groupExpanded: map[string]bool{},
+		expanded:         map[addr.Address]bool{}, // root collapsed by default
+		groupExpanded:    map[string]bool{},
+		sectionCollapsed: map[string]bool{},
 		lastVer:       k.Reg.Version(), // don't trigger a spurious save on the first tick
 	}
 	m.rows = m.fleetRows()
@@ -234,17 +238,23 @@ func (m Model) fleetRows() []fleetRow {
 		out = append(out, fleetRow{addr: a, depth: strings.Count(string(a), ".")})
 	}
 
-	// Bottom sections: live task verifiers, then deactivated agents.
+	// Bottom sections: live task verifiers, then deactivated agents. Both are
+	// collapsible (default expanded); the header row toggles with →/←/enter.
 	if len(active) > 0 {
-		out = append(out, fleetRow{sectionHead: fmt.Sprintf("TASKS · %d verifying", len(active))})
-		for _, t := range active {
-			out = append(out, fleetRow{addr: addr.Address(t.Verifier), section: "task", task: t.ID, depth: 1})
+		out = append(out, fleetRow{sectionHead: fmt.Sprintf("TASKS · %d verifying", len(active)), section: "task"})
+		if !m.sectionCollapsed["task"] {
+			for _, t := range active {
+				out = append(out, fleetRow{addr: addr.Address(t.Verifier), section: "task", task: t.ID,
+					taskFrom: t.Assigner, taskTo: t.Worker, depth: 1})
+			}
 		}
 	}
 	if len(offline) > 0 {
-		out = append(out, fleetRow{sectionHead: fmt.Sprintf("DEACTIVATED · %d", len(offline))})
-		for _, a := range offline {
-			out = append(out, fleetRow{addr: a, section: "off", depth: 1})
+		out = append(out, fleetRow{sectionHead: fmt.Sprintf("DEACTIVATED · %d", len(offline)), section: "off"})
+		if !m.sectionCollapsed["off"] {
+			for _, a := range offline {
+				out = append(out, fleetRow{addr: a, section: "off", depth: 1})
+			}
 		}
 	}
 	return out
@@ -270,21 +280,14 @@ func (m Model) curRow() fleetRow {
 
 func (m Model) curAddr() addr.Address { return m.curRow().addr }
 
-// step advances the cursor by dir (±1) with wrap, skipping non-selectable
-// section-divider rows so navigation never rests on one.
+// step advances the cursor by dir (±1) with wrap. Every row (including section
+// headers, which are selectable so they can be collapsed) is a valid stop.
 func (m Model) step(dir int) int {
 	n := len(m.rows)
 	if n == 0 {
 		return 0
 	}
-	c := m.cursor
-	for i := 0; i < n; i++ {
-		c = (c + dir + n) % n
-		if m.rows[c].sectionHead == "" {
-			return c
-		}
-	}
-	return m.cursor // every row is a divider (impossible in practice)
+	return (m.cursor + dir + n) % n
 }
 
 func (m Model) Init() tea.Cmd { return blinkTick() }
@@ -421,7 +424,10 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = m.step(1)
 	case "right", "l": // expand the highlighted node (tree bubble or group)
 		r := m.curRow()
-		if r.header {
+		if r.sectionHead != "" {
+			delete(m.sectionCollapsed, r.section) // expand the bottom section
+			m.rows = m.fleetRows()
+		} else if r.header {
 			m.groupExpanded[r.group] = true
 			m.rows = m.fleetRows()
 		} else if a := r.addr; a != "" && !m.expanded[a] && len(m.k.Reg.Children(a)) > 0 {
@@ -430,7 +436,10 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "left", "h": // collapse the node, or hop to its parent
 		r := m.curRow()
-		if r.header {
+		if r.sectionHead != "" {
+			m.sectionCollapsed[r.section] = true // collapse the bottom section
+			m.rows = m.fleetRows()
+		} else if r.header {
 			delete(m.groupExpanded, r.group)
 			m.rows = m.fleetRows()
 		} else if a := r.addr; a != "" {
@@ -451,7 +460,10 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		r := m.curRow()
-		if r.header { // a group node: dive its session if any, else toggle it open
+		if r.sectionHead != "" { // a bottom-section header: toggle collapse
+			m.sectionCollapsed[r.section] = !m.sectionCollapsed[r.section]
+			m.rows = m.fleetRows()
+		} else if r.header { // a group node: dive its session if any, else toggle it open
 			if g, ok := m.k.Groups.Get(r.group); ok && g.Session != "" {
 				m.Selected = g.Session
 				return m, tea.Quit

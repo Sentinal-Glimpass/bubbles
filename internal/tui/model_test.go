@@ -644,19 +644,27 @@ func TestDeactivatedSection(t *testing.T) {
 	if !offRow {
 		t.Fatal("parked bubble missing from the DEACTIVATED section")
 	}
-	// A section divider row exists and is skipped by cursor navigation.
+	// The DEACTIVATED header is selectable and collapsible: collapsing it hides
+	// the parked-bubble member rows.
 	var headIdx = -1
 	for i, r := range m.rows {
-		if r.sectionHead != "" {
+		if r.sectionHead != "" && r.section == "off" {
 			headIdx = i
 		}
 	}
 	if headIdx < 0 {
-		t.Fatal("no section header row emitted")
+		t.Fatal("no DEACTIVATED header row emitted")
 	}
-	m.cursor = headIdx - 1
-	if got := m.step(1); got == headIdx {
-		t.Fatalf("cursor landed on a non-selectable divider row %d", headIdx)
+	m.cursor = headIdx
+	m.sectionCollapsed["off"] = true
+	m.rows = m.fleetRows()
+	for _, r := range m.rows {
+		if r.section == "off" && r.sectionHead == "" {
+			t.Fatal("collapsed DEACTIVATED section still shows member rows")
+		}
+	}
+	if n := len(m.rows); m.step(1) < 0 || m.step(1) >= n {
+		t.Fatal("cursor step out of range after collapse")
 	}
 }
 

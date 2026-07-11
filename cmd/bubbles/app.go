@@ -709,10 +709,10 @@ func (d *diveFooter) paintLocked() {
 	if len([]rune(text)) > d.cols {
 		text = string([]rune(text)[:d.cols])
 	}
-	// save cursor · reserve rows 1..rows-1 · go to reserved row · reverse+clear ·
-	// text · reset · restore cursor. Re-asserting the region each paint recovers
-	// from a claude `ESC[r`.
-	fmt.Fprintf(d.out, "\x1b7\x1b[1;%dr\x1b[%d;1H\x1b[7m\x1b[2K%s\x1b[0m\x1b8", d.rows-1, d.rows, text)
+	// save cursor · reserve rows 1..rows-1 · go to reserved row · black bg + green
+	// fg · clear the row (paint the bg across it) · text · reset · restore cursor.
+	// Re-asserting the region each paint recovers from a claude `ESC[r`.
+	fmt.Fprintf(d.out, "\x1b7\x1b[1;%dr\x1b[%d;1H\x1b[40;32m\x1b[2K%s\x1b[0m\x1b8", d.rows-1, d.rows, text)
 }
 
 // repaint redraws once claude output has been quiet long enough, so a burst of
@@ -772,7 +772,7 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (nex
 	footerOn := os.Getenv("BUBBLES_DIVE_FOOTER") != "0" && os.Getenv("BUBBLES_DIVE_FOOTER") != "false"
 	var footer *diveFooter
 	if ws, err := pty.GetsizeFull(os.Stdin); err == nil && footerOn && ws.Rows >= 3 {
-		footer = &diveFooter{out: os.Stdout, label: label + "   (Ctrl-\\ Ctrl-\\ fleet)", cols: int(ws.Cols), rows: int(ws.Rows)}
+		footer = &diveFooter{out: os.Stdout, label: label, cols: int(ws.Cols), rows: int(ws.Rows)}
 	}
 
 	// sizeChild fills the bubble's PTY with the real terminal, minus the reserved
