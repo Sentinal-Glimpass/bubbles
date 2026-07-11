@@ -65,6 +65,15 @@ func startHeadroom(baseDir string) *headroomProc {
 	port := headroomPort()
 	h := &headroomProc{url: fmt.Sprintf("http://127.0.0.1:%d", port), port: port}
 
+	// One proxy serves the whole fleet. If a healthy proxy is ALREADY listening on
+	// this port (another workspace's daemon started it), reuse it instead of
+	// spawning a competitor that can't bind and crash-loops. Routing still points
+	// every session at the shared proxy; we just don't own or supervise it.
+	if h.healthy() {
+		fmt.Fprintf(os.Stderr, "bubbles: reusing the headroom proxy already running on port %d\n", port)
+		return h
+	}
+
 	logPath := filepath.Join(baseDir, ".bubbles", "headroom.log")
 	_ = os.MkdirAll(filepath.Dir(logPath), 0o755)
 
