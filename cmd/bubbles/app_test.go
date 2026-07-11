@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
@@ -27,3 +29,54 @@ func TestMarkActionJumpVsBind(t *testing.T) {
 }
 
 
+
+func TestDiveFooterWriteDoesNotPaintInline(t *testing.T) {
+	var buf bytes.Buffer
+	d := &diveFooter{out: &buf, label: "0.6 · cmo", cols: 80, rows: 24}
+	// Write passes claude bytes through and marks dirty — but must NOT paint the
+	// footer inline (that per-byte repaint was the rapid-blink bug).
+	n, err := d.Write([]byte("claude frame"))
+	if err != nil || n != len("claude frame") {
+		t.Fatalf("write n=%d err=%v", n, err)
+	}
+	if buf.String() != "claude frame" {
+		t.Fatalf("inline paint leaked into output: %q", buf.String())
+	}
+	if !d.dirty {
+		t.Fatal("write should mark the footer dirty")
+	}
+}
+
+func TestDiveFooterRefreshPaintsReservedRow(t *testing.T) {
+	var buf bytes.Buffer
+	d := &diveFooter{out: &buf, label: "0.6 · cmo", cols: 80, rows: 24}
+	d.refresh(80, 24)
+	out := buf.String()
+	if !strings.Contains(out, "\x1b[1;23r") { // reserve rows 1..23
+		t.Fatalf("no scroll-region reservation: %q", out)
+	}
+	if !strings.Contains(out, "\x1b[24;1H") { // footer on row 24
+		t.Fatalf("footer not on reserved row: %q", out)
+	}
+	if !strings.Contains(out, "0.6 · cmo") {
+		t.Fatalf("label missing: %q", out)
+	}
+	if d.dirty {
+		t.Fatal("refresh should clear dirty")
+	}
+}
+
+func TestDiveFooterTruncatesAndSkipsTiny(t *testing.T) {
+	var buf bytes.Buffer
+	d := &diveFooter{out: &buf, label: strings.Repeat("x", 200), cols: 10, rows: 24}
+	d.refresh(10, 24)
+	if strings.Count(buf.String(), "x") != 9 { // 1 leading space + 9 x = 10 cols
+		t.Fatalf("not truncated to cols: %q", buf.String())
+	}
+	buf.Reset()
+	tiny := &diveFooter{out: &buf, label: "hi", cols: 80, rows: 2}
+	tiny.refresh(80, 2)
+	if buf.Len() != 0 {
+		t.Fatalf("2-row terminal should not paint: %q", buf.String())
+	}
+}
