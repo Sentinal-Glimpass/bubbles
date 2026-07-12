@@ -43,8 +43,16 @@ func startWebhookServer(k *kernel.Kernel) string {
 	port := webhookPort()
 	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", bind, port))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bubbles: webhook server disabled: %v\n", err)
-		return ""
+		// Default port busy (another workspace's daemon owns it) — bind :0 so this
+		// fleet still gets a working webhook server on a free port, rather than
+		// disabling webhooks entirely and breaking control_webhook for every bubble.
+		ln, err = net.Listen("tcp", fmt.Sprintf("%s:0", bind))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bubbles: webhook server disabled: %v\n", err)
+			return ""
+		}
+		port = ln.Addr().(*net.TCPAddr).Port
+		fmt.Fprintf(os.Stderr, "bubbles: webhook port %d busy — using %d instead\n", webhookPort(), port)
 	}
 	base := os.Getenv("BUBBLES_WEBHOOK_BASE") // e.g. https://ops.example.com/hooks (a reverse proxy to this port)
 	if base == "" {
