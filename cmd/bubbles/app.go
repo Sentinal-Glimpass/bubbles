@@ -210,6 +210,9 @@ func runApp() {
 	inboxExisted, inboxOK := loadInbox(baseDir, k)
 	loadSchedules(baseDir, k)
 	loadTasks(baseDir, k)
+	if n := k.ReapOrphanVerifiers(); n > 0 {
+		fmt.Fprintf(os.Stderr, "bubbles: reaped %d orphaned task verifier(s) from a previous run\n", n)
+	}
 
 	// Start the persistence savers ONLY now that the initial load is done — see the
 	// NOTE above. Each writes on a version change, so the first tick re-saves the

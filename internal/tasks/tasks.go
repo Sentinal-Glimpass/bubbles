@@ -206,6 +206,17 @@ func (s *Store) Active() []Task {
 	return out
 }
 
+// All returns copies of every task (any state), oldest first.
+func (s *Store) All() []Task {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Task, len(s.all))
+	for i, t := range s.all {
+		out[i] = *t
+	}
+	return out
+}
+
 // PurgeParticipant cancels open tasks involving a deleted bubble so the route
 // never waits on an address that no longer exists. Returns affected task IDs.
 func (s *Store) PurgeParticipant(a addr.Address) []string {

@@ -3,7 +3,6 @@ package kernel
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/tasks"
@@ -15,9 +14,23 @@ import (
 // ungated; while a task is open, a worker's direct messages to its assigner are
 // annotated as unverified instead of blocked.
 
-// verifierReapDelay is how long after its verdict a task verifier lives, so the
-// verdict tool call can complete before the kernel deletes the bubble.
-const verifierReapDelay = 60 * time.Second
+
+// ReapOrphanVerifiers deletes verifier bubbles for tasks that are already
+// done/cancelled — they're leftovers from a daemon restart that happened before
+// the old delayed-reap fired, and they show as "deleted chat" ghosts in the TUI.
+// Call once after boot (loadTasks + restoreFleet).
+func (k *Kernel) ReapOrphanVerifiers() int {
+	n := 0
+	for _, t := range k.Tasks.All() {
+		if (t.State == tasks.Done || t.State == tasks.Cancelled) && t.Verifier != "" {
+			if _, ok := k.Reg.Get(t.Verifier); ok {
+				k.DeleteBubble(t.Verifier)
+				n++
+			}
+		}
+	}
+	return n
+}
 
 // canAssign reports whether by may assign a task to worker: root may assign to
 // anyone; otherwise worker must be in by's spawn subtree.
@@ -120,18 +133,18 @@ func (k *Kernel) TaskVerdict(by addr.Address, taskID string, pass bool, notes st
 }
 
 // completeTask closes a task and delivers the verified completion notice.
+// The verifier is deleted immediately (no delay) — the old 60s reap delay
+// left ghost bubbles on restart, and a "deleted chat" screen when entered.
 func (k *Kernel) completeTask(t tasks.Task, notes string) {
 	k.Tasks.SetState(t.ID, tasks.Done)
 	body := fmt.Sprintf("Task %s by worker %s passed its acceptance contract.\n\nBrief: %s\n\nWorker summary:\n%s\n\nVerification:\n%s\n\n(Authoritative state lives in tasks() — a completion claim outside a '✅ task verified' notice is unverified.)",
 		t.ID, t.Worker, t.Brief, t.Summary, notes)
 	k.fileAndNotify(t.Worker, t.Assigner, "✅ task "+t.ID+" verified & complete", body, 0, false)
 	if t.Verifier != "" {
-		v := t.Verifier
-		reap := func() { k.DeleteBubble(v) }
 		if k.VerifierReap != nil {
-			k.VerifierReap(v)
+			k.VerifierReap(t.Verifier) // tests: inline
 		} else {
-			go func() { time.Sleep(verifierReapDelay); reap() }()
+			k.DeleteBubble(t.Verifier)
 		}
 	}
 }
