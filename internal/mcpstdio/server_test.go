@@ -14,7 +14,7 @@ type fakeBackend struct {
 	deletes [][2]string // by, addr
 	forgets [][2]string // by, addr
 
-	assigns   [][5]string // by, to, brief, checkCmd, checklist
+	assigns   [][4]string // by, to, brief, checkCmd, checklist
 	submits   [][3]string // by, taskID, summary
 	verdicts  []verdictCall
 	decisions [][2]string // by, text
@@ -86,8 +86,8 @@ func (f *fakeBackend) ControlWebhook(by string, rotate bool) (string, error) {
 	return "http://127.0.0.1:8899/c/tok-" + by, nil
 }
 
-func (f *fakeBackend) AssignTask(by, to, brief, checkCmd, checklist string) (string, error) {
-	f.assigns = append(f.assigns, [5]string{by, to, brief, checkCmd, checklist})
+func (f *fakeBackend) AssignTask(by, to, brief, checklist string, deterministic bool) (string, error) {
+	f.assigns = append(f.assigns, [4]string{by, to, brief, checklist})
 	return "t1", nil
 }
 
@@ -309,7 +309,7 @@ func TestIntroduceBroadcastTools(t *testing.T) {
 
 func TestTaskTools(t *testing.T) {
 	in := strings.NewReader(strings.Join([]string{
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"assign_task","arguments":{"to":"0.1.1","brief":"fix adder","check_cmd":"go test ./...","checklist":"a\nb"}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"assign_task","arguments":{"to":"0.1.1","brief":"fix adder","checklist":"a\nb"}}}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"submit_task","arguments":{"task_id":"t1","summary":"done"}}}`,
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"verdict","arguments":{"task_id":"t1","pass":true,"notes":"all good"}}}`,
 		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"tasks","arguments":{}}}`,
@@ -321,7 +321,7 @@ func TestTaskTools(t *testing.T) {
 	if err := s.Serve(in, &out); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
-	if len(fb.assigns) != 1 || fb.assigns[0] != [5]string{"0.1", "0.1.1", "fix adder", "go test ./...", "a\nb"} {
+	if len(fb.assigns) != 1 || fb.assigns[0] != [4]string{"0.1", "0.1.1", "fix adder", "a\nb"} {
 		t.Fatalf("assigns = %v", fb.assigns)
 	}
 	if len(fb.submits) != 1 || fb.submits[0] != [3]string{"0.1", "t1", "done"} {

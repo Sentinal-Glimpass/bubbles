@@ -38,18 +38,18 @@ func lastTo(k *Kernel, to addr.Address) (subject, body string) {
 func TestAssignAuthorityFollowsTree(t *testing.T) {
 	k, boss, worker := taskKernel(t)
 	// A worker cannot assign upward or to itself.
-	if _, err := k.AssignTask(worker, boss, "x", "true", nil); !errors.Is(err, ErrNotAllowed) {
+	if _, err := k.AssignTask(worker, boss, "x", []string{"item"}, false); !errors.Is(err, ErrNotAllowed) {
 		t.Fatalf("worker->boss assign: %v", err)
 	}
 	// The boss can assign into its subtree; root can assign to anyone.
-	if _, err := k.AssignTask(boss, worker, "do x", "true", nil); err != nil {
+	if _, err := k.AssignTask(boss, worker, "do x", []string{"tests pass"}, false); err != nil {
 		t.Fatalf("boss->worker: %v", err)
 	}
-	if _, err := k.AssignTask(addr.Root, worker, "do y", "true", nil); err != nil {
+	if _, err := k.AssignTask(addr.Root, worker, "do y", []string{"tests pass"}, false); err != nil {
 		t.Fatalf("root->worker: %v", err)
 	}
 	// Empty contract is rejected: an ungated task is just a message.
-	if _, err := k.AssignTask(boss, worker, "no contract", "", nil); err == nil {
+	if _, err := k.AssignTask(boss, worker, "no contract", nil, false); err == nil {
 		t.Fatal("empty contract accepted")
 	}
 	// Assignment lands in the worker's inbox with the submit instructions.
@@ -58,18 +58,22 @@ func TestAssignAuthorityFollowsTree(t *testing.T) {
 	}
 }
 
-func TestDeterministicRoute(t *testing.T) {
+func TestDeterministicFlagReachesVerifier(t *testing.T) {
 	k, boss, worker := taskKernel(t)
-	fail := true
-	k.RunCheck = func(dir, cmd string) (bool, string) {
-		if fail {
-			return false, "TestFoo FAILED: expected 2 got 3"
-		}
-		return true, "ok"
-	}
-	id, err := k.AssignTask(boss, worker, "fix the adder", "go test ./...", nil)
+	k.VerifierReap = func(a addr.Address) { k.DeleteBubble(a) }
+
+	id, err := k.AssignTask(boss, worker, "fix the adder", []string{"adder works correctly"}, true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	tk, _ := k.Tasks.Get(id)
+	if !tk.Deterministic {
+		t.Fatal("task should be deterministic")
+	}
+	// Verifier charter must mention test cases.
+	vb, _ := k.Reg.Get(tk.Verifier)
+	if !strings.Contains(vb.Goal, "DETERMINISTIC TEST CASES") {
+		t.Fatalf("verifier charter missing deterministic instruction: %q", vb.Goal[:100])
 	}
 
 	// Wrong caller can't submit.
@@ -77,29 +81,24 @@ func TestDeterministicRoute(t *testing.T) {
 		t.Fatalf("boss submit: %v", err)
 	}
 
-	// Failing check bounces to the worker WITH the output; assigner sees nothing.
-	if _, err := k.SubmitTask(worker, id, "fixed it"); err == nil || !strings.Contains(err.Error(), "TestFoo FAILED") {
-		t.Fatalf("want check failure with output, got %v", err)
-	}
-	tk, _ := k.Tasks.Get(id)
-	if tk.State != tasks.Open || tk.Rounds != 1 {
-		t.Fatalf("after fail: %+v", tk)
-	}
-	if s, _ := lastTo(k, boss); strings.Contains(s, "✅") {
-		t.Fatalf("assigner saw a completion for a failed check: %q", s)
-	}
-
-	// Passing check delivers the kernel-composed verified notice to the assigner.
-	fail = false
-	out, err := k.SubmitTask(worker, id, "fixed it properly")
+	// Worker submits → goes to verifier (state checking).
+	out, err := k.SubmitTask(worker, id, "fixed it")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "closed") {
-		t.Fatalf("submit result: %q", out)
+	if !strings.Contains(out, "verifier") {
+		t.Fatalf("submit should route to verifier: %q", out)
+	}
+	tk, _ = k.Tasks.Get(id)
+	if tk.State != tasks.Checking {
+		t.Fatalf("state = %s want checking", tk.State)
+	}
+	// Verifier approves.
+	if _, err := k.TaskVerdict(tk.Verifier, id, true, "test passes"); err != nil {
+		t.Fatal(err)
 	}
 	s, b := lastTo(k, boss)
-	if !strings.Contains(s, "✅ task "+id+" verified") || !strings.Contains(b, "fixed it properly") {
+	if !strings.Contains(s, "\xe2\x9c\x85 task "+id+" verified") || !strings.Contains(b, "fixed it") {
 		t.Fatalf("completion notice: %q / %q", s, b)
 	}
 	tk, _ = k.Tasks.Get(id)
@@ -111,14 +110,12 @@ func TestDeterministicRoute(t *testing.T) {
 		t.Fatal("resubmit of a done task accepted")
 	}
 }
-
 func TestChecklistRouteThroughVerifier(t *testing.T) {
 	k, boss, worker := taskKernel(t)
-	k.RunCheck = func(dir, cmd string) (bool, string) { return true, "ok" }
 	var reaped []addr.Address
 	k.VerifierReap = func(a addr.Address) { reaped = append(reaped, a); k.DeleteBubble(a) }
 
-	id, err := k.AssignTask(boss, worker, "write the docs", "true", []string{"docs cover every tool", "examples compile"})
+	id, err := k.AssignTask(boss, worker, "write the docs", []string{"docs cover every tool", "examples compile"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +179,7 @@ func TestChecklistRouteThroughVerifier(t *testing.T) {
 
 func TestSendAnnotatedWhileTaskOpen(t *testing.T) {
 	k, boss, worker := taskKernel(t)
-	id, err := k.AssignTask(boss, worker, "do x", "true", nil)
+	id, err := k.AssignTask(boss, worker, "do x", []string{"tests pass"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,9 +197,12 @@ func TestSendAnnotatedWhileTaskOpen(t *testing.T) {
 	if s, _ := lastTo(k, worker); strings.Contains(s, "unverified") {
 		t.Fatalf("assigner->worker wrongly annotated: %q", s)
 	}
-	// After completion the annotation stops.
-	k.RunCheck = func(dir, cmd string) (bool, string) { return true, "" }
+	// After completion (submit + verifier approves) the annotation stops.
 	if _, err := k.SubmitTask(worker, id, "done"); err != nil {
+		t.Fatal(err)
+	}
+	tk, _ := k.Tasks.Get(id)
+	if _, err := k.TaskVerdict(tk.Verifier, id, true, "ok"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := k.Send(worker, boss, "follow-up", "", 0, false); err != nil {
@@ -215,7 +215,7 @@ func TestSendAnnotatedWhileTaskOpen(t *testing.T) {
 
 func TestCancelTask(t *testing.T) {
 	k, boss, worker := taskKernel(t)
-	id, _ := k.AssignTask(boss, worker, "do x", "", []string{"item"})
+	id, _ := k.AssignTask(boss, worker, "do x", []string{"item"}, false)
 	tk, _ := k.Tasks.Get(id)
 	if err := k.CancelTask(worker, id); !errors.Is(err, ErrNotAllowed) {
 		t.Fatalf("worker cancel: %v", err)
@@ -237,7 +237,7 @@ func TestCancelTask(t *testing.T) {
 
 func TestDeleteWorkerCancelsItsTasks(t *testing.T) {
 	k, boss, worker := taskKernel(t)
-	id, _ := k.AssignTask(boss, worker, "do x", "true", nil)
+	id, _ := k.AssignTask(boss, worker, "do x", []string{"tests pass"}, false)
 	k.DeleteBubble(worker)
 	tk, _ := k.Tasks.Get(id)
 	if tk.State != tasks.Cancelled {
@@ -247,7 +247,7 @@ func TestDeleteWorkerCancelsItsTasks(t *testing.T) {
 
 func TestTasksFor(t *testing.T) {
 	k, boss, worker := taskKernel(t)
-	id, _ := k.AssignTask(boss, worker, "brief line one\nmore", "true", nil)
+	id, _ := k.AssignTask(boss, worker, "brief line one\nmore", []string{"done"}, false)
 	ls := k.TasksFor(worker)
 	if len(ls) != 1 || !strings.Contains(ls[0], id) || !strings.Contains(ls[0], "you=worker") || !strings.Contains(ls[0], "brief line one") {
 		t.Fatalf("tasks for worker: %v", ls)

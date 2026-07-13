@@ -42,11 +42,6 @@ type Kernel struct {
 	Sched  *sched.Store
 	Tasks  *tasks.Store
 
-	// RunCheck runs a task contract's deterministic check command in a dir and
-	// returns pass + (LLM-optimized) output. nil = real `sh -c` with a timeout;
-	// tests inject a fake.
-	RunCheck func(dir, cmd string) (pass bool, output string)
-
 	// VerifierReap, when set (tests), replaces the delayed post-verdict deletion
 	// of a task's verifier bubble with an inline call.
 	VerifierReap func(addr.Address)

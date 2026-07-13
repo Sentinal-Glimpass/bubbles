@@ -356,8 +356,8 @@ func (b *ipcBackend) ControlWebhook(by string, rotate bool) (string, error) {
 	return rep.Addr, nil // Addr carries the URL
 }
 
-func (b *ipcBackend) AssignTask(by, to, brief, checkCmd, checklist string) (string, error) {
-	rep, err := b.c.Do(ipc.Request{Op: "assign_task", From: by, To: to, Body: brief, Cmd: checkCmd, Checklist: checklist})
+func (b *ipcBackend) AssignTask(by, to, brief, checklist string, deterministic bool) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "assign_task", From: by, To: to, Body: brief, Checklist: checklist, Deterministic: deterministic})
 	if err != nil {
 		return "", err
 	}

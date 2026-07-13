@@ -492,7 +492,7 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 				checklist = append(checklist, ln)
 			}
 		}
-		id, err := k.AssignTask(from, addr.Address(r.To), r.Body, r.Cmd, checklist)
+		id, err := k.AssignTask(from, addr.Address(r.To), r.Body, checklist, r.Deterministic)
 		if err != nil {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}

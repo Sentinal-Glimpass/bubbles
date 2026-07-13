@@ -674,12 +674,12 @@ func TestDeactivatedSection(t *testing.T) {
 func TestTaskVerifierSection(t *testing.T) {
 	k := kernel.New(runner.NewFake())
 	k.RelaunchProbe = 0
-	k.RunCheck = func(dir, cmd string) (bool, string) { return true, "" }
+	
 	k.VerifierReap = func(a addr.Address) { k.DeleteBubble(a) }
 	boss, _ := k.Spawn(addr.Root, "boss", t.TempDir(), runner.SpawnOpts{Name: "boss", GrantSpawn: true})
 	k.Caps.GrantSpawnDepth(boss, 2)
 	worker, _ := k.SpawnUnder(boss, boss, "worker", t.TempDir(), runner.SpawnOpts{Name: "worker"})
-	id, err := k.AssignTask(boss, worker, "write docs", "", []string{"covers every tool"})
+	id, err := k.AssignTask(boss, worker, "write docs", []string{"covers every tool"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

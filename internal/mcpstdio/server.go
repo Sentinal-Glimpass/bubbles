@@ -245,7 +245,7 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 		if !s.Spawnable {
 			return errResp(msg.ID, -32601, "tool not available: assign_task")
 		}
-		id, err := s.B.AssignTask(s.Self, arg("to"), arg("brief"), arg("check_cmd"), arg("checklist"))
+		id, err := s.B.AssignTask(s.Self, arg("to"), arg("brief"), arg("checklist"), argBool("deterministic"))
 		if err != nil {
 			return toolErr(msg.ID, err.Error())
 		}

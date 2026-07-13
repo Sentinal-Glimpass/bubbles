@@ -27,16 +27,16 @@ const (
 
 // Task is one assignment with its acceptance contract.
 type Task struct {
-	ID       string       // "t1", "t2", ... (monotonic)
-	Assigner addr.Address // who assigned (receives the verified completion)
-	Worker   addr.Address // who does the work (the only address that may submit)
-	Verifier addr.Address // kernel-spawned checklist judge ("" = deterministic-only task)
-	Brief    string       // the charter given to the worker
-	CheckCmd string       // shell command that must exit 0 in the worker's dir ("" = none)
-	Checklist []string    // items the verifier must confirm (empty = no verifier)
-	State    State
-	Rounds   int    // reject → resubmit count
-	Summary  string // the worker's latest submission summary
+	ID            string       // "t1", "t2", ... (monotonic)
+	Assigner      addr.Address // who assigned (receives the verified completion)
+	Worker        addr.Address // who does the work (the only address that may submit)
+	Verifier      addr.Address // kernel-spawned judge ("" = no verifier — shouldn't happen now)
+	Brief         string       // the charter given to the worker
+	Checklist     []string     // items the verifier must confirm (required)
+	Deterministic bool         // true = verifier writes+runs test cases; false = subjective judgement
+	State         State
+	Rounds        int    // reject → resubmit count
+	Summary       string // the worker's latest submission summary
 }
 
 // Store holds all tasks, queried by participant.

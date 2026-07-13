@@ -26,7 +26,7 @@ type Backend interface {
 
 	// Harnessed tasks: assigned work travels worker → checks → (verifier) →
 	// assigner, a route the kernel enforces.
-	AssignTask(by, to, brief, checkCmd, checklist string) (string, error) // checklist: newline-separated items
+	AssignTask(by, to, brief, checklist string, deterministic bool) (string, error) // checklist: newline-separated items
 	SubmitTask(by, taskID, summary string) (string, error)
 	Verdict(by, taskID string, pass bool, notes string) (string, error)
 	Tasks(by string) []string
@@ -297,16 +297,16 @@ func (s *Server) tools() []Tool {
 		})
 		ts = append(ts, Tool{
 			Name:        "assign_task",
-			Description: "Assign a task with a kernel-enforced acceptance contract to a bubble in YOUR subtree. Give a check_cmd (shell command that must exit 0 in the worker's dir — tests, lint, build), a checklist (newline-separated items judged by an independent verifier bubble the kernel spawns), or both. The worker completes via submit_task; you receive a '✅ task verified' notice ONLY after the contract passes — the worker cannot deliver an unverified 'done'.",
+			Description: "Assign a task with a kernel-enforced acceptance contract to a bubble in YOUR subtree. A checklist (one item per line) is required — an independent verifier bubble judges it. Set deterministic=true for the verifier to write+run test cases; false (default) for subjective judgement. The worker completes via submit_task; you receive a '✅ task verified' notice ONLY after the verifier approves — the worker cannot deliver an unverified 'done'.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"to":        map[string]any{"type": "string", "description": "Worker bubble's address (must be in your subtree)."},
-					"brief":     map[string]any{"type": "string", "description": "The task: what to do and what done means."},
-					"check_cmd": map[string]any{"type": "string", "description": "Optional shell command that must exit 0 in the worker's dir, e.g. \"go test ./...\"."},
-					"checklist": map[string]any{"type": "string", "description": "Optional acceptance checklist, one item per line — an independent verifier bubble judges these."},
+					"to":            map[string]any{"type": "string", "description": "Worker bubble's address (must be in your subtree)."},
+					"brief":         map[string]any{"type": "string", "description": "The task: what to do and what done means."},
+					"checklist":     map[string]any{"type": "string", "description": "Acceptance checklist, one item per line — verified by an independent verifier bubble."},
+					"deterministic": map[string]any{"type": "boolean", "description": "true = verifier writes+runs test cases against the checklist; false (default) = subjective judgement."},
 				},
-				"required": []string{"to", "brief"},
+				"required": []string{"to", "brief", "checklist"},
 			},
 		})
 	}

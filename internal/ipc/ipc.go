@@ -27,11 +27,11 @@ type Request struct {
 	Every   string `json:"every,omitempty"` // schedule interval ("15m")
 	Daily   string `json:"daily,omitempty"` // schedule daily time ("08:00")
 
-	Task      string `json:"task,omitempty"`      // task id (submit_task / verdict)
-	Cmd       string `json:"cmd,omitempty"`       // assign_task check command
-	Checklist string `json:"checklist,omitempty"` // assign_task checklist (newline-separated)
-	Pass      bool   `json:"pass,omitempty"`      // verdict ruling
-	Rotate    bool   `json:"rotate,omitempty"`    // control_webhook: mint a fresh URL
+	Task          string `json:"task,omitempty"`          // task id (submit_task / verdict)
+	Checklist     string `json:"checklist,omitempty"`     // assign_task checklist (newline-separated)
+	Deterministic bool   `json:"deterministic,omitempty"` // assign_task: true=tests, false=subjective
+	Pass          bool   `json:"pass,omitempty"`          // verdict ruling
+	Rotate        bool   `json:"rotate,omitempty"`        // control_webhook: mint a fresh URL
 }
 
 // Reply is the result of handling a Request.

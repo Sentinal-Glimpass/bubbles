@@ -150,7 +150,7 @@ func inboxMsg(from, to addr.Address, subj, body string, replyTo int) inbox.Messa
 func TestTasksPersistRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	k := kernel.New(runner.NewFake())
-	k.Tasks.Create(tasks.Task{Assigner: "0", Worker: "0.1", Brief: "fix adder", CheckCmd: "go test ./..."})
+	k.Tasks.Create(tasks.Task{Assigner: "0", Worker: "0.1", Brief: "fix adder", Checklist: []string{"works"}})
 	if err := saveTasks(dir, k); err != nil {
 		t.Fatal(err)
 	}
