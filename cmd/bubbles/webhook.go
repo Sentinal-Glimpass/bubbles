@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,15 +20,24 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 )
 
-// webhookPort is where the daemon's incoming-webhook server listens.
-// Default 8899; override with `bubbles --webhook-port N`.
-func webhookPort() int {
+// webhookPort is where the daemon's incoming-webhook server listens. It is
+// STABLE per-workspace (derived from the workspace dir) so issued webhook URLs —
+// which embed the port — survive daemon restarts, and two workspaces on one host
+// don't collide on a shared default. Override explicitly with BUBBLES_WEBHOOK_PORT.
+func webhookPort(baseDir string) int {
 	if v := os.Getenv("BUBBLES_WEBHOOK_PORT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n < 65536 {
 			return n
 		}
 	}
-	return 8899
+	abs, err := filepath.Abs(baseDir)
+	if err != nil {
+		abs = baseDir
+	}
+	sum := sha256.Sum256([]byte(abs))
+	// Deterministic port in 20000–39999: the same workspace always lands here, so
+	// its /c/<token> URLs keep resolving across restarts.
+	return 20000 + int(binary.BigEndian.Uint16(sum[:2]))%20000
 }
 
 // startWebhookServer binds the incoming-webhook listener and serves it. By
@@ -35,24 +46,25 @@ func webhookPort() int {
 // tunnel in front — the URL token is the auth). Returns the advertised base URL,
 // or "" if the port was unavailable (another fleet may own it), in which case
 // the webhook tools report unavailable rather than handing out dead URLs.
-func startWebhookServer(k *kernel.Kernel) string {
+func startWebhookServer(k *kernel.Kernel, baseDir string) string {
 	bind, public := "127.0.0.1", false
 	if os.Getenv("BUBBLES_WEBHOOK_PUBLIC") == "1" {
 		bind, public = "0.0.0.0", true
 	}
-	port := webhookPort()
+	port := webhookPort(baseDir)
 	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", bind, port))
 	if err != nil {
-		// Default port busy (another workspace's daemon owns it) — bind :0 so this
-		// fleet still gets a working webhook server on a free port, rather than
-		// disabling webhooks entirely and breaking control_webhook for every bubble.
+		// Stable port busy (e.g. a stale daemon still holds it) — bind :0 so this
+		// fleet still gets a working webhook server rather than disabling webhooks
+		// entirely. NOTE: a :0 port is NOT stable across restarts, so issued URLs
+		// will go stale until the stable port is free again — warn loudly.
 		ln, err = net.Listen("tcp", fmt.Sprintf("%s:0", bind))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "bubbles: webhook server disabled: %v\n", err)
 			return ""
 		}
 		port = ln.Addr().(*net.TCPAddr).Port
-		fmt.Fprintf(os.Stderr, "bubbles: webhook port %d busy — using %d instead\n", webhookPort(), port)
+		fmt.Fprintf(os.Stderr, "bubbles: WARNING stable webhook port %d busy — using %d (issued URLs will change on restart; free the stable port to keep them durable)\n", webhookPort(baseDir), port)
 	}
 	base := os.Getenv("BUBBLES_WEBHOOK_BASE") // e.g. https://ops.example.com/hooks (a reverse proxy to this port)
 	if base == "" {

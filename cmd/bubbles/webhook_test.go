@@ -33,7 +33,7 @@ func TestWebhookHTTPEndToEnd(t *testing.T) {
 	k.RelaunchProbe = 0
 	a, _ := k.Spawn(addr.Root, "", t.TempDir(), runner.SpawnOpts{Name: "watcher"})
 
-	base := startWebhookServer(k)
+	base := startWebhookServer(k, t.TempDir())
 	if base == "" {
 		t.Fatal("webhook server failed to start")
 	}
@@ -158,7 +158,7 @@ func TestControlWebhookHTTP(t *testing.T) {
 	boss, _ := k.Spawn(addr.Root, "", t.TempDir(), runner.SpawnOpts{Name: "boss", GrantSpawn: true})
 	plain, _ := k.Spawn(addr.Root, "", t.TempDir(), runner.SpawnOpts{Name: "plain"})
 
-	base := startWebhookServer(k)
+	base := startWebhookServer(k, t.TempDir())
 	if base == "" {
 		t.Fatal("webhook server failed to start")
 	}
@@ -232,5 +232,26 @@ func TestControlWebhookHTTP(t *testing.T) {
 	// unknown action → 400
 	if code, _ := post(`{"action":"frobnicate"}`); code != http.StatusBadRequest {
 		t.Fatalf("unknown action got %d", code)
+	}
+}
+
+// TestWebhookPortStablePerWorkspace: the derived port is deterministic for a
+// given workspace (so issued URLs survive restarts) and differs across
+// workspaces (so two fleets on one host don't collide). Explicit env wins.
+func TestWebhookPortStablePerWorkspace(t *testing.T) {
+	t.Setenv("BUBBLES_WEBHOOK_PORT", "") // no override
+	a := webhookPort("/home/rishi/fleet-a")
+	if a != webhookPort("/home/rishi/fleet-a") {
+		t.Fatal("same workspace must yield the same port across calls (restart stability)")
+	}
+	if a < 20000 || a >= 40000 {
+		t.Fatalf("derived port %d out of expected range", a)
+	}
+	if a == webhookPort("/home/rishi/fleet-b") {
+		t.Fatal("different workspaces should map to different ports")
+	}
+	t.Setenv("BUBBLES_WEBHOOK_PORT", "8899") // explicit override wins
+	if webhookPort("/home/rishi/fleet-a") != 8899 {
+		t.Fatal("explicit BUBBLES_WEBHOOK_PORT should override the derived port")
 	}
 }
