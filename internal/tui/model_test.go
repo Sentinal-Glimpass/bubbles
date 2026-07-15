@@ -683,6 +683,10 @@ func TestTaskVerifierSection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The verifier is spawned on submission — submit so it exists.
+	if _, err := k.SubmitTask(worker, id, "done"); err != nil {
+		t.Fatal(err)
+	}
 	tk, _ := k.Tasks.Get(id)
 
 	m := expandRoot(New(k))
@@ -704,10 +708,7 @@ func TestTaskVerifierSection(t *testing.T) {
 		t.Fatal("verifier missing from the TASKS section")
 	}
 
-	// Complete the task → verifier reaped → section empties.
-	if _, err := k.SubmitTask(worker, id, "done"); err != nil {
-		t.Fatal(err)
-	}
+	// Complete the task (already submitted above) → verifier reaped → section empties.
 	if _, err := k.TaskVerdict(tk.Verifier, id, true, "ok"); err != nil {
 		t.Fatal(err)
 	}

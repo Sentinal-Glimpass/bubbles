@@ -70,10 +70,9 @@ func TestDeterministicFlagReachesVerifier(t *testing.T) {
 	if !tk.Deterministic {
 		t.Fatal("task should be deterministic")
 	}
-	// Verifier charter must mention test cases.
-	vb, _ := k.Reg.Get(tk.Verifier)
-	if !strings.Contains(vb.Goal, "DETERMINISTIC TEST CASES") {
-		t.Fatalf("verifier charter missing deterministic instruction: %q", vb.Goal[:100])
+	// No verifier exists yet — it's spawned lazily on the first submission.
+	if tk.Verifier != "" {
+		t.Fatalf("verifier should not exist before submission, got %s", tk.Verifier)
 	}
 
 	// Wrong caller can't submit.
@@ -81,7 +80,7 @@ func TestDeterministicFlagReachesVerifier(t *testing.T) {
 		t.Fatalf("boss submit: %v", err)
 	}
 
-	// Worker submits → goes to verifier (state checking).
+	// Worker submits → verifier is spawned now, with the submission in its charter.
 	out, err := k.SubmitTask(worker, id, "fixed it")
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +91,16 @@ func TestDeterministicFlagReachesVerifier(t *testing.T) {
 	tk, _ = k.Tasks.Get(id)
 	if tk.State != tasks.Checking {
 		t.Fatalf("state = %s want checking", tk.State)
+	}
+	if tk.Verifier == "" {
+		t.Fatal("verifier should be spawned after first submission")
+	}
+	vb, _ := k.Reg.Get(tk.Verifier)
+	if !strings.Contains(vb.Goal, "DETERMINISTIC TEST CASES") {
+		t.Fatalf("verifier charter missing deterministic instruction")
+	}
+	if !strings.Contains(vb.Goal, "fixed it") {
+		t.Fatalf("verifier charter should contain the submission: %q", vb.Goal)
 	}
 	// Verifier approves.
 	if _, err := k.TaskVerdict(tk.Verifier, id, true, "test passes"); err != nil {
@@ -119,24 +128,26 @@ func TestChecklistRouteThroughVerifier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Verifier is spawned lazily — not until the first submission.
 	tk, _ := k.Tasks.Get(id)
+	if tk.Verifier != "" {
+		t.Fatal("verifier should not exist before submission")
+	}
+
+	// First submission spawns the verifier with the submission in its charter.
+	if _, err := k.SubmitTask(worker, id, "docs written"); err != nil {
+		t.Fatal(err)
+	}
+	tk, _ = k.Tasks.Get(id)
 	if tk.Verifier == "" {
-		t.Fatal("no verifier spawned for a checklist task")
+		t.Fatal("verifier not spawned after first submission")
 	}
 	vb, ok := k.Reg.Get(tk.Verifier)
-	if !ok || vb.Label() != "verify:"+id || !strings.Contains(vb.Goal, "INDEPENDENT VERIFIER") {
+	if !ok || vb.Label() != "verify:"+id || !strings.Contains(vb.Goal, "INDEPENDENT VERIFIER") || !strings.Contains(vb.Goal, "docs written") {
 		t.Fatalf("verifier bubble: %+v", vb)
 	}
 	if act := k.Tasks.Active(); len(act) != 1 || act[0].ID != id {
 		t.Fatalf("active tasks = %+v", act)
-	}
-
-	// Submission goes to the VERIFIER, not the assigner.
-	if _, err := k.SubmitTask(worker, id, "docs written"); err != nil {
-		t.Fatal(err)
-	}
-	if s, _ := lastTo(k, tk.Verifier); !strings.Contains(s, "task "+id+" submission") {
-		t.Fatalf("verifier inbox: %q", s)
 	}
 
 	// Worker can't rule on its own task.

@@ -58,23 +58,16 @@ func (k *Kernel) AssignTask(by, worker addr.Address, brief string, checklist []s
 	if len(checklist) == 0 {
 		return "", fmt.Errorf("kernel: checklist is required — at least one item needed")
 	}
+	_ = wb // worker dir is read again at submit time (when the verifier is spawned)
 	t := k.Tasks.Create(tasks.Task{
 		Assigner: by, Worker: worker, Brief: brief,
 		Checklist: checklist, Deterministic: deterministic,
 	})
 
-	// Spawn the independent verifier. The KERNEL spawns it (no spawn budget
-	// consumed, worker has no authority over it). It works in the worker's dir
-	// and launches lazily (cold until the first submission).
-	vb := k.Reg.Add(by, "", wb.Dir)
-	k.Reg.SetName(vb.Addr, "verify:"+t.ID)
-	k.Reg.SetGoal(vb.Addr, verifierCharter(t, worker, wb.Dir))
-	k.Caps.AddContact(vb.Addr, addr.Root)
-	k.Caps.AddContact(vb.Addr, by)
-	k.Caps.AddContact(by, vb.Addr)
-	k.Tasks.SetVerifier(t.ID, vb.Addr)
-	t.Verifier = vb.Addr
-
+	// NOTE: the verifier is NOT spawned here. It is created lazily on the FIRST
+	// submission (see SubmitTask), with the submission baked into its opening
+	// prompt — so it boots already working, and there's never a dormant, empty
+	// verifier bubble sitting in the fleet before there's anything to verify.
 	k.fileAndNotify(by, worker, "📋 assigned task "+t.ID, assignmentBody(t, by), 0, false)
 	return t.ID, nil
 }
@@ -94,17 +87,43 @@ func (k *Kernel) SubmitTask(by addr.Address, taskID, summary string) (string, er
 	}
 	k.Tasks.SetSummary(taskID, summary)
 	k.Tasks.SetState(taskID, tasks.Checking)
-
-	// Route the submission to the verifier.
 	t, _ = k.Tasks.Get(taskID)
+
+	if t.Verifier == "" {
+		// FIRST submission: spawn the independent verifier now, with the submission
+		// baked into its opening prompt so it boots already verifying (no dormant
+		// empty bubble, no separate inbox round-trip). The kernel owns it (assigner
+		// is the parent) — the worker has no authority over it.
+		dir := ""
+		if wb, ok := k.Reg.Get(t.Worker); ok {
+			dir = wb.Dir
+		}
+		vb := k.Reg.Add(t.Assigner, "", dir)
+		k.Reg.SetName(vb.Addr, "verify:"+t.ID)
+		k.Reg.SetGoal(vb.Addr, verifierCharter(t, t.Worker, dir)+"\n\n"+submissionBlock(t, summary))
+		k.Caps.AddContact(vb.Addr, addr.Root)
+		k.Caps.AddContact(vb.Addr, t.Assigner)
+		k.Caps.AddContact(t.Assigner, vb.Addr)
+		k.Tasks.SetVerifier(t.ID, vb.Addr)
+		k.EnsureAlive(vb.Addr) // launch it now — the submission is already its opening prompt
+		return fmt.Sprintf("task %s submitted — an independent verifier (%s) is now checking it. You'll get feedback if rejected; on approval the completion goes to %s.", taskID, vb.Addr, t.Assigner), nil
+	}
+
+	// Subsequent round: the verifier is already warm — deliver the resubmission as
+	// a message it reads on its next turn.
+	k.fileAndNotify(t.Worker, t.Verifier, "task "+taskID+" resubmission (round "+fmt.Sprint(t.Rounds+1)+")", submissionBlock(t, summary), 0, true)
+	return fmt.Sprintf("task %s resubmitted — sent to verifier %s. You'll get feedback if rejected; on approval the completion goes to %s.", taskID, t.Verifier, t.Assigner), nil
+}
+
+// submissionBlock renders a submission for the verifier (opening prompt on the
+// first round, or an inbox message on later rounds).
+func submissionBlock(t tasks.Task, summary string) string {
 	mode := "SUBJECTIVE JUDGEMENT"
 	if t.Deterministic {
 		mode = "DETERMINISTIC (write and run test cases against the checklist — the tests must pass)"
 	}
-	body := fmt.Sprintf("Submission for task %s (round %d) from worker %s.\n\nWorker summary:\n%s\n\nVerification mode: %s\n\nVerify every checklist item yourself, then call verdict(task_id=%q, pass=..., notes=...).\nChecklist:\n%s",
-		taskID, t.Rounds+1, t.Worker, summary, mode, taskID, bulleted(t.Checklist))
-	k.fileAndNotify(t.Worker, t.Verifier, "task "+taskID+" submission", body, 0, true)
-	return fmt.Sprintf("task %s submitted — sent to independent verifier %s. You'll get feedback if rejected; on approval the completion goes to %s.", taskID, t.Verifier, t.Assigner), nil
+	return fmt.Sprintf("SUBMISSION for task %s (round %d) from worker %s.\n\nWorker summary:\n%s\n\nVerification mode: %s\n\nVerify every checklist item YOURSELF, then call verdict(task_id=%q, pass=..., notes=...).\nChecklist:\n%s",
+		t.ID, t.Rounds+1, t.Worker, summary, mode, t.ID, bulleted(t.Checklist))
 }
 
 // TaskVerdict is the verifier's ruling (the assigner and root may also rule, to
@@ -201,7 +220,7 @@ func assignmentBody(t tasks.Task, by addr.Address) string {
 	}
 	fmt.Fprintf(&b, "You are assigned task %s by %s.\n\nBRIEF:\n%s\n\nACCEPTANCE CONTRACT (kernel-enforced):\n", t.ID, by, t.Brief)
 	fmt.Fprintf(&b, "- Verification mode: %s\n", mode)
-	fmt.Fprintf(&b, "- Checklist, judged by an independent verifier (%s):\n%s", t.Verifier, bulleted(t.Checklist))
+	fmt.Fprintf(&b, "- Checklist, judged by an independent verifier bubble the kernel spawns when you submit:\n%s", bulleted(t.Checklist))
 	fmt.Fprintf(&b, "\nWhen done, call submit_task(task_id=%q, summary=\"what you did\"). Your submission goes to the verifier — not to %s directly. Do NOT claim completion via send() — while this task is open, your messages to %s are marked unverified.", t.ID, by, by)
 	return b.String()
 }
