@@ -64,6 +64,7 @@ func main() {
 	applyFlagToEnv("--mcp", "BUBBLES_MCP")             // --mcp playwright,github,none -> which operator MCP servers bubbles inherit
 	applyFlagToEnv("--default-model", "BUBBLES_MODEL") // fleet default model (or "auto" to inherit ANTHROPIC_MODEL, e.g. Bedrock)
 	applyFlagToEnv("--webhook-port", "BUBBLES_WEBHOOK_PORT")
+	applyFlagToEnv("--port", "BUBBLES_WEBHOOK_PORT") // short alias for the bubbles HTTP/webhook port
 	applyFlagToEnv("--webhook-base", "BUBBLES_WEBHOOK_BASE") // advertised base URL (e.g. behind a reverse proxy/tunnel)
 	applyBoolFlagToEnv("--webhook-public", "BUBBLES_WEBHOOK_PUBLIC") // bind 0.0.0.0 instead of 127.0.0.1
 	applyBoolFlagToEnv("--ngrok", "BUBBLES_NGROK")                   // auto-start an ngrok tunnel -> public webhook URLs
@@ -354,6 +355,17 @@ func (b *ipcBackend) ControlWebhook(by string, rotate bool) (string, error) {
 		return "", errors.New(rep.Err)
 	}
 	return rep.Addr, nil // Addr carries the URL
+}
+
+func (b *ipcBackend) Port() (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "port"})
+	if err != nil {
+		return "", err
+	}
+	if !rep.OK {
+		return "", errors.New(rep.Err)
+	}
+	return rep.Addr, nil // Addr carries the webhook base URL
 }
 
 func (b *ipcBackend) AssignTask(by, to, brief, checklist string, deterministic bool) (string, error) {

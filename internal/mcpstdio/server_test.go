@@ -86,6 +86,8 @@ func (f *fakeBackend) ControlWebhook(by string, rotate bool) (string, error) {
 	return "http://127.0.0.1:8899/c/tok-" + by, nil
 }
 
+func (f *fakeBackend) Port() (string, error) { return "http://127.0.0.1:3315", nil }
+
 func (f *fakeBackend) AssignTask(by, to, brief, checklist string, deterministic bool) (string, error) {
 	f.assigns = append(f.assigns, [4]string{by, to, brief, checklist})
 	return "t1", nil
@@ -173,7 +175,7 @@ func TestServeFlow(t *testing.T) {
 	for _, tdef := range listR.Tools {
 		names = append(names, tdef.Name)
 	}
-	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact,schedule,unschedule,schedules,webhook,webhook_rotate,submit_task,verdict,tasks,cancel_task,log_decision" {
+	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact,schedule,unschedule,schedules,webhook,webhook_rotate,bubbles_port,submit_task,verdict,tasks,cancel_task,log_decision" {
 		t.Fatalf("tools = %v", names)
 	}
 
@@ -197,12 +199,12 @@ func TestServeFlow(t *testing.T) {
 
 func TestSpawnGated(t *testing.T) {
 	base := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: false}
-	if len(base.tools()) != 16 { // send..webhook_rotate + submit_task, verdict, tasks, cancel_task, log_decision
-		t.Fatalf("base server should advertise 16 tools, got %d", len(base.tools()))
+	if len(base.tools()) != 17 { // send..webhook_rotate + submit_task, verdict, tasks, cancel_task, log_decision
+		t.Fatalf("base server should advertise 17 tools, got %d", len(base.tools()))
 	}
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 23 { // + spawn, edit, delete, introduce, broadcast, control_webhook, assign_task
-		t.Fatalf("spawnable server should advertise 23 tools, got %d", len(s.tools()))
+	if len(s.tools()) != 24 { // + spawn, edit, delete, introduce, broadcast, control_webhook, assign_task
+		t.Fatalf("spawnable server should advertise 24 tools, got %d", len(s.tools()))
 	}
 }
 

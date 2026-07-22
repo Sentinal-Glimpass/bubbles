@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,51 +18,39 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 )
 
-// webhookPort is where the daemon's incoming-webhook server listens. It is
-// STABLE per-workspace (derived from the workspace dir) so issued webhook URLs —
-// which embed the port — survive daemon restarts, and two workspaces on one host
-// don't collide on a shared default. Override explicitly with BUBBLES_WEBHOOK_PORT.
-func webhookPort(baseDir string) int {
+// defaultWebhookPort is bubbles' fixed webhook/HTTP port. Fixed (not rotating)
+// so issued webhook URLs — which embed the port — stay valid across restarts.
+// Override with `bubbles --port N` (BUBBLES_WEBHOOK_PORT). A port collision is
+// resolved interactively at daemon start (see ensureWebhookPortFree in client.go).
+const defaultWebhookPort = 3315
+
+// webhookPort is where the daemon's incoming-webhook server listens.
+func webhookPort() int {
 	if v := os.Getenv("BUBBLES_WEBHOOK_PORT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n < 65536 {
 			return n
 		}
 	}
-	abs, err := filepath.Abs(baseDir)
-	if err != nil {
-		abs = baseDir
-	}
-	sum := sha256.Sum256([]byte(abs))
-	// Deterministic port in 20000–39999: the same workspace always lands here, so
-	// its /c/<token> URLs keep resolving across restarts.
-	return 20000 + int(binary.BigEndian.Uint16(sum[:2]))%20000
+	return defaultWebhookPort
 }
 
 // startWebhookServer binds the incoming-webhook listener and serves it. By
 // default it binds 127.0.0.1 (only local crons/scripts can hit it); `bubbles
 // --webhook-public` binds 0.0.0.0 for internet-facing use (put your firewall or
 // tunnel in front — the URL token is the auth). Returns the advertised base URL,
-// or "" if the port was unavailable (another fleet may own it), in which case
-// the webhook tools report unavailable rather than handing out dead URLs.
-func startWebhookServer(k *kernel.Kernel, baseDir string) string {
+// or "" if the port was unavailable. The port is NOT rotated — the client
+// resolves collisions before starting the daemon, so a rotated port never breaks
+// issued URLs.
+func startWebhookServer(k *kernel.Kernel) string {
 	bind, public := "127.0.0.1", false
 	if os.Getenv("BUBBLES_WEBHOOK_PUBLIC") == "1" {
 		bind, public = "0.0.0.0", true
 	}
-	port := webhookPort(baseDir)
+	port := webhookPort()
 	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", bind, port))
 	if err != nil {
-		// Stable port busy (e.g. a stale daemon still holds it) — bind :0 so this
-		// fleet still gets a working webhook server rather than disabling webhooks
-		// entirely. NOTE: a :0 port is NOT stable across restarts, so issued URLs
-		// will go stale until the stable port is free again — warn loudly.
-		ln, err = net.Listen("tcp", fmt.Sprintf("%s:0", bind))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "bubbles: webhook server disabled: %v\n", err)
-			return ""
-		}
-		port = ln.Addr().(*net.TCPAddr).Port
-		fmt.Fprintf(os.Stderr, "bubbles: WARNING stable webhook port %d busy — using %d (issued URLs will change on restart; free the stable port to keep them durable)\n", webhookPort(baseDir), port)
+		fmt.Fprintf(os.Stderr, "bubbles: webhook server disabled — port %d is busy: %v\n", port, err)
+		return ""
 	}
 	base := os.Getenv("BUBBLES_WEBHOOK_BASE") // e.g. https://ops.example.com/hooks (a reverse proxy to this port)
 	if base == "" {
@@ -82,6 +68,14 @@ func startWebhookServer(k *kernel.Kernel, baseDir string) string {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/w/", func(w http.ResponseWriter, r *http.Request) { handleWebhook(k, limiter, w, r) })
 	mux.HandleFunc("/c/", func(w http.ResponseWriter, r *http.Request) { handleControl(k, limiter, w, r) })
+	// /livez identifies this as a bubbles server (pid + workspace) so a client
+	// starting a new daemon can tell whether a port collision is another bubbles
+	// fleet (offer to kill it) or a foreign process (ask for a different port).
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
+		ws, _ := os.Getwd()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"bubbles":true,"pid":%d,"workspace":%q}`+"\n", os.Getpid(), ws)
+	})
 	srv := &http.Server{
 		Handler:           mux,
 		ReadTimeout:       10 * time.Second,

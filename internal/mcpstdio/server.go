@@ -250,6 +250,19 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolErr(msg.ID, err.Error())
 		}
 		return toolOK(msg.ID, "assigned "+id+" to "+arg("to")+" — you'll receive a '✅ task "+id+" verified' notice only after its contract passes; check tasks() for authoritative state")
+	case "bubbles_port":
+		base, err := s.B.Port()
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		if base == "" {
+			return toolOK(msg.ID, "the webhook/HTTP server is not running (no port bound)")
+		}
+		port := base
+		if i := strings.LastIndex(base, ":"); i >= 0 {
+			port = base[i+1:]
+		}
+		return toolOK(msg.ID, "bubbles HTTP base "+base+" (port "+port+")")
 	case "submit_task":
 		out, err := s.B.SubmitTask(s.Self, arg("task_id"), arg("summary"))
 		if err != nil {

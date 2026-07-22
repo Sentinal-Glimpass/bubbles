@@ -17,6 +17,7 @@ type Backend interface {
 	Webhook(by, target string) (string, error)       // incoming-webhook URL for target (self or a bubble in by's subtree)
 	WebhookRotate(by, target string) (string, error) // revoke + reissue target's URL (same authority)
 	ControlWebhook(by string, rotate bool) (string, error) // control-webhook URL that spawns/deletes bubbles as the caller
+	Port() (string, error)                                 // the daemon's HTTP/webhook base URL (embeds the current port)
 	Spawn(by, name, description, dir, model string) (string, error)
 	Edit(by, addr, name, description, model string) error
 	Delete(by, addr string) (int, error) // returns how many bubbles were removed (target + subtree)
@@ -159,6 +160,11 @@ func (s *Server) tools() []Tool {
 					"description": "Optional: which bubble's webhook to rotate — yourself (default) or a bubble you own.",
 				}},
 			},
+		},
+		{
+			Name:        "bubbles_port",
+			Description: "Get the bubbles daemon's HTTP base URL and port — the port your webhook() and control_webhook() URLs are served on. Fixed at 3315 by default (override with `bubbles --port N`); a program that needs to build or verify a webhook URL can read the live port here.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
 			Name:        "submit_task",

@@ -169,12 +169,12 @@ func runApp() {
 
 	// Incoming webhooks: per-bubble secret URLs so scripts/crons/external
 	// services can message (and wake) a bubble programmatically.
-	k.WebhookBase = startWebhookServer(k, baseDir)
+	k.WebhookBase = startWebhookServer(k)
 	// One-command public exposure: --ngrok tunnels public -> the loopback webhook
 	// port, so webhook() hands out internet-reachable URLs (daemon stays loopback).
 	// An explicit --webhook-base wins over ngrok.
 	if k.WebhookBase != "" && os.Getenv("BUBBLES_NGROK") == "1" && os.Getenv("BUBBLES_WEBHOOK_BASE") == "" {
-		if url, _, nerr := startNgrok(webhookPort(baseDir), os.Getenv("BUBBLES_NGROK_DOMAIN")); nerr == nil {
+		if url, _, nerr := startNgrok(webhookPort(), os.Getenv("BUBBLES_NGROK_DOMAIN")); nerr == nil {
 			k.WebhookBase = url
 			fmt.Fprintf(os.Stderr, "bubbles: webhooks public via ngrok at %s\n", url)
 		} else {
@@ -512,6 +512,8 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 			return ipc.Reply{OK: false, Err: err.Error()}
 		}
 		return ipc.Reply{OK: true, Addr: out}
+	case "port":
+		return ipc.Reply{OK: true, Addr: k.WebhookBase}
 	case "tasks":
 		return ipc.Reply{OK: true, Messages: k.TasksFor(from)}
 	case "cancel_task":
