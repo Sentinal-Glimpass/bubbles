@@ -37,9 +37,13 @@ func lastTo(k *Kernel, to addr.Address) (subject, body string) {
 
 func TestAssignAuthorityFollowsTree(t *testing.T) {
 	k, boss, worker := taskKernel(t)
-	// A worker cannot assign upward or to itself.
+	// A worker cannot assign upward (to its parent).
 	if _, err := k.AssignTask(worker, boss, "x", []string{"item"}, false); !errors.Is(err, ErrNotAllowed) {
 		t.Fatalf("worker->boss assign: %v", err)
+	}
+	// A bubble CAN assign a task to itself (self-imposed, still verified).
+	if _, err := k.AssignTask(worker, worker, "self task", []string{"done"}, false); err != nil {
+		t.Fatalf("worker->self assign should be allowed: %v", err)
 	}
 	// The boss can assign into its subtree; root can assign to anyone.
 	if _, err := k.AssignTask(boss, worker, "do x", []string{"tests pass"}, false); err != nil {

@@ -303,7 +303,7 @@ func (s *Server) tools() []Tool {
 		})
 		ts = append(ts, Tool{
 			Name:        "assign_task",
-			Description: "Assign a task with a kernel-enforced acceptance contract to a bubble in YOUR subtree. A checklist (one item per line) is required — an independent verifier bubble judges it. Set deterministic=true for the verifier to write+run test cases; false (default) for subjective judgement. The worker completes via submit_task; you receive a '✅ task verified' notice ONLY after the verifier approves — the worker cannot deliver an unverified 'done'.",
+			Description: "Assign a task with a kernel-enforced acceptance contract to a bubble in YOUR subtree, or to YOURSELF (self-imposed, still judged by an independent verifier). A checklist (one item per line) is required — an independent verifier bubble judges it. Set deterministic=true for the verifier to write+run test cases; false (default) for subjective judgement. The worker completes via submit_task; you receive a '✅ task verified' notice ONLY after the verifier approves — the worker cannot deliver an unverified 'done'.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

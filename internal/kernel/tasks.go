@@ -32,9 +32,14 @@ func (k *Kernel) ReapOrphanVerifiers() int {
 	return n
 }
 
-// canAssign reports whether by may assign a task to worker: root may assign to
-// anyone; otherwise worker must be in by's spawn subtree.
+// canAssign reports whether by may assign a task to worker: you may assign to
+// YOURSELF (kernel-verified work you impose on yourself, judged by an
+// independent verifier); root may assign to anyone; otherwise the worker must be
+// in by's spawn subtree.
 func (k *Kernel) canAssign(by, worker addr.Address) bool {
+	if by == worker {
+		return true // self-assignment
+	}
 	if by == addr.Root {
 		return !worker.IsRoot()
 	}
