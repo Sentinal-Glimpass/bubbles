@@ -271,8 +271,8 @@ func (k *Kernel) EnforceBudget() {
 	}
 	var live []ent
 	for a, s := range k.sessions {
-		if a == addr.Root || s == nil || !s.Alive() {
-			continue
+		if a == addr.Root || s == nil || !s.Alive() || k.isAlwaysOn(a) {
+			continue // always-on receivers are never paged out for budget
 		}
 		live = append(live, ent{a, s, k.lastUsed[a]})
 	}
@@ -355,6 +355,25 @@ func (k *Kernel) SetEnabled(a addr.Address, enabled bool) {
 // survives via --resume, so they wake on next use. Root is never touched. This
 // keeps the resident set to sessions that are actually doing something, instead
 // of holding every session hot until the memory budget forces eviction.
+// isAlwaysOn reports whether a is an always-on receiver.
+func (k *Kernel) isAlwaysOn(a addr.Address) bool {
+	if b, ok := k.Reg.Get(a); ok {
+		return b.AlwaysOn
+	}
+	return false
+}
+
+// KeepAlive launches any always-on receiver that isn't currently running, so a
+// critical receiver always has a live session ready for instant delivery.
+// Called at boot and on a periodic sweep.
+func (k *Kernel) KeepAlive() {
+	for _, a := range k.Reg.AlwaysOnAddrs() {
+		if s := k.session(a); s == nil || !s.Alive() {
+			k.EnsureAlive(a)
+		}
+	}
+}
+
 func (k *Kernel) EvictIdle() {
 	if k.IdleTimeout <= 0 {
 		return
@@ -365,6 +384,9 @@ func (k *Kernel) EvictIdle() {
 	for a, s := range k.sessions {
 		if a == addr.Root || s == nil || !s.Alive() {
 			continue
+		}
+		if k.isAlwaysOn(a) {
+			continue // always-on receivers stay hot for instant delivery
 		}
 		if s.LastActivity().Before(cutoff) {
 			idle = append(idle, a)
@@ -469,6 +491,12 @@ func (k *Kernel) fileAndNotify(from, to addr.Address, subject, body string, repl
 // deliverMessage is the shared delivery core. replyGrant is false for
 // programmatic senders (webhooks) that have no address a bubble could reply to.
 func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Address, subject, body string, replyTo int, urgent, replyGrant bool) int {
+	// An always-on receiver treats EVERY message as urgent: deliver to its (kept-
+	// hot) session immediately, never leave it pooled for the slow drain. This is
+	// what removes the route-urgency dependency for critical receivers.
+	if k.isAlwaysOn(to) {
+		urgent = true
+	}
 	id := k.Store.Append(inbox.Message{From: from, FromName: fromName, To: to, Subject: subject, Body: body, ReplyTo: replyTo})
 	if replyGrant {
 		k.Caps.AddContact(to, from) // reply grant: the recipient can always reply to whoever messaged it

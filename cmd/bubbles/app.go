@@ -213,6 +213,22 @@ func runApp() {
 	if n := k.ReapOrphanVerifiers(); n > 0 {
 		fmt.Fprintf(os.Stderr, "bubbles: reaped %d orphaned task verifier(s) from a previous run\n", n)
 	}
+	// Always-on receivers: BUBBLES_ALWAYS_ON=0.9,0.3 marks bubbles that must never
+	// miss a message (kept hot, every message urgent). Applied on top of whatever
+	// was persisted in fleet.json.
+	for _, a := range strings.Split(os.Getenv("BUBBLES_ALWAYS_ON"), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			k.Reg.SetAlwaysOn(addr.Address(a), true)
+		}
+	}
+	k.KeepAlive() // launch always-on receivers now so they're hot and ready
+	go func() {   // keep them alive: relaunch any that die
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			k.KeepAlive()
+		}
+	}()
 
 	// Start the persistence savers ONLY now that the initial load is done — see the
 	// NOTE above. Each writes on a version change, so the first tick re-saves the

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
@@ -307,5 +308,33 @@ func TestControlWebhookRequiresSpawnAndBase(t *testing.T) {
 	}
 	if _, ok := k.ResolveControlToken(strings.TrimPrefix(u1, "http://127.0.0.1:8899/c/")); ok {
 		t.Fatal("old control token still resolves after rotate")
+	}
+}
+
+func TestAlwaysOnReceiver(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	k.IdleTimeout = time.Millisecond // aggressive idle so we can prove exemption
+	a, _ := k.Spawn(addr.Root, "recv", "/tmp/recv", runner.SpawnOpts{Name: "recv"})
+	k.EnsureAlive(a)
+
+	// Not always-on: an idle sweep pages it out.
+	time.Sleep(2 * time.Millisecond)
+	k.EvictIdle()
+	if k.IsHot(a) {
+		t.Fatal("a normal idle bubble should be evicted")
+	}
+
+	// Mark always-on + keep-alive → it comes back hot and stays hot across sweeps.
+	k.Reg.SetAlwaysOn(a, true)
+	k.KeepAlive()
+	if !k.IsHot(a) {
+		t.Fatal("KeepAlive should launch an always-on receiver")
+	}
+	time.Sleep(2 * time.Millisecond)
+	k.EvictIdle()
+	if !k.IsHot(a) {
+		t.Fatal("always-on receiver must be exempt from idle eviction")
 	}
 }

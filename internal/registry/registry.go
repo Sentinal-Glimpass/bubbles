@@ -44,6 +44,13 @@ type Bubble struct {
 	// Disabled parks a bubble: it's hidden from everyone's contacts and cannot be
 	// launched (dive/message/schedule/webhook are all no-ops) until re-enabled.
 	Disabled bool
+
+	// AlwaysOn marks an always-on RECEIVER: the kernel keeps it hot (exempt from
+	// idle + budget eviction) and relaunches it if it dies, and every message to
+	// it is treated as urgent. So an inbound webhook/message is delivered to a
+	// live session immediately — no cold-wake to fail. For critical receivers
+	// (e.g. a WhatsApp/OOF channel bubble) that must never miss a message.
+	AlwaysOn bool
 }
 
 // Label is what to show for a bubble: its Name, or its legacy Persona if Name is
@@ -147,6 +154,29 @@ func (r *Registry) SetDisabled(a addr.Address, disabled bool) {
 		b.Disabled = disabled
 		r.version++
 	}
+}
+
+// SetAlwaysOn marks/unmarks a bubble as an always-on receiver.
+func (r *Registry) SetAlwaysOn(a addr.Address, on bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.AlwaysOn = on
+		r.version++
+	}
+}
+
+// AlwaysOnAddrs returns every always-on receiver (for keep-alive sweeps).
+func (r *Registry) AlwaysOnAddrs() []addr.Address {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []addr.Address
+	for _, b := range r.bubbles {
+		if b.AlwaysOn && !b.Disabled {
+			out = append(out, b.Addr)
+		}
+	}
+	return out
 }
 
 // SetWebhookToken sets (or rotates) a bubble's incoming-webhook secret.

@@ -522,6 +522,19 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.rows = m.fleetRows()
 		}
+	case "w": // toggle always-on receiver: kept hot, every message urgent (never miss mail)
+		if a := m.curAddr(); a != "" && !a.IsRoot() {
+			if b, ok := m.k.Reg.Get(a); ok {
+				m.k.Reg.SetAlwaysOn(a, !b.AlwaysOn)
+				if !b.AlwaysOn {
+					m.k.EnsureAlive(a) // just marked on -> launch it now so it's hot
+				}
+				if m.OnPersist != nil {
+					m.OnPersist()
+				}
+			}
+			m.rows = m.fleetRows()
+		}
 	case "e": // edit: a group's membership (on a header) or a bubble's settings
 		r := m.curRow()
 		if r.header {
