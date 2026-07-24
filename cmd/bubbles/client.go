@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -177,9 +178,34 @@ func waitDial(sock string, timeout time.Duration) (net.Conn, error) {
 	return nil, fmt.Errorf("timed out waiting for %s", sock)
 }
 
-// startDaemon launches the workspace daemon detached (its own session), logging
-// to .bubbles/daemon.log, so it outlives this client.
+// startDaemon launches the workspace daemon so it outlives this client AND
+// survives an SSH/VM disconnect. It prefers `systemd-run --user`, which runs the
+// daemon under the LINGERING user manager (user@.service) — a plain detached
+// child stays in the login session's cgroup scope (session-NNN.scope), which
+// systemd tears down on logout, killing the daemon and EVERY bubble under it.
+// Requires `loginctl enable-linger <user>` (checked/enabled at startup).
+// Falls back to a Setsid child where systemd-run --user is unavailable.
 func startDaemon(self, baseDir string) error {
+	if _, err := exec.LookPath("systemd-run"); err == nil && userSystemdOK() {
+		sum := sha256.Sum256([]byte(baseDir))
+		unit := fmt.Sprintf("bubbles-%x", sum[:6])
+		_ = exec.Command("systemctl", "--user", "reset-failed", unit+".service").Run() // clear a stale failed unit
+		args := []string{"--user", "--collect", "--unit=" + unit, "--working-directory=" + baseDir}
+		for _, e := range os.Environ() { // carry the operator's env (ANTHROPIC_MODEL, AWS creds, PATH, …)
+			args = append(args, "--setenv="+e)
+		}
+		args = append(args, self, "daemon")
+		var stderr bytes.Buffer
+		cmd := exec.Command("systemd-run", args...)
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			return nil // daemon now lives under user@.service — survives disconnect
+		} else {
+			fmt.Fprintf(os.Stderr, "bubbles: systemd-run --user failed (%s); the daemon will NOT survive disconnect\n", strings.TrimSpace(stderr.String()))
+		}
+	}
+	// Fallback: detached child. Works everywhere, but dies on session logout
+	// unless something else keeps the session alive.
 	logf, _ := os.OpenFile(filepath.Join(baseDir, ".bubbles", "daemon.log"),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	cmd := exec.Command(self, "daemon")
@@ -189,6 +215,23 @@ func startDaemon(self, baseDir string) error {
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	return cmd.Start()
+}
+
+// userSystemdOK reports whether a usable --user systemd manager is present, and
+// enables linger for the current user so user@.service persists across logout
+// (idempotent; needs no root on most distros for one's own linger).
+func userSystemdOK() bool {
+	if os.Getenv("XDG_RUNTIME_DIR") == "" {
+		return false // no user bus → --user won't work
+	}
+	if err := exec.Command("systemctl", "--user", "is-system-running").Run(); err != nil {
+		// degraded is fine; only a hard failure (no manager) matters
+		if _, ok := err.(*exec.ExitError); !ok {
+			return false
+		}
+	}
+	_ = exec.Command("loginctl", "enable-linger").Run() // best effort — keep the fleet alive after logout
+	return true
 }
 
 // livezInfo is the /livez response identifying a bubbles webhook server.
