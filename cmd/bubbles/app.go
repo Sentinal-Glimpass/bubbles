@@ -221,6 +221,10 @@ func runApp() {
 			k.Reg.SetAlwaysOn(addr.Address(a), true)
 		}
 	}
+	// Fleet-health manager: background upkeep (transcript trimming today; more as
+	// the product matures). Sweeps on its own cadence, off the request path.
+	go NewHealthManager(k).Run(2 * time.Minute)
+
 	k.KeepAlive() // launch always-on receivers now so they're hot and ready
 	go func() {   // keep them alive: relaunch any that die
 		t := time.NewTicker(30 * time.Second)
