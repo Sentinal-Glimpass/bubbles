@@ -213,6 +213,15 @@ func (k *Kernel) FlushHeldIfIdle() {
 	}
 }
 
+// operatorPresent reports whether the operator has typed anything recently —
+// the signal that a dive/focus is live rather than a stale focus left behind by
+// a detached terminal. Window is generous (2m) so a reading-not-typing operator
+// still counts as present.
+func (k *Kernel) operatorPresent() bool {
+	last := k.lastKey.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) < 2*time.Minute
+}
+
 // isFocused reports whether a is the currently dived-into bubble.
 func (k *Kernel) isFocused(a addr.Address) bool {
 	k.focusMu.Lock()
@@ -445,6 +454,13 @@ func (k *Kernel) setSession(a addr.Address, s runner.Session) {
 	k.smu.Lock()
 	k.sessions[a] = s
 	k.smu.Unlock()
+	// A NEW session has seen no nudges: reset the announce-dedup so the next
+	// message is typed in. Without this, a nudge announced to a since-dead
+	// session left notified[a] non-zero forever (cleared only on inbox() read),
+	// so an urgent wake would resume claude and then type NOTHING — the bubble
+	// sat silent at an empty prompt until manually opened. (Root cause of the
+	// OOF channel's multi-hour delivery stalls.)
+	k.clearNudge(a)
 }
 
 func (k *Kernel) session(a addr.Address) runner.Session {
@@ -593,8 +609,17 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 		n int
 	}
 	var jobs []job
+	operatorAway := !k.operatorPresent()
 	for _, b := range k.Reg.All() {
-		if b.Addr.IsRoot() || k.isFocused(b.Addr) {
+		if b.Addr.IsRoot() {
+			continue
+		}
+		// Skip the focused bubble only while the operator is actually AROUND
+		// (recent keystrokes). Focus can be stuck for hours after the terminal
+		// client detaches mid-dive (nothing unsets it), and skipping
+		// unconditionally disabled the recovery sweep for exactly the bubble the
+		// operator lives in — unread mail sat for hours until manual reopen.
+		if k.isFocused(b.Addr) && !operatorAway {
 			continue
 		}
 		if hotOnly && !k.IsHot(b.Addr) {

@@ -338,3 +338,84 @@ func TestAlwaysOnReceiver(t *testing.T) {
 		t.Fatal("always-on receiver must be exempt from idle eviction")
 	}
 }
+
+// TestNudgeSurvivesRelaunch reproduces the OOF-channel stall: a nudge announced
+// to a session that dies unread must NOT suppress the nudge to the relaunched
+// session. Before the fix, notified[a] survived the relaunch, so an urgent
+// webhook resumed claude and then typed NOTHING — silent until manual open.
+func TestNudgeSurvivesRelaunch(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "recv", "/tmp/recv", runner.SpawnOpts{Name: "recv"})
+
+	// First urgent webhook: launches the bubble and types a nudge.
+	if _, err := k.WebhookDeliver(a, "wa", "msg one", "hello", true); err != nil {
+		t.Fatal(err)
+	}
+	if w := fr.Session(a).Written(); !strings.Contains(w, "New message") {
+		t.Fatalf("first nudge not typed: %q", w)
+	}
+
+	// The session dies WITHOUT the bubble reading its inbox (crash/page-out).
+	k.smu.Lock()
+	delete(k.sessions, a)
+	k.smu.Unlock()
+	_ = fr.Kill(a)
+
+	// Second urgent webhook: relaunches — and MUST nudge the fresh session.
+	if _, err := k.WebhookDeliver(a, "wa", "msg two", "hello again", true); err != nil {
+		t.Fatal(err)
+	}
+	if w := fr.Session(a).Written(); !strings.Contains(w, "New message") {
+		t.Fatalf("relaunched session got NO nudge (dedup survived relaunch): %q", w)
+	}
+}
+
+// TestDrainCoversFocusedWhenOperatorAway: a stale focus (terminal detached
+// mid-dive, never unfocused) must not exempt a bubble from the recovery sweep
+// when the operator hasn't typed in a while.
+func TestDrainCoversFocusedWhenOperatorAway(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "recv", "/tmp/recv", runner.SpawnOpts{Name: "recv"})
+
+	// Simulate: operator dived into a, then the terminal detached (no keys since).
+	k.SetFocus(a)
+
+	// Mail arrives NON-urgently while a is cold with a prior SessionID → pooled.
+	k.EnsureAlive(a)
+	k.smu.Lock()
+	delete(k.sessions, a)
+	k.smu.Unlock()
+	_ = fr.Kill(a)
+	if _, err := k.WebhookDeliver(a, "wa", "pooled msg", "body", false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recovery sweep with the operator away: must page a in and nudge despite focus.
+	k.RecoverUnread(false)
+	if w := fr.Session(a).Written(); !strings.Contains(w, "unread") {
+		t.Fatalf("focused-but-abandoned bubble not recovered: %q", w)
+	}
+
+	// With the operator ACTIVELY typing, the focused bubble is still skipped.
+	b, _ := k.Spawn(addr.Root, "recv2", "/tmp/recv2", runner.SpawnOpts{Name: "recv2"})
+	k.SetFocus(b)
+	k.EnsureAlive(b)
+	k.smu.Lock()
+	delete(k.sessions, b)
+	k.smu.Unlock()
+	_ = fr.Kill(b)
+	if _, err := k.WebhookDeliver(b, "wa", "pooled msg 2", "body", false); err != nil {
+		t.Fatal(err)
+	}
+	k.NoteKeystroke() // operator present
+	k.RecoverUnread(false)
+	if s := fr.Session(b); s != nil {
+		if w := s.Written(); strings.Contains(w, "unread") {
+			t.Fatalf("focused bubble nudged while operator typing: %q", w)
+		}
+	}
+}
