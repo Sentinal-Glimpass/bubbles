@@ -107,39 +107,34 @@ type Kernel struct {
 // that stalled booting, a lost write). Well under the drain interval.
 const nudgeRecovery = 2 * time.Minute
 
-// markNudge is the FAST (send) path: it fires at most ONCE per unread backlog —
-// the first message into an empty inbox gets a notice; further messages that pile
-// up before the bubble reads are suppressed (it drains them all in one inbox()
-// call). clearNudge resets it when the bubble reads. This is what keeps a busy
-// fleet from spending a turn per message.
-func (k *Kernel) markNudge(a addr.Address, unread int) bool {
-	k.notifyMu.Lock()
-	defer k.notifyMu.Unlock()
-	if unread == 0 || k.notified[a] != 0 {
-		return false
-	}
-	k.notified[a] = unread
-	k.lastNudge[a] = time.Now()
-	return true
-}
-
-// recoverNudge is the SWEEP/drain path: it fires for a backlog that was never
-// announced (pooled, or the send happened while the bubble was cold), OR for one
-// announced so long ago that the notice was likely missed. This is the safety net
-// that guarantees a bubble with unread mail gets told — so an inbox can never grow
-// silently, and after a restart every bubble with pending mail is re-notified.
-func (k *Kernel) recoverNudge(a addr.Address, unread int) bool {
+// shouldNudge decides whether to type a "you have mail" notice now. It does NOT
+// record anything — nudged() does that, AFTER the notice is actually written, so
+// a deferred or failed write never leaves the dedup set with nothing in the
+// terminal (the bug that stalled a WARM bubble for minutes).
+//   - force (urgent): always yes. An urgent message must interrupt regardless of
+//     a prior un-read announcement — this is what makes urgent delivery prompt.
+//   - otherwise: yes if nothing is currently announced, or the last announcement
+//     is stale (the recovery safety net). This keeps a busy fleet from spending
+//     a turn per message: a burst is announced once and drained in one inbox().
+func (k *Kernel) shouldNudge(a addr.Address, unread int, force bool) bool {
 	if unread == 0 {
 		return false
 	}
-	k.notifyMu.Lock()
-	defer k.notifyMu.Unlock()
-	if k.notified[a] == 0 || time.Since(k.lastNudge[a]) >= nudgeRecovery {
-		k.notified[a] = unread
-		k.lastNudge[a] = time.Now()
+	if force {
 		return true
 	}
-	return false
+	k.notifyMu.Lock()
+	defer k.notifyMu.Unlock()
+	return k.notified[a] == 0 || time.Since(k.lastNudge[a]) >= nudgeRecovery
+}
+
+// nudged records that a notice was ACTUALLY written to the terminal. Only called
+// after a successful write, so the dedup reflects reality.
+func (k *Kernel) nudged(a addr.Address, unread int) {
+	k.notifyMu.Lock()
+	k.notified[a] = unread
+	k.lastNudge[a] = time.Now()
+	k.notifyMu.Unlock()
 }
 
 func (k *Kernel) clearNudge(a addr.Address) {
@@ -180,9 +175,10 @@ func (k *Kernel) UnsetFocus(a addr.Address) {
 		k.focused = ""
 	}
 	k.focusMu.Unlock()
-	if n := k.Store.UnreadCount(a); n > 0 && k.markNudge(a, n) {
+	if n := k.Store.UnreadCount(a); n > 0 && k.shouldNudge(a, n, false) {
 		if s := k.session(a); s != nil && s.Alive() {
 			_, _ = s.Write([]byte(formatDrain(n)))
+			k.nudged(a, n)
 		}
 	}
 }
@@ -206,9 +202,10 @@ func (k *Kernel) FlushHeldIfIdle() {
 	}
 	k.heldFlushed = true
 	k.focusMu.Unlock()
-	if n := k.Store.UnreadCount(foc); n > 0 && k.markNudge(foc, n) {
+	if n := k.Store.UnreadCount(foc); n > 0 && k.shouldNudge(foc, n, false) {
 		if s := k.session(foc); s != nil && s.Alive() {
 			_, _ = s.Write([]byte(formatDrain(n)))
+			k.nudged(foc, n)
 		}
 	}
 }
@@ -547,23 +544,24 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	// nudges (send + idle-flush + drain) don't stack up "you have mail" notices.
 	// A freshly-launched real session hasn't rendered its input yet, so typing now
 	// would sit unsubmitted; wait (off the send path) until it's booted.
-	deliver := func(s runner.Session) {
-		if s == nil || !k.markNudge(to, unread) {
+	deliver := func(s runner.Session, force bool) {
+		if s == nil || !k.shouldNudge(to, unread, force) {
 			return
 		}
 		if !s.InputReady() { // still booting / sitting on the resume menu — wait, off the send path
-			go k.deliverWhenReady(to, notify)
+			go k.deliverWhenReady(to, notify, unread)
 			return
 		}
 		_, _ = s.Write(notify)
+		k.nudged(to, unread) // record only after the write actually lands
 	}
 	if urgent {
-		deliver(k.EnsureAlive(to))
+		deliver(k.EnsureAlive(to), true) // urgent bypasses the dedup — always nudge now
 	} else if s := k.session(to); s != nil && s.Alive() {
 		k.touch(to)
-		deliver(s)
+		deliver(s, false)
 	} else if b, ok := k.Reg.Get(to); ok && b.SessionID == "" && !to.IsRoot() {
-		deliver(k.EnsureAlive(to))
+		deliver(k.EnsureAlive(to), false)
 	}
 	return id
 }
@@ -573,7 +571,7 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 // cold bubble isn't typed into a still-initializing claude (where it would sit
 // unsubmitted until something else pressed Enter). Bounded by a timeout, after
 // which it delivers anyway. Runs off the send path (in a goroutine).
-func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte) {
+func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte, unread int) {
 	deadline := time.Now().Add(35 * time.Second) // covers a long resume + the summary-menu autopilot
 	for time.Now().Before(deadline) {
 		s := k.session(a)
@@ -582,12 +580,14 @@ func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte) {
 		}
 		if s.InputReady() {
 			_, _ = s.Write(notify)
+			k.nudged(a, unread)
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	if s := k.session(a); s != nil && s.Alive() {
 		_, _ = s.Write(notify)
+		k.nudged(a, unread)
 	}
 }
 
@@ -625,7 +625,7 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 		if hotOnly && !k.IsHot(b.Addr) {
 			continue
 		}
-		if n := k.Store.UnreadCount(b.Addr); n > 0 && k.recoverNudge(b.Addr, n) {
+		if n := k.Store.UnreadCount(b.Addr); n > 0 && k.shouldNudge(b.Addr, n, false) {
 			jobs = append(jobs, job{b.Addr, n})
 		}
 	}
@@ -653,8 +653,9 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 			notify := []byte(formatDrain(j.n))
 			if s.InputReady() { // don't type into a still-booting claude
 				_, _ = s.Write(notify)
+				k.nudged(j.a, j.n)
 			} else {
-				go k.deliverWhenReady(j.a, notify)
+				go k.deliverWhenReady(j.a, notify, j.n)
 			}
 		}(j)
 	}
