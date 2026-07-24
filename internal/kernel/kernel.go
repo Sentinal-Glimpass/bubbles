@@ -107,34 +107,39 @@ type Kernel struct {
 // that stalled booting, a lost write). Well under the drain interval.
 const nudgeRecovery = 2 * time.Minute
 
-// shouldNudge decides whether to type a "you have mail" notice now. It does NOT
-// record anything — nudged() does that, AFTER the notice is actually written, so
-// a deferred or failed write never leaves the dedup set with nothing in the
-// terminal (the bug that stalled a WARM bubble for minutes).
-//   - force (urgent): always yes. An urgent message must interrupt regardless of
-//     a prior un-read announcement — this is what makes urgent delivery prompt.
-//   - otherwise: yes if nothing is currently announced, or the last announcement
-//     is stale (the recovery safety net). This keeps a busy fleet from spending
-//     a turn per message: a burst is announced once and drained in one inbox().
-func (k *Kernel) shouldNudge(a addr.Address, unread int, force bool) bool {
+// markNudge is the FAST (send) path: it fires at most ONCE per unread backlog —
+// the first message into an empty inbox gets a notice; further messages that pile
+// up before the bubble reads are suppressed (it drains them all in one inbox()
+// call). clearNudge resets it when the bubble reads. This is what keeps a busy
+// fleet from spending a turn per message.
+func (k *Kernel) markNudge(a addr.Address, unread int) bool {
+	k.notifyMu.Lock()
+	defer k.notifyMu.Unlock()
+	if unread == 0 || k.notified[a] != 0 {
+		return false
+	}
+	k.notified[a] = unread
+	k.lastNudge[a] = time.Now()
+	return true
+}
+
+// recoverNudge is the SWEEP/drain path: it fires for a backlog that was never
+// announced (pooled, or the send happened while the bubble was cold), OR for one
+// announced so long ago that the notice was likely missed. This is the safety net
+// that guarantees a bubble with unread mail gets told — so an inbox can never grow
+// silently, and after a restart every bubble with pending mail is re-notified.
+func (k *Kernel) recoverNudge(a addr.Address, unread int) bool {
 	if unread == 0 {
 		return false
 	}
-	if force {
-		return true
-	}
 	k.notifyMu.Lock()
 	defer k.notifyMu.Unlock()
-	return k.notified[a] == 0 || time.Since(k.lastNudge[a]) >= nudgeRecovery
-}
-
-// nudged records that a notice was ACTUALLY written to the terminal. Only called
-// after a successful write, so the dedup reflects reality.
-func (k *Kernel) nudged(a addr.Address, unread int) {
-	k.notifyMu.Lock()
-	k.notified[a] = unread
-	k.lastNudge[a] = time.Now()
-	k.notifyMu.Unlock()
+	if k.notified[a] == 0 || time.Since(k.lastNudge[a]) >= nudgeRecovery {
+		k.notified[a] = unread
+		k.lastNudge[a] = time.Now()
+		return true
+	}
+	return false
 }
 
 func (k *Kernel) clearNudge(a addr.Address) {
@@ -175,10 +180,9 @@ func (k *Kernel) UnsetFocus(a addr.Address) {
 		k.focused = ""
 	}
 	k.focusMu.Unlock()
-	if n := k.Store.UnreadCount(a); n > 0 && k.shouldNudge(a, n, false) {
+	if n := k.Store.UnreadCount(a); n > 0 && k.markNudge(a, n) {
 		if s := k.session(a); s != nil && s.Alive() {
 			_, _ = s.Write([]byte(formatDrain(n)))
-			k.nudged(a, n)
 		}
 	}
 }
@@ -202,21 +206,11 @@ func (k *Kernel) FlushHeldIfIdle() {
 	}
 	k.heldFlushed = true
 	k.focusMu.Unlock()
-	if n := k.Store.UnreadCount(foc); n > 0 && k.shouldNudge(foc, n, false) {
+	if n := k.Store.UnreadCount(foc); n > 0 && k.markNudge(foc, n) {
 		if s := k.session(foc); s != nil && s.Alive() {
 			_, _ = s.Write([]byte(formatDrain(n)))
-			k.nudged(foc, n)
 		}
 	}
-}
-
-// operatorPresent reports whether the operator has typed anything recently —
-// the signal that a dive/focus is live rather than a stale focus left behind by
-// a detached terminal. Window is generous (2m) so a reading-not-typing operator
-// still counts as present.
-func (k *Kernel) operatorPresent() bool {
-	last := k.lastKey.Load()
-	return last != 0 && time.Since(time.Unix(0, last)) < 2*time.Minute
 }
 
 // isFocused reports whether a is the currently dived-into bubble.
@@ -310,7 +304,6 @@ func (k *Kernel) EnforceBudget() {
 	k.smu.Unlock()
 	for _, v := range victims {
 		_ = k.runner.Kill(v) // page out
-		k.clearNudge(v)      // see EvictIdle: a dead session's nudge must not gag the next one
 	}
 }
 
@@ -330,7 +323,6 @@ func (k *Kernel) RelaunchSession(a addr.Address) {
 	delete(k.lastUsed, a)
 	k.smu.Unlock()
 	_ = k.runner.Kill(a)
-	k.clearNudge(a) // the killed session's announce state dies with it
 	k.EnsureAlive(a) // relaunch with current config (resumes the conversation)
 }
 
@@ -406,11 +398,6 @@ func (k *Kernel) EvictIdle() {
 	k.smu.Unlock()
 	for _, a := range idle {
 		_ = k.runner.Kill(a) // page out; registry + session id persist -> resumes on use
-		// The dying session may hold an un-acted-on nudge: clear the announce-dedup
-		// so the NEXT message nudges the fresh session. Without this, notified[a]
-		// stayed set forever (cleared only on inbox() read) and an urgent wake
-		// relaunched claude but typed NOTHING — the OOF channel's silent stalls.
-		k.clearNudge(a)
 	}
 }
 
@@ -544,24 +531,23 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	// nudges (send + idle-flush + drain) don't stack up "you have mail" notices.
 	// A freshly-launched real session hasn't rendered its input yet, so typing now
 	// would sit unsubmitted; wait (off the send path) until it's booted.
-	deliver := func(s runner.Session, force bool) {
-		if s == nil || !k.shouldNudge(to, unread, force) {
+	deliver := func(s runner.Session) {
+		if s == nil || !k.markNudge(to, unread) {
 			return
 		}
 		if !s.InputReady() { // still booting / sitting on the resume menu — wait, off the send path
-			go k.deliverWhenReady(to, notify, unread)
+			go k.deliverWhenReady(to, notify)
 			return
 		}
 		_, _ = s.Write(notify)
-		k.nudged(to, unread) // record only after the write actually lands
 	}
 	if urgent {
-		deliver(k.EnsureAlive(to), true) // urgent bypasses the dedup — always nudge now
+		deliver(k.EnsureAlive(to))
 	} else if s := k.session(to); s != nil && s.Alive() {
 		k.touch(to)
-		deliver(s, false)
+		deliver(s)
 	} else if b, ok := k.Reg.Get(to); ok && b.SessionID == "" && !to.IsRoot() {
-		deliver(k.EnsureAlive(to), false)
+		deliver(k.EnsureAlive(to))
 	}
 	return id
 }
@@ -571,7 +557,7 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 // cold bubble isn't typed into a still-initializing claude (where it would sit
 // unsubmitted until something else pressed Enter). Bounded by a timeout, after
 // which it delivers anyway. Runs off the send path (in a goroutine).
-func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte, unread int) {
+func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte) {
 	deadline := time.Now().Add(35 * time.Second) // covers a long resume + the summary-menu autopilot
 	for time.Now().Before(deadline) {
 		s := k.session(a)
@@ -580,14 +566,12 @@ func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte, unread int) {
 		}
 		if s.InputReady() {
 			_, _ = s.Write(notify)
-			k.nudged(a, unread)
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	if s := k.session(a); s != nil && s.Alive() {
 		_, _ = s.Write(notify)
-		k.nudged(a, unread)
 	}
 }
 
@@ -609,23 +593,14 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 		n int
 	}
 	var jobs []job
-	operatorAway := !k.operatorPresent()
 	for _, b := range k.Reg.All() {
-		if b.Addr.IsRoot() {
-			continue
-		}
-		// Skip the focused bubble only while the operator is actually AROUND
-		// (recent keystrokes). Focus can be stuck for hours after the terminal
-		// client detaches mid-dive (nothing unsets it), and skipping
-		// unconditionally disabled the recovery sweep for exactly the bubble the
-		// operator lives in — unread mail sat for hours until manual reopen.
-		if k.isFocused(b.Addr) && !operatorAway {
+		if b.Addr.IsRoot() || k.isFocused(b.Addr) {
 			continue
 		}
 		if hotOnly && !k.IsHot(b.Addr) {
 			continue
 		}
-		if n := k.Store.UnreadCount(b.Addr); n > 0 && k.shouldNudge(b.Addr, n, false) {
+		if n := k.Store.UnreadCount(b.Addr); n > 0 && k.recoverNudge(b.Addr, n) {
 			jobs = append(jobs, job{b.Addr, n})
 		}
 	}
@@ -653,9 +628,8 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 			notify := []byte(formatDrain(j.n))
 			if s.InputReady() { // don't type into a still-booting claude
 				_, _ = s.Write(notify)
-				k.nudged(j.a, j.n)
 			} else {
-				go k.deliverWhenReady(j.a, notify, j.n)
+				go k.deliverWhenReady(j.a, notify)
 			}
 		}(j)
 	}
@@ -689,7 +663,6 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	}
 	if cur != nil {
 		_ = cur.Close()
-		k.clearNudge(a) // the dead session's announce state dies with it
 	}
 	// If the session switched conversations (/resume) while it was running, resume
 	// the one it's actually on now, not the id we launched with.

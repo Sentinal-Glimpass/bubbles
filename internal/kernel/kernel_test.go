@@ -361,7 +361,7 @@ func TestDeliverWhenReady(t *testing.T) {
 		time.Sleep(120 * time.Millisecond)
 		fr.Session(a).SetOutput("claude UI painted")
 	}()
-	k.deliverWhenReady(a, []byte("📬 New message"), 1)
+	k.deliverWhenReady(a, []byte("📬 New message"))
 
 	if !strings.Contains(fr.Session(a).Written(), "New message") {
 		t.Fatalf("should deliver once the session is up, got %q", fr.Session(a).Written())
@@ -1285,8 +1285,7 @@ func TestNudgeDedup(t *testing.T) {
 	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
 	k.EnsureAlive(a) // hot
 
-	// NON-URGENT batching: a burst before the bubble reads is announced once.
-	k.Send(addr.Root, a, "m1", "", 0, false)
+	k.Send(addr.Root, a, "m1", "", 0, true)
 	first := strings.Count(fr.Session(a).Written(), "📬 New message")
 	if first != 1 {
 		t.Fatalf("first message should nudge once, got %d", first)
@@ -1296,22 +1295,16 @@ func TestNudgeDedup(t *testing.T) {
 	if strings.Count(fr.Session(a).Written(), "unread message") != 0 {
 		t.Fatal("drain re-announced an already-nudged backlog")
 	}
-	// more non-urgent messages piling up before it reads do NOT re-nudge —
-	// one notice per batch (it'll drain them all in the one inbox() call)
-	k.Send(addr.Root, a, "m2", "", 0, false)
+	// more messages piling up before it reads do NOT re-nudge — one notice per
+	// batch (it'll drain them all in the one inbox() call)
+	k.Send(addr.Root, a, "m2", "", 0, true)
 	if strings.Count(fr.Session(a).Written(), "📬 New message") != 1 {
-		t.Fatal("a second non-urgent message before reading should NOT add another notice")
-	}
-	// but an URGENT message bypasses the dedup — it always nudges immediately,
-	// even with a prior un-read backlog (this is the OOF-channel fix).
-	k.Send(addr.Root, a, "urgent!", "", 0, true)
-	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
-		t.Fatal("an urgent message must nudge even over an un-read backlog")
+		t.Fatal("a second message before reading should NOT add another notice")
 	}
 	// reading resets: the next message nudges again (fresh batch)
 	k.Inbox(a)
-	k.Send(addr.Root, a, "m3", "", 0, false)
-	if strings.Count(fr.Session(a).Written(), "📬 New message") != 3 {
+	k.Send(addr.Root, a, "m3", "", 0, true)
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
 		t.Fatal("after reading, a new message should start a fresh notice")
 	}
 }
