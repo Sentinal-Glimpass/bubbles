@@ -313,6 +313,7 @@ func (k *Kernel) EnforceBudget() {
 	k.smu.Unlock()
 	for _, v := range victims {
 		_ = k.runner.Kill(v) // page out
+		k.clearNudge(v)      // see EvictIdle: a dead session's nudge must not gag the next one
 	}
 }
 
@@ -332,6 +333,7 @@ func (k *Kernel) RelaunchSession(a addr.Address) {
 	delete(k.lastUsed, a)
 	k.smu.Unlock()
 	_ = k.runner.Kill(a)
+	k.clearNudge(a) // the killed session's announce state dies with it
 	k.EnsureAlive(a) // relaunch with current config (resumes the conversation)
 }
 
@@ -407,6 +409,11 @@ func (k *Kernel) EvictIdle() {
 	k.smu.Unlock()
 	for _, a := range idle {
 		_ = k.runner.Kill(a) // page out; registry + session id persist -> resumes on use
+		// The dying session may hold an un-acted-on nudge: clear the announce-dedup
+		// so the NEXT message nudges the fresh session. Without this, notified[a]
+		// stayed set forever (cleared only on inbox() read) and an urgent wake
+		// relaunched claude but typed NOTHING — the OOF channel's silent stalls.
+		k.clearNudge(a)
 	}
 }
 
@@ -454,13 +461,6 @@ func (k *Kernel) setSession(a addr.Address, s runner.Session) {
 	k.smu.Lock()
 	k.sessions[a] = s
 	k.smu.Unlock()
-	// A NEW session has seen no nudges: reset the announce-dedup so the next
-	// message is typed in. Without this, a nudge announced to a since-dead
-	// session left notified[a] non-zero forever (cleared only on inbox() read),
-	// so an urgent wake would resume claude and then type NOTHING — the bubble
-	// sat silent at an empty prompt until manually opened. (Root cause of the
-	// OOF channel's multi-hour delivery stalls.)
-	k.clearNudge(a)
 }
 
 func (k *Kernel) session(a addr.Address) runner.Session {
@@ -688,6 +688,7 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	}
 	if cur != nil {
 		_ = cur.Close()
+		k.clearNudge(a) // the dead session's announce state dies with it
 	}
 	// If the session switched conversations (/resume) while it was running, resume
 	// the one it's actually on now, not the id we launched with.

@@ -357,11 +357,13 @@ func TestNudgeSurvivesRelaunch(t *testing.T) {
 		t.Fatalf("first nudge not typed: %q", w)
 	}
 
-	// The session dies WITHOUT the bubble reading its inbox (crash/page-out).
-	k.smu.Lock()
-	delete(k.sessions, a)
-	k.smu.Unlock()
-	_ = fr.Kill(a)
+	// The session is paged out WITHOUT the bubble reading its inbox (idle evict).
+	k.IdleTimeout = time.Nanosecond
+	time.Sleep(time.Millisecond)
+	k.EvictIdle()
+	if k.IsHot(a) {
+		t.Fatal("bubble should be paged out")
+	}
 
 	// Second urgent webhook: relaunches — and MUST nudge the fresh session.
 	if _, err := k.WebhookDeliver(a, "wa", "msg two", "hello again", true); err != nil {
@@ -386,10 +388,9 @@ func TestDrainCoversFocusedWhenOperatorAway(t *testing.T) {
 
 	// Mail arrives NON-urgently while a is cold with a prior SessionID → pooled.
 	k.EnsureAlive(a)
-	k.smu.Lock()
-	delete(k.sessions, a)
-	k.smu.Unlock()
-	_ = fr.Kill(a)
+	k.IdleTimeout = time.Nanosecond
+	time.Sleep(time.Millisecond)
+	k.EvictIdle()
 	if _, err := k.WebhookDeliver(a, "wa", "pooled msg", "body", false); err != nil {
 		t.Fatal(err)
 	}
@@ -404,10 +405,8 @@ func TestDrainCoversFocusedWhenOperatorAway(t *testing.T) {
 	b, _ := k.Spawn(addr.Root, "recv2", "/tmp/recv2", runner.SpawnOpts{Name: "recv2"})
 	k.SetFocus(b)
 	k.EnsureAlive(b)
-	k.smu.Lock()
-	delete(k.sessions, b)
-	k.smu.Unlock()
-	_ = fr.Kill(b)
+	time.Sleep(time.Millisecond)
+	k.EvictIdle()
 	if _, err := k.WebhookDeliver(b, "wa", "pooled msg 2", "body", false); err != nil {
 		t.Fatal(err)
 	}
