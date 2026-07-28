@@ -379,6 +379,14 @@ func deliver(msg Message, st State, wake bool) Decision {
 // Notifiable is the caller's NotifiableCount, never its UnreadCount: a backlog
 // of nothing but mute-suppressed traffic must never wake anything, or the
 // sweep pays exactly the prompt-cache rewarm that muting exists to prevent.
+//
+// Only Notifiable and Announced are consulted; Hot and AlwaysOn are not, and
+// the returned Decision carries no Wake. Reachability is the SWEEP's question,
+// not the policy's: the caller already splits hot-only from full passes and
+// knows which of the two it is running, so a Wake here would either duplicate
+// that split or silently contradict it. The mute veto that actually prevents a
+// wake has already been applied at Decide time — a muted message is not
+// notifiable, so it never reaches this function's Notifiable count at all.
 func (p *Policy) Recover(to addr.Address, st State, stale bool, now time.Time) Decision {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -393,11 +401,8 @@ func (p *Policy) Recover(to addr.Address, st State, stale bool, now time.Time) D
 		return Decision{Action: Suppress, Capped: true}
 	}
 	return Decision{
-		Action: Notice,
-		Text:   RenderDrain(st.Notifiable),
-		// A backlog that has waited for a sweep is worth a page-in; the caller
-		// still decides whether this pass wakes cold bubbles at all.
-		Wake:     true,
+		Action:   Notice,
+		Text:     RenderDrain(st.Notifiable),
 		Announce: st.Notifiable,
 	}
 }

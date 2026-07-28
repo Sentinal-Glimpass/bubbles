@@ -501,3 +501,65 @@ func TestRecoverySkipsTheLiveOperator(t *testing.T) {
 		t.Fatalf("the sweep must not type into the bubble the operator is live in, got %q", fr.Session(a).Written())
 	}
 }
+
+// TestRecoveryCoversFocusAbandonedAfterTyping is the ACTUAL 3cfb0d9 scenario,
+// and the only test that exercises the elapsed-window branch of
+// operatorPresent. TestRecoveryCoversStaleFocus above uses a focus that never
+// saw a keystroke (lastKey == 0), which a naive `return last != 0` would also
+// satisfy — so it does not pin the behaviour that commit exists for. The
+// production case is the operator who typed and then walked away, or whose
+// terminal detached mid-dive: lastKey is non-zero and nothing will ever clear
+// the focus, so only the elapsed window keeps recovery alive for that bubble.
+func TestRecoveryCoversFocusAbandonedAfterTyping(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)
+	k.SetFocus(a)
+	// The operator typed — and then left. Nothing unsets focus.
+	k.lastKey.Store(time.Now().Add(-5 * time.Minute).UnixNano())
+	if k.operatorPresent() {
+		t.Fatal("precondition: a keystroke 5m old must not count as present")
+	}
+
+	k.Store.Append(inbox.Message{From: addr.Root, To: a, Subject: "pending"})
+	k.RecoverUnread(true)
+	if !strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatalf("a focus abandoned after typing must not exempt the bubble from recovery -- "+
+			"this is the multi-hour stall of 3cfb0d9; got %q", fr.Session(a).Written())
+	}
+}
+
+// TestSweepUnclaimsWhenTheBubbleCannotBeReached: the sweep claims the
+// announcement BEFORE it writes (that is what makes it race-safe against the
+// send path), so a claim that turns out to be unwritable must be given back.
+// Otherwise the backlog is recorded as advertised when no notice exists and the
+// bubble goes silent until the staleness sweep — the stall direction. This is
+// the cold-sweep path specifically, where EnsureAlive returns nil.
+func TestSweepUnclaimsWhenTheBubbleCannotBeReached(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a) // give it a SessionID so the send stays pooled
+	fr.Session(a).Die()
+	k.Store.Append(inbox.Message{From: addr.Root, To: a, Subject: "pending"})
+	k.SetEnabled(a, false) // now nothing can launch it: EnsureAlive returns nil
+
+	k.DrainInboxes()
+	if k.IsHot(a) {
+		t.Fatal("precondition: a disabled bubble must not launch")
+	}
+	if got := k.announced(a); got != 0 {
+		t.Fatalf("announced = %d, want 0 -- a claim whose notice never landed must be given back", got)
+	}
+
+	// Proof that the give-back matters: once it is reachable again, the very
+	// next sweep announces, with no wait for the 2m staleness net.
+	k.SetEnabled(a, true)
+	k.DrainInboxes()
+	if !strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatalf("the backlog must announce as soon as the bubble is reachable, got %q", fr.Session(a).Written())
+	}
+}

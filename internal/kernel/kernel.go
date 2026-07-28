@@ -139,6 +139,13 @@ func (k *Kernel) SetFocus(a addr.Address) {
 func (k *Kernel) NoteKeystroke() { k.lastKey.Store(time.Now().UnixNano()) }
 
 // typingActive reports whether the operator has typed within TypingWindow.
+//
+// This is the SHORT window (10s by default, configurable) and it answers a
+// mechanical question: would typing a line in right now submit the operator's
+// half-written prompt? It must stay short, because everything it gates is held
+// mail waiting to be delivered the moment the operator pauses. Do not conflate
+// it with operatorPresent, which answers a much slower question over the same
+// keystroke clock — see the comment there.
 func (k *Kernel) typingActive() bool {
 	w := k.TypingWindow
 	if w <= 0 {
@@ -189,13 +196,40 @@ func (k *Kernel) FlushHeldIfIdle() {
 	}
 }
 
+// presenceWindow is how long after a keystroke a dive still counts as attended.
+// It is deliberately NOT TypingWindow and deliberately not configurable.
+//
+// The two windows answer different questions over the same keystroke clock, and
+// collapsing them breaks whichever one is sacrificed:
+//
+//   - typingActive (10s, configurable): "would a write land in a half-typed
+//     line?" Short by necessity — held mail is waiting on it, so a long window
+//     means mail sits idle while the operator merely reads.
+//   - presenceWindow (2m, fixed): "is this focus a live human, or a focus left
+//     behind by a terminal that detached mid-dive?" Generous by necessity — an
+//     operator reading output for a minute is still present, and interrupting
+//     them is the cost of getting this wrong in one direction. Getting it wrong
+//     in the other direction cost far more (3cfb0d9): focus is never unset on a
+//     detached client, so a bubble could sit exempt from recovery for hours.
+//
+// It is fixed rather than derived from TypingWindow because TypingWindow is
+// tuned for input safety; scaling presence with it would let an operator who
+// shortened their typing window silently disable recovery-skip, or one who
+// lengthened it re-create the stale-focus stall.
+const presenceWindow = 2 * time.Minute
+
 // operatorPresent reports whether the operator has typed anything recently —
 // the signal that a dive/focus is live rather than a stale focus left behind by
-// a detached terminal. The window is generous (2m) so an operator who is
-// reading rather than typing still counts as present.
+// a detached terminal.
+//
+// Both halves of the condition are load-bearing. last == 0 is a focus that has
+// never seen a keystroke (SetFocus zeroes it), and the elapsed-window branch is
+// the one 3cfb0d9 exists for: an operator who DID type and then walked away.
+// That is the production case — a live-looking focus that nothing will ever
+// clear — and it is the reason this cannot be a plain non-zero test.
 func (k *Kernel) operatorPresent() bool {
 	last := k.lastKey.Load()
-	return last != 0 && time.Since(time.Unix(0, last)) < 2*time.Minute
+	return last != 0 && time.Since(time.Unix(0, last)) < presenceWindow
 }
 
 // isFocused reports whether a is the currently dived-into bubble.
@@ -656,7 +690,7 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 		// the policy consulted and the announcement claimed in a single critical
 		// section shared with deliverMessage, so a send racing this sweep cannot
 		// produce a second notice for the same backlog.
-		if d, prev, ok := k.decideRecovery(b.Addr, hot); ok {
+		if d, prev, ok := k.decideRecovery(b.Addr); ok {
 			jobs = append(jobs, job{b.Addr, d, prev})
 		}
 	}
@@ -675,7 +709,7 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 			var s runner.Session
 			if hotOnly {
 				s = k.session(j.a)
-			} else if j.d.Wake {
+			} else {
 				s = k.EnsureAlive(j.a) // page a cold bubble in so it has a terminal to notify
 			}
 			// writeNotice handles the still-booting case (deferred write) and

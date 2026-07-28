@@ -142,7 +142,10 @@ const nudgeRecovery = 2 * time.Minute
 // inbox() still shows them), so keying the sweep off it paged in exactly the
 // bubbles muting exists to leave alone, paying the full prompt-cache rewarm for
 // traffic already declared to be noise.
-func (k *Kernel) decideRecovery(a addr.Address, hot bool) (d notify.Decision, prev int, proceed bool) {
+// State carries only Notifiable and Announced: Recover consults nothing else,
+// because whether this pass may page a cold bubble in is the sweep's own
+// question (hotOnly) and is answered by RecoverUnread.
+func (k *Kernel) decideRecovery(a addr.Address) (d notify.Decision, prev int, proceed bool) {
 	now := time.Now()
 	k.notifyMu.Lock()
 	prev = k.notified[a]
@@ -151,8 +154,6 @@ func (k *Kernel) decideRecovery(a addr.Address, hot bool) (d notify.Decision, pr
 	d = k.Notify.Recover(a, notify.State{
 		Notifiable: n,
 		Announced:  prev,
-		Hot:        hot,
-		AlwaysOn:   k.isAlwaysOn(a),
 	}, last.IsZero() || now.Sub(last) >= nudgeRecovery, now)
 	if d.Action != notify.Suppress {
 		// Claimed under the same lock as the read, so a concurrent send-path
