@@ -95,14 +95,17 @@ func TestCeilingOverridesPolicy(t *testing.T) {
 	p := NewPolicy(func(addr.Address) *RuleSet { return NewRuleSet() }, NewCeiling(6, 6))
 	now := time.Unix(0, 0)
 	written := 0
+	// Urgent, so every message bypasses coalescing and the ceiling is the
+	// only thing standing between 178 arrivals and 178 writes -- which is
+	// exactly the 632fe95 shape.
 	for i := 1; i <= 178; i++ {
-		d := p.Decide("0.1", Message{ID: i, Source: "0.2", Subject: "s"}, State{Notifiable: i}, now)
+		d := p.Decide("0.1", Message{ID: i, Source: "0.2", Subject: "s", Urgent: true}, State{Notifiable: i}, now)
 		if d.Action != Suppress {
 			written++
 		}
 	}
-	if written > DefaultCeilingBurst {
-		t.Fatalf("written = %d, exceeds INV-1 ceiling %d", written, DefaultCeilingBurst)
+	if written != DefaultCeilingBurst {
+		t.Fatalf("written = %d, want exactly the INV-1 ceiling %d", written, DefaultCeilingBurst)
 	}
 }
 
@@ -123,5 +126,69 @@ func TestAnnouncedBacklogDoesNotReannounce(t *testing.T) {
 	d := p.Decide("0.1", Message{ID: 1, Source: "0.2", Subject: "s"}, State{Notifiable: 3, Announced: 3}, now)
 	if d.Action != Suppress {
 		t.Fatalf("Action = %v, want Suppress -- re-announcing is the 632fe95 flood direction", d.Action)
+	}
+}
+
+func TestPendingIsEmptyWithNoCoalesceWindow(t *testing.T) {
+	p := NewPolicy(func(addr.Address) *RuleSet { return NewRuleSet() }, NewCeiling(6, 6))
+	if _, ok := p.Pending("0.1", time.Unix(0, 0)); ok {
+		t.Fatal("Pending must report nothing for a bubble that never received a message")
+	}
+	// A window that is open but has swallowed nothing is also nothing to say.
+	p.Decide("0.1", Message{ID: 1, Source: "0.2", Subject: "s"}, State{Notifiable: 1}, time.Unix(0, 0))
+	if _, ok := p.Pending("0.1", time.Unix(0, 0).Add(2*CoalesceWindow)); ok {
+		t.Fatal("Pending must report nothing when the window buffered no followers")
+	}
+}
+
+func TestPendingDrainsBufferedIDsAfterWindowExpiry(t *testing.T) {
+	p := NewPolicy(func(addr.Address) *RuleSet { return NewRuleSet() }, NewCeiling(6, 6))
+	now := time.Unix(0, 0)
+
+	// Message 1 delivers and opens the window; 2..5 are buffered inside it.
+	p.Decide("0.1", Message{ID: 1, Source: "0.2", Subject: "s"}, State{Notifiable: 1}, now)
+	for i := 2; i <= 5; i++ {
+		d := p.Decide("0.1", Message{ID: i, Source: "0.2", Subject: "s"}, State{Notifiable: i}, now.Add(time.Second))
+		if d.Action != Suppress {
+			t.Fatalf("message %d: Action = %v, want Suppress inside the coalesce window", i, d.Action)
+		}
+	}
+	if _, ok := p.Pending("0.1", now.Add(time.Second)); ok {
+		t.Fatal("Pending must not drain a window that is still open")
+	}
+
+	d, ok := p.Pending("0.1", now.Add(2*CoalesceWindow))
+	if !ok {
+		t.Fatal("Pending must drain an expired window that buffered followers")
+	}
+	if d.Action == Suppress {
+		t.Fatalf("Action = %v, want a written action", d.Action)
+	}
+	if len(d.IDs) != 4 {
+		t.Fatalf("IDs = %v, want the 4 buffered followers", d.IDs)
+	}
+	for i, id := range d.IDs {
+		if id != i+2 {
+			t.Fatalf("IDs = %v, want [2 3 4 5]", d.IDs)
+		}
+	}
+	// The buffer is consumed: a second drain has nothing left.
+	if _, ok := p.Pending("0.1", now.Add(2*CoalesceWindow)); ok {
+		t.Fatal("Pending must not re-emit an already-drained batch")
+	}
+}
+
+func TestPendingRespectsCeiling(t *testing.T) {
+	// Burst of 1: the opening message spends the only token, so the drain
+	// must be capped rather than treated as a ceiling bypass.
+	p := NewPolicy(func(addr.Address) *RuleSet { return NewRuleSet() }, NewCeiling(0, 1))
+	now := time.Unix(0, 0)
+
+	p.Decide("0.1", Message{ID: 1, Source: "0.2", Subject: "s"}, State{Notifiable: 1}, now)
+	p.Decide("0.1", Message{ID: 2, Source: "0.2", Subject: "s"}, State{Notifiable: 2}, now.Add(time.Second))
+	p.Decide("0.1", Message{ID: 3, Source: "0.2", Subject: "s"}, State{Notifiable: 3}, now.Add(time.Second))
+
+	if _, ok := p.Pending("0.1", now.Add(2*CoalesceWindow)); ok {
+		t.Fatal("Pending must not write past the INV-1 ceiling")
 	}
 }

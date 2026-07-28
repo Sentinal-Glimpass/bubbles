@@ -82,6 +82,7 @@ type Decision struct {
 	Action    Action
 	Text      string // rendered, PTY-safe, single line; empty unless Notice/Inline/Rollup
 	MarkRead  []int  // message ids consumed by an Inline delivery
+	IDs       []int  // message ids this decision covers (a drained coalescing batch)
 	MarkMuted bool   // caller must call Store.SetMuted for this message
 	Wake      bool   // caller may page in a cold bubble (false => never wake)
 	Rule      string // id of the matching mute rule, "" if none
@@ -104,16 +105,17 @@ type coalesceBuf struct {
 	count   int
 	ids     []int
 	last    Message
-	single  bool // still exactly one message, so it can be rendered as itself
-	backlog int  // recipient's Notifiable at the time of the last buffered message
+	backlog int // recipient's Notifiable at the time of the last buffered message
 }
 
 // bubbleState is all per-recipient policy state. It is only ever touched
-// under Policy.mu.
+// under Policy.mu. Note that it deliberately holds no announced counter: the
+// store-derived State.Announced is the single source of truth for INV-2, and
+// a policy-local copy could drift above it and reintroduce the silent-stall
+// half of the 632fe95 oscillation.
 type bubbleState struct {
-	windows   map[string]*muteWindow // by rule id
-	coalesce  *coalesceBuf
-	announced int // high-water mark of backlog this policy has announced
+	windows  map[string]*muteWindow // by rule id
+	coalesce *coalesceBuf
 }
 
 // Policy decides, for each inbound message, whether it earns a notification.
@@ -157,11 +159,16 @@ func (p *Policy) bubble(to addr.Address) *bubbleState {
 //
 // Order is load-bearing:
 //
-//	1. mute   — evaluated first so it can veto the wake even for urgent mail
-//	2. INV-2  — never re-announce a backlog that was already announced
-//	3. INV-1  — the flood ceiling, which nothing above may bypass
-//	4. coalesce
-//	5. inline vs notice
+//  1. mute     — evaluated first so it can veto the wake even for urgent mail
+//  2. INV-2    — never re-announce a backlog that was already announced
+//  3. coalesce — batch non-urgent followers; urgent bypasses
+//  4. INV-1    — the flood ceiling, the last gate before any write
+//  5. inline vs notice
+//
+// The ceiling is deliberately last: INV-1 caps notices *written*, so spending
+// a token on a message that coalescing then suppresses would drain the bucket
+// on nothing and cap a later genuine notice. The one exception is the mute
+// rollup below, which is itself a write and so spends its token where it is.
 func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) Decision {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -193,7 +200,6 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 				if !p.ceiling.Allow(to, now) {
 					return Decision{Action: Suppress, Rule: r.ID}
 				}
-				b.announced = st.Notifiable
 				return Decision{
 					Action: Rollup,
 					Text:   renderRollup(n, subj, src, since),
@@ -204,35 +210,20 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 		}
 	}
 
-	// 2. INV-2 dedup. Announced comes from the store, so this holds across a
-	// relaunch: an unannounced backlog is still announced (no silent stall),
-	// and an announced one is never re-announced (the 632fe95 flood
-	// direction). The local high-water mark only ever rises when this policy
-	// actually emitted something, so taking the max is strictly safer than
-	// trusting a stale caller value.
-	announced := st.Announced
-	if b.announced > announced {
-		announced = b.announced
-	}
-	if st.Notifiable <= announced {
+	// 2. INV-2 dedup, against the store-derived count only. This holds across
+	// a relaunch: an unannounced backlog is still announced (no silent
+	// stall), and an announced one is never re-announced (the 632fe95 flood
+	// direction).
+	if st.Notifiable <= st.Announced {
 		return Decision{Action: Suppress}
 	}
 
-	// 3. INV-1 ceiling. Nothing above may bypass it; the caller records this
-	// as NoticesCapped.
-	if !p.ceiling.Allow(to, now) {
-		return Decision{Action: Suppress}
-	}
-
-	wake := !st.Hot && (msg.Urgent || st.AlwaysOn)
-
-	// 4. Coalesce. Urgent mail bypasses entirely. A first message delivers
+	// 3. Coalesce. Urgent mail bypasses entirely. A first message delivers
 	// and opens the window; its non-urgent followers inside the window are
 	// buffered and drained by Pending.
 	if !msg.Urgent {
 		if c := b.coalesce; c != nil && now.Sub(c.opened) < CoalesceWindow {
 			c.count++
-			c.single = false
 			if len(c.ids) < maxCoalesceIDs {
 				c.ids = append(c.ids, msg.ID)
 			}
@@ -243,8 +234,13 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 		b.coalesce = &coalesceBuf{opened: now}
 	}
 
-	b.announced = st.Notifiable
-	return deliver(msg, st, wake)
+	// 4. INV-1 ceiling, last gate before the write. Nothing above may bypass
+	// it; the caller records this as NoticesCapped.
+	if !p.ceiling.Allow(to, now) {
+		return Decision{Action: Suppress}
+	}
+
+	return deliver(msg, st, !st.Hot && (msg.Urgent || st.AlwaysOn))
 }
 
 // deliver renders the terminal Inline-or-Notice choice for a message that has
@@ -293,24 +289,27 @@ func (p *Policy) Pending(to addr.Address, now time.Time) (Decision, bool) {
 		return Decision{}, false
 	}
 
-	b.announced = c.backlog
 	if c.count == 1 {
-		return deliver(c.last, State{Notifiable: c.backlog, Hot: true}, false), true
+		d := deliver(c.last, State{Notifiable: c.backlog, Hot: true}, false)
+		d.IDs = c.ids
+		return d, true
 	}
 	return Decision{
 		Action: Rollup,
 		Text:   renderRollup(c.count, c.last.Subject, c.last.Source, c.opened),
+		IDs:    c.ids,
 	}, true
 }
 
-// Clear resets to's announced high-water mark, and is called when the bubble
-// reads its inbox: once the backlog is drained, the next arrival deserves a
-// fresh announcement.
+// Clear drops to's coalescing buffer and mute windows, and is called when the
+// bubble reads its inbox: a drained backlog makes a pending batch summary
+// stale, and the next arrival deserves a fresh announcement. INV-2 needs no
+// reset here because it reads the store's count, not anything local.
 func (p *Policy) Clear(to addr.Address) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if b := p.st[to]; b != nil {
-		b.announced = 0
 		b.coalesce = nil
+		b.windows = map[string]*muteWindow{}
 	}
 }
