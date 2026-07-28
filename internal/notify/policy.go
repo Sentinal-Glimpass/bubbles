@@ -89,7 +89,7 @@ func (m Message) label() string {
 // announced exactly once.
 type State struct {
 	Notifiable int  // Store.NotifiableCount(to)
-	Announced  int  // backlog size already announced (INV-2)
+	Announced  int  // announced-and-unconsumed backlog; > 0 means a notice is outstanding (INV-2)
 	Hot        bool // recipient has a live session
 	// AlwaysOn marks a bubble that is contracted to stay reachable, and so
 	// may be woken for non-urgent mail. The kernel populates it from the
@@ -280,11 +280,24 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 		}
 	}
 
-	// 2. INV-2 dedup, against the store-derived count only. This holds across
-	// a relaunch: an unannounced backlog is still announced (no silent
-	// stall), and an announced one is never re-announced (the 632fe95 flood
-	// direction).
-	if st.Notifiable <= st.Announced {
+	// 2. INV-2 dedup. One notice per backlog: while ANY announcement is
+	// outstanding and unconsumed, further arrivals are silent, because the
+	// recipient will drain them all in the one inbox() call the standing
+	// notice already asked for.
+	//
+	// This is a state test, not a growth test. Comparing counts
+	// (Notifiable > Announced -> announce) would re-announce every time the
+	// backlog grew, which costs the recipient a turn per message and is the
+	// exact cost regression this phase exists to remove -- a 1/minute trickle
+	// would spend a turn a minute forever. INV-1 and coalescing bound the
+	// rate but cannot fix the shape.
+	//
+	// It holds across a relaunch: an unannounced backlog is still announced
+	// (no silent stall), and an announced one is never re-announced (the
+	// 632fe95 flood direction). It does not stall a consumed backlog either,
+	// because Announce reports what REMAINS after a delivery -- an inlined
+	// message drops the level back to 0 and the next arrival is announced.
+	if st.Announced > 0 {
 		return Decision{Action: Suppress}
 	}
 

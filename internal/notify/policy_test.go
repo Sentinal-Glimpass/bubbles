@@ -287,3 +287,73 @@ func TestCappedMessageDoesNotOpenCoalesceWindow(t *testing.T) {
 		t.Fatal("a capped message must not open a coalescing window that swallows its successors")
 	}
 }
+
+// TestBacklogCostsOneNoticeRegardlessOfDepth pins the cost contract this whole
+// phase exists to protect: a recipient's attention is spent per NOTICE, not
+// per message, so a backlog that nobody has read yet must cost exactly one
+// notice no matter how many messages pile into it. The recipient drains them
+// all in the single inbox() call the standing notice already asked for.
+//
+// This is the regression gate on INV-2 being a STATE test rather than a growth
+// test. Comparing counts (Notifiable > Announced -> announce) also passes a
+// two-message check, which is why this sweeps depths: it fails on the second
+// message and every one after, so the notice count tracks N instead of staying
+// at 1 -- a turn spent per message, forever, for a slow trickle.
+func TestBacklogCostsOneNoticeRegardlessOfDepth(t *testing.T) {
+	big := strings.Repeat("x", InlineMaxBytes+1) // too large to inline, so nothing is consumed
+
+	for _, depth := range []int{1, 2, 5, 50} {
+		p := NewPolicy(func(addr.Address) *RuleSet { return nil }, NewCeiling(DefaultCeilingPerMinute, DefaultCeilingBurst))
+		now := time.Unix(0, 0)
+
+		notices, announced := 0, 0
+		for i := 1; i <= depth; i++ {
+			// Urgent so coalescing is bypassed entirely: this must hold on the
+			// message-by-message path, not only because a batcher hid it.
+			d := p.Decide("0.1",
+				Message{ID: i, Source: "0.2", Subject: "s", Body: big, Urgent: true},
+				State{Notifiable: i, Announced: announced},
+				// Spread well past CoalesceWindow so no window is ever open,
+				// and past the ceiling's refill so INV-1 is not what is doing
+				// the suppressing -- otherwise this would pass even if INV-2
+				// were removed outright.
+				now.Add(time.Duration(i)*time.Minute))
+			if d.Action == Suppress {
+				continue
+			}
+			notices++
+			announced = d.Announce
+		}
+
+		if notices != 1 {
+			t.Fatalf("a backlog of %d unread messages cost %d notices, want exactly 1 -- "+
+				"the recipient drains them all in one inbox() call, so anything above 1 "+
+				"is a turn spent per message", depth, notices)
+		}
+	}
+}
+
+// TestReadingResetsTheAnnouncedBacklog: once the recipient has drained its
+// inbox the caller reports Announced=0, and the next arrival earns a fresh
+// notice. Without this the one-notice-per-backlog rule above would be a
+// permanent gag rather than a per-batch one.
+func TestReadingResetsTheAnnouncedBacklog(t *testing.T) {
+	p := NewPolicy(func(addr.Address) *RuleSet { return nil }, NewCeiling(DefaultCeilingPerMinute, DefaultCeilingBurst))
+	now := time.Unix(0, 0)
+	big := strings.Repeat("x", InlineMaxBytes+1)
+
+	d := p.Decide("0.1", Message{ID: 1, Source: "0.2", Subject: "s", Body: big, Urgent: true}, State{Notifiable: 1, Announced: 0}, now)
+	if d.Action != Notice {
+		t.Fatalf("first message = %v, want Notice", d.Action)
+	}
+	if d.Announce != 1 {
+		t.Fatalf("Announce = %d, want 1 (one message announced and unconsumed)", d.Announce)
+	}
+	if s := p.Decide("0.1", Message{ID: 2, Source: "0.2", Subject: "s", Body: big, Urgent: true}, State{Notifiable: 2, Announced: d.Announce}, now.Add(time.Minute)); s.Action != Suppress {
+		t.Fatalf("second message = %v, want Suppress while a notice is outstanding", s.Action)
+	}
+	// The recipient reads: the caller's announced level goes to 0.
+	if r := p.Decide("0.1", Message{ID: 3, Source: "0.2", Subject: "s", Body: big, Urgent: true}, State{Notifiable: 1, Announced: 0}, now.Add(2*time.Minute)); r.Action != Notice {
+		t.Fatalf("after reading, a new message = %v, want Notice", r.Action)
+	}
+}

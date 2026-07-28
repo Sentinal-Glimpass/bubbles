@@ -1305,25 +1305,23 @@ func TestNudgeDedup(t *testing.T) {
 	if strings.Count(fr.Session(a).Written(), "unread message") != 0 {
 		t.Fatal("drain re-announced an already-nudged backlog")
 	}
-	// A second message GROWS the backlog past the announced level, so it IS
-	// announced again: the standing notice says "1 unread" and is now stale.
-	// The dedup guarantee is that an UNCHANGED backlog is never re-announced
-	// (the drain above) — not that a growing one stays silent, which is the
-	// silent-stall half of the 632fe95 oscillation. The flood half is bounded
-	// by INV-1, asserted in TestNoticeCountNeverExceedsCeiling.
+	// more messages piling up before it reads do NOT re-nudge — one notice per
+	// batch (it'll drain them all in the one inbox() call)
 	k.Send(addr.Root, a, "m2", long, 0, true)
-	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
-		t.Fatal("a second message grows the backlog past the announced level and must re-announce")
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 1 {
+		t.Fatal("a second message before reading should NOT add another notice")
 	}
-	// ...but exactly once: the grown backlog must not then stack notices.
+	// ...and a drain on top of that still adds nothing (added: the original
+	// test never checked that the suppressed second message could not be
+	// resurrected by the sweep).
 	k.DrainInboxes()
-	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
-		t.Fatal("a drain after the re-announcement must not stack another notice")
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 1 {
+		t.Fatal("a drain after a suppressed second message must not stack a notice")
 	}
 	// reading resets: the next message nudges again (fresh batch)
 	k.Inbox(a)
 	k.Send(addr.Root, a, "m3", long, 0, true)
-	if strings.Count(fr.Session(a).Written(), "📬 New message") != 3 {
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
 		t.Fatal("after reading, a new message should start a fresh notice")
 	}
 }
