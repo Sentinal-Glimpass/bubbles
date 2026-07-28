@@ -386,6 +386,32 @@ func runSampler(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program]) {
 			rows = rows[:5]
 		}
 		prog.Send(tui.UsageMsg{TotalMem: totalMem, TotalCPU: totalCPU, Hot: len(samples), Top: rows})
+		prog.Send(fleetHealthSnapshot(k, len(samples)))
+	}
+}
+
+// fleetHealthSnapshot summarizes the costmeter and fleet state into the
+// dashboard's FLEET block. Reuses the resource sampler's own hot count so it
+// doesn't need a second pass over live sessions.
+func fleetHealthSnapshot(k *kernel.Kernel, hot int) tui.FleetHealthMsg {
+	all := k.Reg.All()
+	var suppressed, capped, inlined int64
+	for _, c := range k.Cost.Snapshot() {
+		suppressed += c.NoticesSuppressed
+		capped += c.NoticesCapped
+		inlined += c.DeliveriesInline
+	}
+	backlog := 0
+	for _, b := range all {
+		backlog += k.Store.UnreadCount(b.Addr)
+	}
+	return tui.FleetHealthMsg{
+		Hot:        hot,
+		Total:      len(all),
+		Suppressed: int(suppressed),
+		Capped:     int(capped),
+		Inlined:    int(inlined),
+		Backlog:    backlog,
 	}
 }
 

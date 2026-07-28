@@ -35,3 +35,23 @@ func TestOverlayKeepsPanelTopRight(t *testing.T) {
 		t.Fatalf("overlaid row wider than terminal (%d > 40): %q", w, nfirst)
 	}
 }
+
+func TestFleetHealthRowsOmitUnavailableMetrics(t *testing.T) {
+	rows := fleetHealthRows(FleetHealth{Hot: 2, Total: 5, Suppressed: 40, Capped: 0, Inlined: 12, Backlog: 3})
+	joined := strings.Join(rows, "\n")
+	if !strings.Contains(joined, "40") {
+		t.Fatal("suppressed count must be shown")
+	}
+	if strings.Contains(joined, "stuck") {
+		t.Fatal("Phase 4 metrics must be omitted, not rendered as zero")
+	}
+}
+
+func TestUsagePanelIncludesFleetHealth(t *testing.T) {
+	m := Model{}
+	m.health = FleetHealth{Hot: 1, Total: 2, Suppressed: 7}
+	joined := strings.Join(usagePanel(m), "\n")
+	if !strings.Contains(joined, "FLEET") {
+		t.Fatal("usagePanel must include the fleet health block")
+	}
+}

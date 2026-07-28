@@ -72,6 +72,22 @@ type Headroom struct {
 // HeadroomMsg is pushed by the headroom stats poller into the dashboard panel.
 type HeadroomMsg Headroom
 
+// FleetHealth is the cost/health summary shown in the dashboard's FLEET block,
+// fed from the costmeter via the existing resource sampler (no new poller).
+// Metrics whose source doesn't exist yet (stuck/crash-loop/failing-check
+// counts, Phase 4) are simply absent from this struct rather than zeroed.
+type FleetHealth struct {
+	Hot        int // live sessions
+	Total      int // all bubbles
+	Suppressed int // notices suppressed (INV-1 rate limiting)
+	Capped     int // notices capped (INV-1 flood ceiling actively firing)
+	Inlined    int // deliveries made inline (vs via tool)
+	Backlog    int // total unread messages across the fleet
+}
+
+// FleetHealthMsg is pushed by the existing resource sampler into the dashboard.
+type FleetHealthMsg FleetHealth
+
 type blinkTickMsg struct{}
 
 // Model is the fleet tree.
@@ -135,6 +151,7 @@ type Model struct {
 	usage    UsageMsg    // latest resource snapshot from the sampler
 	claude   ClaudeUsage // latest Claude subscription usage (/usage)
 	headroom Headroom    // token-compression proxy state (/stats)
+	health   FleetHealth // latest cost/health summary from the costmeter
 	Flash    string      // transient notice (e.g. a failed dive), shown until the next key
 
 	// Selected is set to the address the user dived into, then the program
@@ -374,6 +391,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case HeadroomMsg:
 		m.headroom = Headroom(msg)
+		return m, nil
+	case FleetHealthMsg:
+		m.health = FleetHealth(msg)
 		return m, nil
 	case PingMsg:
 		m.pings[msg.From] = msg.Subject
