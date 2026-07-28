@@ -34,6 +34,13 @@ const (
 	Notice                 // write the "you have mail" notice
 	Inline                 // write the notice WITH bodies inlined; those ids have spent their notification
 	Rollup                 // write an "N× subject since T" summary
+	// System is a kernel-originated instruction to the bubble itself (e.g. the
+	// context pump's "you are large, compact"). It is deliberately a distinct
+	// action from Notice: Notice means "you have mail", and the caller meters
+	// it as a delivery that replaced an inbox() round-trip. A System line
+	// delivers no message and replaces no tool call, so counting it as one
+	// would inflate exactly the efficiency number this phase is judged on.
+	System
 )
 
 // String makes failing table tests readable.
@@ -47,6 +54,8 @@ func (a Action) String() string {
 		return "Inline"
 	case Rollup:
 		return "Rollup"
+	case System:
+		return "System"
 	}
 	return "Action(?)"
 }
@@ -284,6 +293,37 @@ func deliver(msg Message, st State, wake bool) Decision {
 		Wake:     wake,
 		Announce: st.Notifiable,
 	}
+}
+
+// System renders a kernel-originated instruction to the bubble itself, subject
+// to the one gate that applies to it: INV-1.
+//
+// It exists so that no caller ever has a reason to write to a session
+// directly. A raw PTY write is invisible to the ceiling, invisible to the cost
+// meter, and invisible to the operator typing-hold -- which is precisely the
+// shape of the 632fe95 flood, and a background sweep on a 2-minute ticker is
+// exactly the kind of caller that reintroduces it.
+//
+// The mail-shaped gates are deliberately NOT applied. Mute rules match on a
+// sender and there is no sender here; INV-2 dedups an announced backlog and
+// this announces none; coalescing batches followers of a message that does not
+// exist. Applying them would silence a system instruction for reasons that have
+// nothing to do with it -- e.g. a bubble with an outstanding mail notice could
+// never be told to compact. The ceiling still bounds the rate absolutely, and
+// the caller is expected to throttle on top of it for its own cadence.
+func (p *Policy) System(to addr.Address, text string, now time.Time) Decision {
+	clean := Sanitize(flatten(text))
+	if clean == "" {
+		return Decision{Action: Suppress}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.ceiling.Allow(to, now) {
+		return Decision{Action: Suppress, Capped: true}
+	}
+	// Announce stays 0: the announced high-water is INV-2 state about MAIL, and
+	// claiming a level here would dedup away the next genuine message.
+	return Decision{Action: System, Text: clean}
 }
 
 // Recover is the SWEEP half of the same decision Decide makes for a freshly

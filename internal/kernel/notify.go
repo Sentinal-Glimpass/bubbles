@@ -77,6 +77,56 @@ func (k *Kernel) flushHeldBacklog(a addr.Address) {
 	}
 }
 
+// SystemNotice types a kernel-originated instruction into a's live session --
+// a direct terminal line addressed to the bubble itself, NOT inbox mail. It
+// reports whether the notice is on its way.
+//
+// Filing this as a message would be the wrong shape twice over: the recipient
+// would have to spend an inbox() tool call to read a one-line instruction, and
+// the instruction would be queued behind (and deduped against) its actual mail
+// by INV-2. The content is not correspondence; it is the kernel telling a
+// bubble something about itself.
+//
+// It is a method rather than a raw s.Write because every constraint that makes
+// notifications affordable lives on this path and nowhere else:
+//
+//   - INV-1, so a caller on a ticker can never flood a bubble no matter how
+//     badly it throttles itself;
+//   - FNoticesWritten, recorded by writeNotice only after a write succeeds, so
+//     the cost is visible in the same ledger as every other notice;
+//   - the operator typing-hold, so a line is never submitted into a half-typed
+//     prompt in the bubble the operator is currently dived into;
+//   - InputReady/deliverWhenReadyThen, so a session still on the resume menu
+//     doesn't swallow the line unsubmitted.
+//
+// It uses k.session, NEVER EnsureAlive: a cold bubble is left cold. Waking one
+// to hand it a system instruction pays the full prompt-cache rewarm, which for
+// the context pump in particular would cost more than the problem it reports.
+func (k *Kernel) SystemNotice(a addr.Address, text string) bool {
+	if a == "" || a.IsRoot() || text == "" {
+		return false
+	}
+	if k.isFocused(a) && k.typingActive() {
+		return false // don't submit the operator's half-typed line
+	}
+	s := k.session(a)
+	if s == nil || !s.Alive() {
+		return false // cold or dead: not worth a rewarm, and nothing to write to
+	}
+	d := k.Notify.System(a, text, time.Now())
+	if d.Action == notify.Suppress {
+		// A suppression no counter records is indistinguishable from a lost
+		// write, so the ceiling's denial is metered like every other one.
+		if d.Capped {
+			k.Cost.Add(a, costmeter.FNoticesCapped, 1)
+		}
+		return false
+	}
+	// No announced level is claimed and none is unclaimed on failure: this
+	// decision carries Announce 0 because it announces no backlog.
+	return k.writeNotice(a, s, d)
+}
+
 // decide runs the notification policy for a freshly-filed message, records the
 // announcement, and records the cost of whatever it decides. It returns the
 // decision, the announced level it replaced (so a delivery that turns out to

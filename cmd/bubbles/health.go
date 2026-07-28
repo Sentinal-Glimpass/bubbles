@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
+	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/transcript"
 )
@@ -18,12 +20,19 @@ import (
 type HealthManager struct {
 	k    *kernel.Kernel
 	home string
+
+	// Context-pump throttle state (see contextpump.go). It lives on the manager
+	// rather than in the kernel because it is a property of THIS sweep's
+	// cadence, not of the bubble: the kernel's own ceiling bounds what a bubble
+	// can receive, while this bounds how often the pump asks.
+	pumpMu   sync.Mutex
+	lastPump map[addr.Address]time.Time
 }
 
 // NewHealthManager builds the manager over a kernel.
 func NewHealthManager(k *kernel.Kernel) *HealthManager {
 	home, _ := os.UserHomeDir()
-	return &HealthManager{k: k, home: home}
+	return &HealthManager{k: k, home: home, lastPump: map[addr.Address]time.Time{}}
 }
 
 // Run sweeps on a ticker until the process exits.
@@ -38,6 +47,7 @@ func (m *HealthManager) Run(interval time.Duration) {
 // Sweep runs every health check once. Add checks here as they land.
 func (m *HealthManager) Sweep() {
 	m.trimTranscripts()
+	m.pumpContext()
 }
 
 // transcriptKeepBeforeCompact is how many lines to keep BEFORE the latest
