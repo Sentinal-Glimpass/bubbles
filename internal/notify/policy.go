@@ -332,7 +332,7 @@ func deliver(msg Message, st State, wake bool) Decision {
 			Wake:     wake,
 			// This message is delivered in full and leaves the notifiable set,
 			// so the high-water must come down with it.
-			Announce: st.Notifiable,
+			Announce: st.Notifiable - 1,
 		}
 	}
 	return Decision{
