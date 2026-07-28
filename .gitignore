@@ -8,3 +8,7 @@ bin/
 
 # runtime fleet state (per-project)
 .bubbles/
+
+# sdd worktrees + scratch
+/.worktrees/
+/.superpowers/
