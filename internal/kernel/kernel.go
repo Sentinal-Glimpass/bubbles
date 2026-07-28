@@ -130,7 +130,12 @@ func (k *Kernel) recoverNudge(a addr.Address, unread int) bool {
 	}
 	k.notifyMu.Lock()
 	defer k.notifyMu.Unlock()
-	if k.notified[a] == 0 || time.Since(k.lastNudge[a]) >= nudgeRecovery {
+	// Keyed off WHEN we last wrote, not off the announced count. Those are
+	// different questions: the count is INV-2's high-water and legitimately
+	// falls to zero when a delivery consumes the backlog it announced, which
+	// does not mean nothing was ever written. Reading notified == 0 as "never
+	// announced" made every inlined delivery trigger a redundant drain nudge.
+	if k.lastNudge[a].IsZero() || time.Since(k.lastNudge[a]) >= nudgeRecovery {
 		k.notified[a] = unread
 		k.lastNudge[a] = time.Now()
 		return true
@@ -141,6 +146,10 @@ func (k *Kernel) recoverNudge(a addr.Address, unread int) bool {
 func (k *Kernel) clearNudge(a addr.Address) {
 	k.notifyMu.Lock()
 	k.notified[a] = 0
+	// The recovery clock is cleared too: the bubble has just drained its
+	// inbox, so the next arrival is a fresh backlog that deserves a prompt
+	// announcement rather than waiting out the previous notice's staleness.
+	delete(k.lastNudge, a)
 	k.notifyMu.Unlock()
 }
 
@@ -511,15 +520,22 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	// full prompt-cache rewarm and is the dominant cost of noisy traffic, so
 	// suppressing only the notice would leave that cost untouched. The message
 	// is already filed above, so a Suppress loses nothing.
+	// The match key a mute rule is written against is the STABLE identifier:
+	// the webhook source for programmatic mail, the sender's address
+	// otherwise. The decorated persona label is display only -- matching on it
+	// would break every rule the day a sender is renamed.
 	source := from.String()
-	if fromName != "" {
-		source += " (" + fromName + ")"
+	if from == WebhookFrom && fromName != "" {
+		source = fromName
 	}
-	d, notifiable := k.decide(to, id, source, subject, body, urgent)
+	display := from.String()
+	if fromName != "" {
+		display += " (" + fromName + ")"
+	}
+	d, notifiable := k.decide(to, id, source, display, subject, body, urgent)
 	if !notifiable {
 		return id
 	}
-	backlog := k.Store.NotifiableCount(to)
 	// Delivery policy:
 	//   - urgent: wake the recipient now (page it in if cold), then nudge it.
 	//   - non-urgent, already hot: deliver immediately (free — it's running).
@@ -544,7 +560,7 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	// cost, and handles a session that hasn't rendered its input yet: typing
 	// into a still-booting claude would sit unsubmitted, so that write is
 	// deferred off the send path.
-	deliver := func(s runner.Session) { k.writeNotice(to, s, d, backlog) }
+	deliver := func(s runner.Session) { k.writeNotice(to, s, d) }
 	switch {
 	case urgent:
 		// A hot recipient is written to directly; a COLD one is paged in only

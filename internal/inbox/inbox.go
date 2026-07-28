@@ -124,6 +124,25 @@ func (s *Store) UnreadCount(owner addr.Address) int {
 // SetMuted marks the message with the given id as muted, suppressing its
 // notification without affecting delivery or read state. Unknown ids are a
 // silent no-op.
+//
+// Muted carries TWO meanings, deliberately conflated because they imply the
+// same thing — "never spend a notice on this message":
+//
+//  1. a mute rule matched it: the recipient declared this traffic to be noise;
+//  2. it was delivered INLINE: the recipient already has the body, so a notice
+//     would announce content it has been handed.
+//
+// Neither is "the recipient has read it". Read state is set only by Take, i.e.
+// by the recipient's own inbox() call. Marking an inlined message read here
+// instead would be silent non-delivery: Take skips read messages, so if the
+// PTY write that carried the body then failed — the session was mid-boot,
+// deliverWhenReady timed out, the write errored — the message would have been
+// consumed without anyone ever seeing it. Redelivery is the acceptable failure
+// direction; a message nobody sees is not.
+//
+// Do not "fix" the conflation by splitting these into two flags unless
+// something actually needs to tell them apart; costmeter already distinguishes
+// them (FNoticesSuppressed vs FDeliveriesInline).
 func (s *Store) SetMuted(id int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

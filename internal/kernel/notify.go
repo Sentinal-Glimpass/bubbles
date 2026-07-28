@@ -72,7 +72,7 @@ func (k *Kernel) announceOnce(a addr.Address, n int) bool {
 //
 // Every suppression branch increments a counter: a suppression no counter
 // records is indistinguishable from a message the kernel simply lost.
-func (k *Kernel) decide(to addr.Address, id int, source, subject, body string, urgent bool) (notify.Decision, bool) {
+func (k *Kernel) decide(to addr.Address, id int, source, display, subject, body string, urgent bool) (notify.Decision, bool) {
 	st := notify.State{
 		Notifiable: k.Store.NotifiableCount(to),
 		Announced:  k.announced(to),
@@ -80,7 +80,7 @@ func (k *Kernel) decide(to addr.Address, id int, source, subject, body string, u
 		AlwaysOn:   k.isAlwaysOn(to),
 	}
 	d := k.Notify.Decide(to, notify.Message{
-		ID: id, Source: source, Subject: subject, Body: body, Urgent: urgent,
+		ID: id, Source: source, Display: display, Subject: subject, Body: body, Urgent: urgent,
 	}, st, time.Now())
 
 	if d.MarkMuted {
@@ -100,15 +100,17 @@ func (k *Kernel) decide(to addr.Address, id int, source, subject, body string, u
 	return d, true
 }
 
-// writeNotice types a decision's line into s and records what it cost. backlog
-// is the notifiable count the decision was made against, which is what gets
-// recorded as announced.
+// writeNotice types a decision's line into s and records what it cost. The
+// announced high-water comes from the decision (Decision.Announce), not from a
+// count the kernel computes: only the policy knows which messages the decision
+// consumed, and getting that wrong strands the high-water above the remaining
+// backlog and silently dedups the next genuine message away.
 //
 // A session that has not rendered its input yet (still booting, or sitting on
 // the resume menu) would swallow the line unsubmitted, so the write is handed
 // to deliverWhenReady off the caller's path — the same discipline the send
 // path has always used.
-func (k *Kernel) writeNotice(to addr.Address, s runner.Session, d notify.Decision, backlog int) {
+func (k *Kernel) writeNotice(to addr.Address, s runner.Session, d notify.Decision) {
 	if s == nil || d.Text == "" {
 		return
 	}
@@ -120,7 +122,7 @@ func (k *Kernel) writeNotice(to addr.Address, s runner.Session, d notify.Decisio
 	} else {
 		go k.deliverWhenReady(to, line)
 	}
-	k.markAnnounced(to, backlog)
+	k.markAnnounced(to, d.Announce)
 	k.Cost.Add(to, costmeter.FNoticesWritten, 1)
 
 	// An inlined body has been delivered in full, so it must never earn another
@@ -155,12 +157,17 @@ func (k *Kernel) DrainCoalesced() {
 		}
 		d, ok := k.Notify.Pending(a, now)
 		if !ok {
+			// Not-due and ceiling-denied both come back false; only the latter
+			// is a suppression, and it must not be silent.
+			if d.Capped {
+				k.Cost.Add(a, costmeter.FNoticesCapped, 1)
+			}
 			continue
 		}
 		s := k.session(a)
 		if s == nil || !s.Alive() {
 			continue
 		}
-		k.writeNotice(a, s, d, k.Store.NotifiableCount(a))
+		k.writeNotice(a, s, d)
 	}
 }

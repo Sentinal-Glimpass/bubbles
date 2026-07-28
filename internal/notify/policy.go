@@ -57,12 +57,30 @@ func (a Action) String() string {
 }
 
 // Message is the notification-relevant projection of a stored message.
+//
+// Source and Display are separate on purpose. Source is the MATCH KEY that
+// mute rules are written against, so it must be the stable, predictable
+// identifier a bubble would name in a rule -- the webhook source ("pump"), or
+// the sender's address ("0.1"). Display is the human label shown in the
+// notice, which decorates that with the sender's current persona name
+// ("0.1 (scout)"). Matching on the decorated string would mean a rule silently
+// stops matching the day someone renames the sender, and would make the
+// obvious rule (Source: "pump") never fire at all.
 type Message struct {
 	ID      int
-	Source  string // sender label: bubble name, or webhook source
+	Source  string // match key for mute rules: webhook source, or sender address
+	Display string // label rendered into the notice; falls back to Source when empty
 	Subject string
 	Body    string
 	Urgent  bool
+}
+
+// label returns what the notice should show for this sender.
+func (m Message) label() string {
+	if m.Display != "" {
+		return m.Display
+	}
+	return m.Source
 }
 
 // State is the recipient's situation at decision time, supplied by the
@@ -107,6 +125,22 @@ type Decision struct {
 	// coalesced one have very different cost meanings, and a suppression that
 	// no counter records at all is indistinguishable from a bug.
 	Capped bool
+	// Announce is the notifiable backlog the caller must record as its
+	// announced high-water AFTER acting on this decision -- which is not the
+	// same as the backlog the decision was made against.
+	//
+	// INV-2 compares a high-water count against a set that shrinks underneath
+	// it: an inlined message leaves the notifiable set the moment it is
+	// delivered. Recording the pre-delivery count would leave the high-water
+	// stranded above the remaining backlog, and the NEXT genuine message would
+	// be deduped away against a backlog that no longer exists -- a silent
+	// stall until the stale-notice sweep, caused by an unrelated short message
+	// arriving just before it. So Inline reports what REMAINS notifiable.
+	//
+	// The rule lives here rather than in the caller because it is a property
+	// of the decision, not of the store: only this package knows which
+	// messages a decision consumed.
+	Announce int
 }
 
 // muteWindow tracks one open mute window for a (bubble, rule) pair: when it
@@ -205,17 +239,17 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 			case w == nil:
 				// First match opens the window; this message still delivers,
 				// so the bubble learns the traffic exists at least once.
-				b.windows[r.ID] = &muteWindow{opened: now, source: msg.Source, subject: msg.Subject}
+				b.windows[r.ID] = &muteWindow{opened: now, source: msg.label(), subject: msg.Subject}
 			case now.Sub(w.opened) < r.Window:
 				w.count++
-				w.source, w.subject = msg.Source, msg.Subject
+				w.source, w.subject = msg.label(), msg.Subject
 				return Decision{Action: Suppress, MarkMuted: true, Wake: false, Rule: r.ID}
 			default:
 				// Window expired: report what was swallowed, then reopen.
 				n, since, src, subj := w.count, w.opened, w.source, w.subject
 				if n == 0 {
 					// Nothing accumulated; reopen and deliver normally.
-					b.windows[r.ID] = &muteWindow{opened: now, source: msg.Source, subject: msg.Subject}
+					b.windows[r.ID] = &muteWindow{opened: now, source: msg.label(), subject: msg.Subject}
 					break
 				}
 				// The ceiling still applies: a rollup is a real write. It is
@@ -231,12 +265,16 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 				// delivered on its own nor counted in the rollup it triggered:
 				// it is the first message of the window it opens here, exactly
 				// like the first match that opened the previous one.
-				b.windows[r.ID] = &muteWindow{opened: now, source: msg.Source, subject: msg.Subject}
+				b.windows[r.ID] = &muteWindow{opened: now, source: msg.label(), subject: msg.Subject}
 				return Decision{
 					Action: Rollup,
 					Text:   renderRollup(n, subj, src, since),
 					Wake:   false, // a rollup is by definition not worth a wake
 					Rule:   r.ID,
+					// The message that triggered the rollup is not delivered
+					// and stays notifiable, so the backlog it belongs to is
+					// what remains announced.
+					Announce: st.Notifiable,
 				}
 			}
 		}
@@ -289,21 +327,27 @@ func deliver(msg Message, st State, wake bool) Decision {
 	if len(clean) <= InlineMaxBytes && st.Notifiable <= InlineMaxBacklog {
 		return Decision{
 			Action:   Inline,
-			Text:     renderInline(msg.Source, msg.Subject, clean, st.Notifiable),
+			Text:     renderInline(msg.label(), msg.Subject, clean, st.Notifiable),
 			MarkRead: []int{msg.ID},
 			Wake:     wake,
+			// This message is delivered in full and leaves the notifiable set,
+			// so the high-water must come down with it.
+			Announce: st.Notifiable,
 		}
 	}
 	return Decision{
-		Action: Notice,
-		Text:   renderNotice(msg.Source, msg.Subject, st.Notifiable),
-		Wake:   wake,
+		Action:   Notice,
+		Text:     renderNotice(msg.label(), msg.Subject, st.Notifiable),
+		Wake:     wake,
+		Announce: st.Notifiable,
 	}
 }
 
 // Pending drains to's coalescing window if it has expired, returning the
 // decision the caller should act on. The second result is false when there is
-// nothing to write, which is the common case.
+// nothing to write, which is the common case. When it is false because the
+// INV-1 ceiling denied the write (rather than because nothing was due), the
+// returned Decision has Capped set so the caller can meter it.
 func (p *Policy) Pending(to addr.Address, now time.Time) (Decision, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -324,8 +368,11 @@ func (p *Policy) Pending(to addr.Address, now time.Time) (Decision, bool) {
 	}
 	if !p.ceiling.Allow(to, now) {
 		// Dropping the notice is safe: the messages remain notifiable in the
-		// store, so a later Decide will announce them.
-		return Decision{}, false
+		// store, so a later Decide will announce them. Capped is reported even
+		// though ok is false, so the caller can tell this apart from "nothing
+		// due" and record it: a suppression no counter records is
+		// indistinguishable from a message the system lost.
+		return Decision{Action: Suppress, Capped: true}, false
 	}
 
 	if c.count == 1 {
@@ -334,9 +381,10 @@ func (p *Policy) Pending(to addr.Address, now time.Time) (Decision, bool) {
 		return d, true
 	}
 	return Decision{
-		Action: Rollup,
-		Text:   renderRollup(c.count, c.last.Subject, c.last.Source, c.opened),
-		IDs:    c.ids,
+		Action:   Rollup,
+		Text:     renderRollup(c.count, c.last.Subject, c.last.label(), c.opened),
+		IDs:      c.ids,
+		Announce: c.backlog,
 	}, true
 }
 
