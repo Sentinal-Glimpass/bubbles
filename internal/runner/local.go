@@ -160,10 +160,10 @@ func NewLocal() *LocalRunner {
 	}
 }
 
-// opusOneM is the 1M-context opus alias used for every non-fable bubble on the
+// opusOneM is the 1M-context opus alias used for EVERY bubble on the
 // non-Bedrock (subscription) path — a bare "opus" would NOT carry the [1m]
 // context. Change here if the model id revs.
-const opusOneM = "claude-opus-4-8[1m]"
+const opusOneM = "claude-opus-5[1m]"
 
 // Launch starts claude in a PTY in dir, seeded with the persona/goal.
 func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session, error) {
@@ -202,14 +202,11 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	//     like us.anthropic.claude-opus-4-6-v1[1m]). A --model flag does NOT
 	//     accept raw Bedrock IDs — it expects subscription aliases — so passing
 	//     it breaks ("model not available on your bedrock deployment").
-	//   Bedrock OFF -> "fable" stays "fable"; everything else -> opusOneM (the
-	//     1M-context subscription alias). No bubble runs a non-1M tier.
+	//   Bedrock OFF -> EVERY bubble gets opusOneM (the 1M-context subscription
+	//     alias), whatever opts.Model says — including "fable". No bubble runs a
+	//     non-1M tier.
 	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") != "1" {
-		if opts.Model == "fable" {
-			args = append(args, "--model", "fable")
-		} else {
-			args = append(args, "--model", opusOneM)
-		}
+		args = append(args, "--model", opusOneM)
 	}
 	if r.AllowAll != nil && *r.AllowAll {
 		args = append(args, "--dangerously-skip-permissions")

@@ -235,7 +235,7 @@ func aliveCmd(t *testing.T) *exec.Cmd {
 
 // TestModelResolution:
 //   Bedrock ON  -> NO --model passed (env ANTHROPIC_MODEL drives via inheritance).
-//   Bedrock OFF -> "fable" stays "fable"; everything else -> opusOneM (1M alias).
+//   Bedrock OFF -> every model (incl. "fable") collapses to opusOneM (1M alias).
 func TestModelResolution(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "stub.sh")
@@ -254,14 +254,14 @@ func TestModelResolution(t *testing.T) {
 		return attachUntil(s.(PTYSession), "ARGS:")
 	}
 
-	// Bedrock OFF: ANTHROPIC_MODEL ignored; non-fable collapses to opus.
+	// Bedrock OFF: ANTHROPIC_MODEL ignored; every model collapses to opusOneM.
 	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "0")
 	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]") // must be ignored when Bedrock off
 	for i, tc := range []struct{ in, want string }{
 		{"", opusOneM},
 		{"sonnet", opusOneM},
 		{"opus", opusOneM},
-		{"fable", "fable"},
+		{"fable", opusOneM},
 	} {
 		out := launch(fmt.Sprintf("0.%d", i+1), SpawnOpts{Persona: "x", Model: tc.in})
 		if !strings.Contains(out, "--model "+tc.want) {
