@@ -625,7 +625,19 @@ Expected: FAIL — `NewPolicy` undefined.
 `internal/notify/policy.go`. Decision order — this order is load-bearing:
 
 1. **Mute check first** (before anything urgency-related). If a rule matches: if inside its window → `{Action: Suppress, MarkMuted: true, Wake: false, Rule: id}`. If the window expired → reset the window, return `Rollup` with text `fmt.Sprintf("📬 %d× %q from %s since %s — call inbox() to read.", n, subject, source, since.Format("15:04"))`.
-2. **INV-2 dedup:** if `st.Notifiable <= st.Announced` → `Suppress`. Compare against the store-derived `Announced`, never against session state and never against a policy-local counter — a local high-water mark that can drift above the store's truth reintroduces the *silent-stall* failure direction of `632fe95`.
+2. **INV-2 dedup:** if `st.Announced > 0` → `Suppress`. Compare against the store-derived `Announced`, never against session state and never against a policy-local counter — a local high-water mark that can drift above the store's truth reintroduces the *silent-stall* failure direction of `632fe95`.
+
+> **INV-2 correction (2026-07-28, approved mid-execution).** This originally read
+> `st.Notifiable <= st.Announced`, which re-announces whenever the backlog
+> *grows*. That is a **cost regression** in a cost-reduction phase: the superseded
+> `markNudge` fired at most once per backlog regardless of growth, and its comment
+> states why — *"This is what keeps a busy fleet from spending a turn per
+> message."* Under the old rule a trickle of N messages cost N turns instead of 1.
+> `Announced > 0` restores the one-notice-per-batch contract while remaining
+> compatible with the consumption fix below: an inlined message leaves 0 notifiable
+> behind, so `Announced` falls to 0 and the next message announces immediately.
+> No stall is introduced — a bubble announced but unread still has `RecoverUnread`'s
+> staleness recovery behind it.
 3. **Coalescing:** non-urgent and window open → buffer and `Suppress`; `Pending` drains it later. Urgent bypasses.
 4. **INV-1 ceiling:** `if !ceiling.Allow(to, now) → {Action: Suppress}` and the caller records `FNoticesCapped`.
 5. **Inline vs Notice:** sanitise + flatten the body; if `len(clean) <= InlineMaxBytes && st.Notifiable <= InlineMaxBacklog` → `Inline` with `MarkRead`; else `Notice`.
