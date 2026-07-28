@@ -209,7 +209,7 @@ func (k *Kernel) unclaimAnnounced(a addr.Address, claimed, prev int) {
 //
 // A session that has not rendered its input yet (still booting, or sitting on
 // the resume menu) would swallow the line unsubmitted, so the write is handed
-// to deliverWhenReady off the caller's path — the same discipline the send
+// to deliverWhenReadyThen off the caller's path — the same discipline the send
 // path has always used.
 //
 // Everything that treats the message as CONSUMED runs in onWritten, which

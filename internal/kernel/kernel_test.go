@@ -363,7 +363,7 @@ func TestDeliverWhenReady(t *testing.T) {
 		time.Sleep(120 * time.Millisecond)
 		fr.Session(a).SetOutput("claude UI painted")
 	}()
-	k.deliverWhenReady(a, []byte("📬 New message"))
+	k.deliverWhenReadyThen(a, []byte("📬 New message"), nil)
 
 	if !strings.Contains(fr.Session(a).Written(), "New message") {
 		t.Fatalf("should deliver once the session is up, got %q", fr.Session(a).Written())
@@ -1434,8 +1434,11 @@ func TestMechmagnetNoiseCostsOneNoticePerWindow(t *testing.T) {
 		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
 	}
 	notices := strings.Count(fr.Session(a).Written(), "📬")
-	if notices > 1 {
-		t.Fatalf("notices = %d, want at most 1 for 200 muted events in one window", notices)
+	if notices != 1 {
+		// Exact, not "at most": 0 notices would mean the bubble was never told
+		// the traffic exists at all, which is the silent-stall failure and would
+		// pass a `> 1` assertion just as happily as the correct answer.
+		t.Fatalf("notices = %d, want exactly 1 for 200 muted events in one window", notices)
 	}
 }
 

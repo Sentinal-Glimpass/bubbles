@@ -534,6 +534,10 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	// (FlushHeldIfIdle) or leave (UnsetFocus). If they're just idle-viewing
 	// the bubble, deliver normally so they see it.
 	if k.isFocused(to) && k.typingActive() {
+		// Held, not dropped: FlushHeldIfIdle/UnsetFocus deliver it. It is still
+		// a notice this kernel chose not to write, and every suppression must
+		// be observable or it is indistinguishable from a message we lost.
+		k.Cost.Add(to, costmeter.FNoticesSuppressed, 1)
 		return id
 	}
 	hot := k.IsHot(to)
@@ -545,6 +549,9 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 		// when a charter is delegated to it -- the "spawn a worker and message
 		// it a charter" flow.
 		if b, ok := k.Reg.Get(to); !ok || to.IsRoot() || b.SessionID != "" {
+			// Pooled for the periodic DrainInboxes rather than notified now --
+			// again a suppression, and again it must be counted.
+			k.Cost.Add(to, costmeter.FNoticesSuppressed, 1)
 			return id
 		}
 	}
@@ -604,21 +611,17 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	return id
 }
 
-// deliverWhenReady waits until a's session has produced output — its TUI is up
-// and accepting input — before typing the notice in, so a message that boots a
+// deliverWhenReadyThen waits until a's session has produced output — its TUI is
+// up and accepting input — before typing the line in, so a message that boots a
 // cold bubble isn't typed into a still-initializing claude (where it would sit
 // unsubmitted until something else pressed Enter). Bounded by a timeout, after
 // which it delivers anyway. Runs off the send path (in a goroutine).
-func (k *Kernel) deliverWhenReady(a addr.Address, line []byte) {
-	k.deliverWhenReadyThen(a, line, nil)
-}
-
-// deliverWhenReadyThen is deliverWhenReady with a completion hook that runs
-// ONLY after the line has actually been written. Anything that treats the
-// message as consumed belongs there and nowhere else: this function can return
-// without writing at all (the session died while booting, or never became
-// ready before the deadline), and a message marked consumed by a write that
-// never happened is content nobody will ever see.
+//
+// onWritten (may be nil) runs ONLY after the line has actually been written.
+// Anything that treats the message as consumed belongs there and nowhere else:
+// this function can return without writing at all (the session died while
+// booting, or never became ready before the deadline), and a message marked
+// consumed by a write that never happened is content nobody will ever see.
 func (k *Kernel) deliverWhenReadyThen(a addr.Address, line []byte, onWritten func()) {
 	write := func(s runner.Session) {
 		if _, err := s.Write(line); err == nil && onWritten != nil {
@@ -808,7 +811,8 @@ func (k *Kernel) Status(from addr.Address) []string {
 // Inbox returns owner's unread messages (marking them read), each labeled with
 // the sender's address and role.
 func (k *Kernel) Inbox(owner addr.Address) []string {
-	k.clearNudge(owner) // read -> a future message re-announces
+	k.clearNudge(owner)   // read -> a future message re-announces
+	k.Notify.Clear(owner) // and drop any pending coalescing batch: it summarises mail this call is about to hand over
 	var out []string
 	for _, m := range k.Store.Take(owner) {
 		from := m.From.String()
@@ -1223,9 +1227,9 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 	// Lazy launch: NO session id and NO process yet. The bubble is a cold record
 	// (0 RAM) until first used — a dive, a message, or a loop trigger pages it in
 	// via EnsureAlive. So you can spawn hundreds and only the touched ones run.
-	k.Caps.AddContact(b.Addr, addr.Root)  // every bubble can reach root
-	k.Caps.AddContact(b.Addr, parent)     // the child can reach its spawner (report progress, ask questions)
-	k.Caps.AddContact(parent, b.Addr)     // the parent can reach its child
+	k.Caps.AddContact(b.Addr, addr.Root) // every bubble can reach root
+	k.Caps.AddContact(b.Addr, parent)    // the child can reach its spawner (report progress, ask questions)
+	k.Caps.AddContact(parent, b.Addr)    // the parent can reach its child
 
 	// Spawn-ability grant. Root grants explicitly (opts.GrantSpawn => depth 1: the
 	// child may spawn, but its own children may not). A non-root spawner can only
@@ -1343,8 +1347,8 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 		delete(k.lastUsed, v)
 		k.smu.Unlock()
 		k.Groups.PurgeMember(v)
-		k.Caps.Purge(v)        // drop it from EVERY bubble's contacts, so no ghost lingers
-		k.Sched.PurgeBubble(v) // drop any wake schedules for/by it
+		k.Caps.Purge(v)             // drop it from EVERY bubble's contacts, so no ghost lingers
+		k.Sched.PurgeBubble(v)      // drop any wake schedules for/by it
 		k.Tasks.PurgeParticipant(v) // cancel its open tasks / degrade tasks it verified
 	}
 	return victims
