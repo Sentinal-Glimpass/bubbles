@@ -18,6 +18,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
+	"github.com/Sentinal-Glimpass/bubbles/internal/transcript"
 )
 
 // PTYSession is a Session backed by a PTY, exposing the master file (for input +
@@ -155,7 +156,7 @@ func NewLocal() *LocalRunner {
 		sessions:               map[addr.Address]*ptySession{},
 		StrictMCP:              true,
 		DisallowedTools:        []string{"AskUserQuestion"},
-		ResumeSummaryThreshold: 500_000,
+		ResumeSummaryThreshold: transcript.ContextNudgeTokens,
 		DefaultModel:           DefaultModel,
 	}
 }

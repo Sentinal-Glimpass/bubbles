@@ -20,6 +20,20 @@ import (
 // re-deriving the literal, so the two never drift apart.
 var CompactMarker = []byte(`"isCompactSummary":true`)
 
+// ContextNudgeTokens is the context-size (in tokens) threshold at which a
+// bubble should be nudged toward compaction — it is also the threshold the
+// resume "continue from summary / as-is" menu autopilot uses to pick
+// "summary" instead of "as-is". Both meanings are the same fact ("this
+// conversation has grown large enough to warrant summarizing") so they share
+// one constant instead of two literals that could drift apart.
+const ContextNudgeTokens = 500_000
+
+// ContextForceTokens is the higher context-size threshold at which
+// compaction is forced rather than merely suggested. It must stay greater
+// than ContextNudgeTokens: a bubble should always get the polite nudge
+// before it is ever force-compacted.
+const ContextForceTokens = 800_000
+
 // ErrNoUsage is returned when a transcript contains no entry carrying a usage
 // object, so ContextTokens has no basis (e.g. a conversation with only user
 // turns, or before the first assistant reply).
