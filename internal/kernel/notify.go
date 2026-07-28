@@ -46,24 +46,35 @@ func (k *Kernel) markAnnounced(a addr.Address, n int) {
 	k.notifyMu.Unlock()
 }
 
-// announceOnce is the compare-and-set form of markAnnounced, for the operator
-// paths (leaving a bubble, pausing typing) that flush a held backlog with a
-// plain drain line rather than through the policy engine. It reports true at
-// most once per backlog, so an overlapping flush and sweep don't stack two
-// "you have mail" notices. Check and set are one critical section: splitting
-// them is exactly the double-notification race.
-func (k *Kernel) announceOnce(a addr.Address, n int) bool {
-	if n == 0 {
-		return false
+// flushHeldBacklog is the operator paths' delivery step: a message held back
+// while the operator was typing in the focused bubble is written as soon as
+// they pause (FlushHeldIfIdle) or leave (UnsetFocus). That purpose is
+// unchanged; what changed is that it now goes through the SAME decision point
+// as the recovery sweep instead of reading UnreadCount and writing
+// notify.RenderDrain straight to the PTY.
+//
+// Going around the policy engine here was the Task 8 defect surviving one
+// layer up. UnreadCount counts muted messages (correctly -- they are unread,
+// and inbox() still shows them), so a bubble whose entire backlog was noise it
+// had explicitly muted got told "you have 200 unread" the moment the operator
+// stopped typing: a full model turn spent on traffic the phase exists to make
+// free, and the one bubble the operator is actually watching. It also bypassed
+// INV-1 and recorded no FNoticesWritten, so the cost was invisible too.
+//
+// It never wakes a cold bubble: k.session returns nil rather than EnsureAlive,
+// exactly as before, since a held backlog is not a reason to pay a rewarm.
+func (k *Kernel) flushHeldBacklog(a addr.Address) {
+	if a == "" {
+		return
 	}
-	k.notifyMu.Lock()
-	defer k.notifyMu.Unlock()
-	if k.notified[a] != 0 {
-		return false
+	d, prev, ok := k.decideRecovery(a)
+	if !ok {
+		return
 	}
-	k.notified[a] = n
-	k.lastNudge[a] = time.Now()
-	return true
+	// No PTY write happens under notifyMu; writeNotice meters what it costs.
+	if !k.writeNotice(a, k.session(a), d) {
+		k.unclaimAnnounced(a, d.Announce, prev)
+	}
 }
 
 // decide runs the notification policy for a freshly-filed message, records the

@@ -1518,3 +1518,112 @@ func TestMechmagnetNoiseNeverRewarmsColdBubble(t *testing.T) {
 		t.Fatal("an UNMUTED urgent webhook must still wake a cold bubble -- otherwise this test proves nothing about mute")
 	}
 }
+
+// mutedHeldBubble sets up the exact production shape the operator-flush paths
+// used to break: a hot bubble holding a backlog of nothing but traffic it
+// declared as noise, with the operator now dived in and typing.
+//
+// The noise arrives BEFORE focus, which is what makes the backlog genuinely
+// muted: the mute policy runs on the send path, so a message held back during
+// typing has not been classified yet. clearNudge then models the bubble having
+// answered the one notice the first event earned, so that INV-2 cannot be what
+// silences the flush -- only the notifiable count can.
+func mutedHeldBubble(t *testing.T) (*runner.FakeRunner, *Kernel, addr.Address) {
+	t.Helper()
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	k.TypingWindow = time.Hour // treat the operator as continuously typing
+	a, _ := k.Spawn(addr.Root, "qa", "/tmp/qa", runner.SpawnOpts{Persona: "qa"})
+	k.EnsureAlive(a)
+	if _, err := k.MuteBy(a, "mechmagnet-event-pump", "^opt_out$", "", "1h", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	}
+	if k.Store.NotifiableCount(a) != 0 {
+		t.Fatalf("precondition: a muted backlog must be non-notifiable, got %d", k.Store.NotifiableCount(a))
+	}
+	if k.Store.UnreadCount(a) != 200 {
+		t.Fatalf("precondition: muting suppresses the notice, never the mail, got %d", k.Store.UnreadCount(a))
+	}
+	k.clearNudge(a)
+	k.SetFocus(a)
+	k.NoteKeystroke()
+	return fr, k, a
+}
+
+// TestFlushHeldIfIdleIgnoresAMutedOnlyBacklog: the operator pausing must not
+// undo muting. These paths used to read Store.UnreadCount and write
+// notify.RenderDrain straight to the PTY, so a bubble whose whole backlog was
+// muted noise was told "you have 200 unread" the instant typing stopped -- a
+// full model turn on traffic it had explicitly declared to be noise, in the one
+// bubble the operator is watching.
+func TestFlushHeldIfIdleIgnoresAMutedOnlyBacklog(t *testing.T) {
+	fr, k, a := mutedHeldBubble(t)
+	before := fr.Session(a).Written() // the first event legitimately opened the window
+	k.TypingWindow = time.Nanosecond  // operator pauses
+	k.FlushHeldIfIdle()
+	if got := strings.TrimPrefix(fr.Session(a).Written(), before); got != "" {
+		t.Fatalf("a muted-only backlog must produce NO flush notice, got %q", got)
+	}
+}
+
+// TestUnsetFocusIgnoresAMutedOnlyBacklog is the same guarantee on the other
+// operator path: leaving the pane.
+func TestUnsetFocusIgnoresAMutedOnlyBacklog(t *testing.T) {
+	fr, k, a := mutedHeldBubble(t)
+	before := fr.Session(a).Written()
+	k.UnsetFocus(a)
+	if got := strings.TrimPrefix(fr.Session(a).Written(), before); got != "" {
+		t.Fatalf("leaving the pane must not announce a muted-only backlog, got %q", got)
+	}
+}
+
+// TestFlushHeldIfIdleStillDeliversANotifiableBacklog is the control: the flush
+// paths exist so mail held back during typing lands as soon as the operator
+// pauses. Suppressing the muted case must not have broken that.
+func TestFlushHeldIfIdleStillDeliversANotifiableBacklog(t *testing.T) {
+	fr, k, a := mutedHeldBubble(t)
+	if _, err := k.Send(addr.Root, a, "real work", strings.Repeat("x", 400), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	before := fr.Session(a).Written() // the first event's notice must not count as the flush
+	k.TypingWindow = time.Nanosecond
+	k.FlushHeldIfIdle()
+	if got := strings.TrimPrefix(fr.Session(a).Written(), before); !strings.Contains(got, "unread") {
+		t.Fatalf("a genuinely notifiable backlog must still flush on pause, got %q", got)
+	}
+}
+
+// TestUnsetFocusStillDeliversANotifiableBacklog: same control for leaving.
+func TestUnsetFocusStillDeliversANotifiableBacklog(t *testing.T) {
+	fr, k, a := mutedHeldBubble(t)
+	if _, err := k.Send(addr.Root, a, "real work", strings.Repeat("x", 400), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	before := fr.Session(a).Written()
+	k.UnsetFocus(a)
+	if got := strings.TrimPrefix(fr.Session(a).Written(), before); !strings.Contains(got, "unread") {
+		t.Fatalf("leaving must still announce a genuinely notifiable backlog, got %q", got)
+	}
+}
+
+// TestOperatorFlushRespectsTheINV1Ceiling: the flush paths used to bypass the
+// flood ceiling entirely. INV-1 is not disableable by any path.
+func TestOperatorFlushRespectsTheINV1Ceiling(t *testing.T) {
+	fr, k, a := mutedHeldBubble(t)
+	if _, err := k.Send(addr.Root, a, "real work", strings.Repeat("x", 400), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	k.TypingWindow = time.Nanosecond
+	for i := 0; i < 40; i++ {
+		k.UnsetFocus(a)
+		k.SetFocus(a)
+		k.clearNudge(a) // simulate the bubble draining, so only INV-1 can bound this
+	}
+	if n := strings.Count(fr.Session(a).Written(), "📬"); n > notify.DefaultCeilingBurst {
+		t.Fatalf("operator flushes wrote %d notices, INV-1 caps a burst at %d", n, notify.DefaultCeilingBurst)
+	}
+}

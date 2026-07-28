@@ -163,11 +163,7 @@ func (k *Kernel) UnsetFocus(a addr.Address) {
 		k.focused = ""
 	}
 	k.focusMu.Unlock()
-	if n := k.Store.UnreadCount(a); n > 0 && k.announceOnce(a, n) {
-		if s := k.session(a); s != nil && s.Alive() {
-			_, _ = s.Write([]byte(notify.RenderDrain(n)))
-		}
-	}
+	k.flushHeldBacklog(a)
 }
 
 // FlushHeldIfIdle delivers the focused bubble's backlog once the operator stops
@@ -189,11 +185,7 @@ func (k *Kernel) FlushHeldIfIdle() {
 	}
 	k.heldFlushed = true
 	k.focusMu.Unlock()
-	if n := k.Store.UnreadCount(foc); n > 0 && k.announceOnce(foc, n) {
-		if s := k.session(foc); s != nil && s.Alive() {
-			_, _ = s.Write([]byte(notify.RenderDrain(n)))
-		}
-	}
+	k.flushHeldBacklog(foc)
 }
 
 // presenceWindow is how long after a keystroke a dive still counts as attended.
