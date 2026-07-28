@@ -192,3 +192,98 @@ func TestPendingRespectsCeiling(t *testing.T) {
 		t.Fatal("Pending must not write past the INV-1 ceiling")
 	}
 }
+
+// A capped rollup must not destroy the batch it failed to report: the
+// swallowed messages are marked muted, so the window's count is the only
+// remaining record of them.
+func TestCappedMuteRollupPreservesCount(t *testing.T) {
+	rs := NewRuleSet()
+	_ = rs.Add(Rule{ID: "r1", Source: "pump", SubjectRe: "^opt_out$", Window: time.Hour})
+	// 2 tokens, refilling at 0.1/s.
+	p := NewPolicy(func(addr.Address) *RuleSet { return rs }, NewCeiling(6, 2))
+	now := time.Unix(0, 0)
+
+	p.Decide("0.1", Message{ID: 1, Source: "pump", Subject: "opt_out"}, State{Notifiable: 1}, now)
+	for i := 2; i <= 4; i++ {
+		p.Decide("0.1", Message{ID: i, Source: "pump", Subject: "opt_out"},
+			State{Notifiable: i}, now.Add(time.Duration(i)*time.Second))
+	}
+
+	// Drain the bucket right before the window expires.
+	expired := now.Add(time.Hour + time.Second)
+	for i := 5; i <= 6; i++ {
+		p.Decide("0.1", Message{ID: i, Source: "other", Subject: "x", Urgent: true}, State{Notifiable: i}, expired)
+	}
+
+	capped := p.Decide("0.1", Message{ID: 7, Source: "pump", Subject: "opt_out"}, State{Notifiable: 7}, expired)
+	if capped.Action != Suppress {
+		t.Fatalf("Action = %v, want Suppress -- the ceiling must cap the rollup", capped.Action)
+	}
+
+	// Once tokens refill, the rollup must still report all 3 swallowed
+	// messages; a capped attempt that reset the count would lose them forever.
+	later := expired.Add(time.Minute)
+	d := p.Decide("0.1", Message{ID: 8, Source: "pump", Subject: "opt_out"}, State{Notifiable: 8}, later)
+	if d.Action != Rollup {
+		t.Fatalf("Action = %v, want Rollup once the ceiling refills", d.Action)
+	}
+	if !strings.Contains(d.Text, "3×") {
+		t.Fatalf("rollup must still report all 3 swallowed messages, got %q", d.Text)
+	}
+}
+
+// The message that triggers an expiry rollup opens the next window: it is
+// neither delivered on its own nor counted in the rollup it triggered.
+func TestExpiryRollupAbsorbsItsTriggerMessage(t *testing.T) {
+	rs := NewRuleSet()
+	_ = rs.Add(Rule{ID: "r1", Source: "pump", SubjectRe: "^opt_out$", Window: time.Hour})
+	p := NewPolicy(func(addr.Address) *RuleSet { return rs }, NewCeiling(6, 6))
+	now := time.Unix(0, 0)
+
+	p.Decide("0.1", Message{ID: 1, Source: "pump", Subject: "opt_out"}, State{Notifiable: 1}, now)
+	p.Decide("0.1", Message{ID: 2, Source: "pump", Subject: "opt_out"}, State{Notifiable: 2}, now.Add(time.Minute))
+	p.Decide("0.1", Message{ID: 3, Source: "pump", Subject: "opt_out"}, State{Notifiable: 3}, now.Add(time.Minute))
+
+	d := p.Decide("0.1", Message{ID: 4, Source: "pump", Subject: "opt_out"}, State{Notifiable: 4}, now.Add(2*time.Hour))
+	if d.Action != Rollup {
+		t.Fatalf("Action = %v, want Rollup", d.Action)
+	}
+	if !strings.Contains(d.Text, "2×") {
+		t.Fatalf("rollup must count only the 2 swallowed messages, not its own trigger, got %q", d.Text)
+	}
+	if len(d.MarkRead) != 0 {
+		t.Fatalf("MarkRead = %v, want empty -- a rollup delivers no bodies", d.MarkRead)
+	}
+
+	// The trigger opened the next window, so its follower is muted again.
+	next := p.Decide("0.1", Message{ID: 5, Source: "pump", Subject: "opt_out"},
+		State{Notifiable: 5}, now.Add(2*time.Hour+time.Minute))
+	if next.Action != Suppress || !next.MarkMuted {
+		t.Fatalf("Action = %v MarkMuted = %v, want the trigger to have reopened the window", next.Action, next.MarkMuted)
+	}
+}
+
+// A message the ceiling capped must not buy 3s of silence it never paid for.
+func TestCappedMessageDoesNotOpenCoalesceWindow(t *testing.T) {
+	// 1 token, refilling at 1/s.
+	p := NewPolicy(func(addr.Address) *RuleSet { return NewRuleSet() }, NewCeiling(60, 1))
+	now := time.Unix(0, 0)
+
+	// Urgent, so it bypasses coalescing entirely and only spends the token.
+	p.Decide("0.1", Message{ID: 1, Source: "0.2", Subject: "s", Urgent: true}, State{Notifiable: 1}, now)
+
+	capped := p.Decide("0.1", Message{ID: 2, Source: "0.2", Subject: "s"},
+		State{Notifiable: 2}, now.Add(500*time.Millisecond))
+	if capped.Action != Suppress {
+		t.Fatalf("Action = %v, want Suppress -- the bucket is empty", capped.Action)
+	}
+
+	// Well inside what would have been the capped message's window, but the
+	// bucket has refilled: this message must be written, not swallowed by a
+	// window that a capped message had no right to open.
+	d := p.Decide("0.1", Message{ID: 3, Source: "0.2", Subject: "s"},
+		State{Notifiable: 3}, now.Add(1500*time.Millisecond))
+	if d.Action == Suppress {
+		t.Fatal("a capped message must not open a coalescing window that swallows its successors")
+	}
+}

@@ -73,11 +73,22 @@ type State struct {
 	Notifiable int  // Store.NotifiableCount(to)
 	Announced  int  // backlog size already announced (INV-2)
 	Hot        bool // recipient has a live session
-	AlwaysOn   bool
+	// AlwaysOn marks a bubble that is contracted to stay reachable, and so
+	// may be woken for non-urgent mail. Nothing sets it yet -- the kernel
+	// wiring in Task 7 populates it from the bubble's capabilities.
+	AlwaysOn bool
 }
 
 // Decision is the caller's instruction sheet. Text is always PTY-safe and
 // single-line, so the caller may type it verbatim.
+//
+// MarkRead and IDs answer different questions and must not be conflated.
+// MarkRead is "these messages were delivered in full, mark them read"; it is
+// only ever populated by an Inline delivery. IDs is "this decision covers
+// these queued messages", populated when Pending drains a coalescing batch,
+// and says nothing about whether they were read. They overlap in exactly one
+// case: a drained batch of one that was small enough to inline, where the
+// single id appears in both because it was both covered and delivered.
 type Decision struct {
 	Action    Action
 	Text      string // rendered, PTY-safe, single line; empty unless Notice/Inline/Rollup
@@ -192,14 +203,25 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 			default:
 				// Window expired: report what was swallowed, then reopen.
 				n, since, src, subj := w.count, w.opened, w.source, w.subject
-				b.windows[r.ID] = &muteWindow{opened: now, source: msg.Source, subject: msg.Subject}
 				if n == 0 {
-					break // nothing accumulated; fall through to normal delivery
+					// Nothing accumulated; reopen and deliver normally.
+					b.windows[r.ID] = &muteWindow{opened: now, source: msg.Source, subject: msg.Subject}
+					break
 				}
-				// The ceiling still applies: a rollup is a real write.
+				// The ceiling still applies: a rollup is a real write. It is
+				// checked BEFORE the window is reopened, because the swallowed
+				// messages carry MarkMuted and are therefore not notifiable in
+				// the store -- resetting the count on a capped rollup would
+				// erase the only remaining record of them, which is the
+				// silent-stall failure direction.
 				if !p.ceiling.Allow(to, now) {
 					return Decision{Action: Suppress, Rule: r.ID}
 				}
+				// The message that triggers the rollup is deliberately neither
+				// delivered on its own nor counted in the rollup it triggered:
+				// it is the first message of the window it opens here, exactly
+				// like the first match that opened the previous one.
+				b.windows[r.ID] = &muteWindow{opened: now, source: msg.Source, subject: msg.Subject}
 				return Decision{
 					Action: Rollup,
 					Text:   renderRollup(n, subj, src, since),
@@ -231,13 +253,20 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 			c.backlog = st.Notifiable
 			return Decision{Action: Suppress}
 		}
-		b.coalesce = &coalesceBuf{opened: now}
 	}
 
 	// 4. INV-1 ceiling, last gate before the write. Nothing above may bypass
 	// it; the caller records this as NoticesCapped.
 	if !p.ceiling.Allow(to, now) {
 		return Decision{Action: Suppress}
+	}
+
+	// Only a message that is actually written earns a coalescing window. If
+	// this opened above the ceiling gate, a capped message would buy 3s of
+	// silence it never paid for, and its own id would appear in neither the
+	// batch's IDs nor any MarkRead -- silently dropped from both.
+	if !msg.Urgent {
+		b.coalesce = &coalesceBuf{opened: now}
 	}
 
 	return deliver(msg, st, !st.Hot && (msg.Urgent || st.AlwaysOn))
