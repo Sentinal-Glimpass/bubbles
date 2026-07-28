@@ -20,6 +20,7 @@ type Message struct {
 	ReplyTo  int // id this message replies to (0 = not a reply)
 	Read     bool
 	Replied  bool // a reply referencing this message has been sent
+	Muted    bool `json:"muted,omitempty"` // suppress notification only; message is never dropped
 }
 
 // Store holds all messages in a flat log, queried by recipient or sender.
@@ -114,6 +115,36 @@ func (s *Store) UnreadCount(owner addr.Address) int {
 	n := 0
 	for _, m := range s.all {
 		if m.To == owner && !m.Read {
+			n++
+		}
+	}
+	return n
+}
+
+// SetMuted marks the message with the given id as muted, suppressing its
+// notification without affecting delivery or read state. Unknown ids are a
+// silent no-op.
+func (s *Store) SetMuted(id int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range s.all {
+		if m.ID == id {
+			m.Muted = true
+			s.ver++
+			return
+		}
+	}
+}
+
+// NotifiableCount returns how many of owner's unread messages should trigger
+// a notification, i.e. unread and not muted. UnreadCount stays truthful and
+// unaffected by this.
+func (s *Store) NotifiableCount(owner addr.Address) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, m := range s.all {
+		if m.To == owner && !m.Read && !m.Muted {
 			n++
 		}
 	}

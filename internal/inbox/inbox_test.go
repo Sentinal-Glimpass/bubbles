@@ -72,3 +72,28 @@ func TestSnapshotLoadRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestNotifiableCountExcludesMuted(t *testing.T) {
+	s := New()
+	id1 := s.Append(Message{To: "0.1", Subject: "real"})
+	id2 := s.Append(Message{To: "0.1", Subject: "noise"})
+	s.SetMuted(id2)
+
+	if got := s.UnreadCount("0.1"); got != 2 {
+		t.Fatalf("UnreadCount = %d, want 2 (must stay truthful)", got)
+	}
+	if got := s.NotifiableCount("0.1"); got != 1 {
+		t.Fatalf("NotifiableCount = %d, want 1", got)
+	}
+	_ = id1
+}
+
+func TestMutedMessagesAreStillReadable(t *testing.T) {
+	s := New()
+	id := s.Append(Message{To: "0.1", Subject: "noise", Body: "b"})
+	s.SetMuted(id)
+	got := s.Take("0.1")
+	if len(got) != 1 || got[0].Subject != "noise" {
+		t.Fatalf("muted message must still be returned by Take, got %+v", got)
+	}
+}
