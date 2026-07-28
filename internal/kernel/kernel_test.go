@@ -1407,3 +1407,114 @@ func TestMuteByEnforcesMaxRulesCap(t *testing.T) {
 		t.Fatalf("a rejected rule must never be stored, still want %d, got %d", notify.MaxRules, len(k.Reg.MuteRules(a)))
 	}
 }
+
+// The following tests reproduce the real production leak that motivated this
+// phase: a webhook source ("mechmagnet-event-pump") sent an "opt_out" event
+// roughly every few minutes for four days. Webhook messages are urgent by
+// default, and urgent triggers EnsureAlive, so every event paged in a cold
+// bubble and paid a full prompt-cache rewarm just to re-conclude "this is
+// noise". Muting exists to make that cost one-time per window.
+//
+// Each property gets its own focused test rather than one big assertion list,
+// so a failure names exactly which guarantee broke.
+
+// TestMechmagnetNoiseCostsOneNoticePerWindow: 200 muted webhook events must
+// produce at most one terminal notice -- the first opens the mute window, the
+// rest are silent.
+func TestMechmagnetNoiseCostsOneNoticePerWindow(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "qa", "/tmp/qa", runner.SpawnOpts{Persona: "qa"})
+	k.EnsureAlive(a)
+	if _, err := k.MuteBy(a, "mechmagnet-event-pump", "^opt_out$", "", "1h", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	}
+	notices := strings.Count(fr.Session(a).Written(), "📬")
+	if notices > 1 {
+		t.Fatalf("notices = %d, want at most 1 for 200 muted events in one window", notices)
+	}
+}
+
+// TestMechmagnetNoiseAllMessagesStayFiled: muting suppresses the NOTIFICATION,
+// never the mail -- all 200 events must still be filed and readable.
+func TestMechmagnetNoiseAllMessagesStayFiled(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "qa", "/tmp/qa", runner.SpawnOpts{Persona: "qa"})
+	k.EnsureAlive(a)
+	if _, err := k.MuteBy(a, "mechmagnet-event-pump", "^opt_out$", "", "1h", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	}
+	if k.Store.UnreadCount(a) != 200 {
+		t.Fatalf("all 200 events must still be filed, got %d", k.Store.UnreadCount(a))
+	}
+}
+
+// TestMechmagnetNoiseSuppressionIsCounted: silent suppression is a defect in
+// this codebase -- every one of the 199 muted-after-the-first events must be
+// metered, or the leak becomes invisible again just in a different way.
+func TestMechmagnetNoiseSuppressionIsCounted(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "qa", "/tmp/qa", runner.SpawnOpts{Persona: "qa"})
+	k.EnsureAlive(a)
+	if _, err := k.MuteBy(a, "mechmagnet-event-pump", "^opt_out$", "", "1h", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	}
+	if got := k.Cost.Snapshot()[a].NoticesSuppressed; got != 199 {
+		t.Fatalf("suppressions must be counted, got %d want 199", got)
+	}
+}
+
+// TestMechmagnetNoiseNeverRewarmsColdBubble is the property the whole phase
+// turns on: once the mute window is open, further matching urgent events must
+// NOT wake a cold bubble -- that page-in is the rewarm cost muting exists to
+// avoid. The second half is the control: an urgent event that does NOT match
+// the rule must still wake the same cold bubble, so the only difference
+// between the two cases is the mute veto, not a broken wake path.
+func TestMechmagnetNoiseNeverRewarmsColdBubble(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "qa", "/tmp/qa", runner.SpawnOpts{Persona: "qa"})
+	k.EnsureAlive(a)
+	if _, err := k.MuteBy(a, "mechmagnet-event-pump", "^opt_out$", "", "1h", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open the mute window, then make the bubble cold (kill/remove its session).
+	k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	_ = k.runner.Kill(a)
+	k.smu.Lock()
+	delete(k.sessions, a)
+	k.smu.Unlock()
+	if k.IsHot(a) {
+		t.Fatal("precondition: bubble should be cold after kill")
+	}
+
+	// More matching urgent events must not wake it.
+	for i := 0; i < 50; i++ {
+		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	}
+	if k.IsHot(a) {
+		t.Fatal("muted urgent webhooks must NOT wake a cold bubble -- that is the rewarm cost the phase exists to avoid")
+	}
+
+	// Control: a non-matching urgent event must still wake it.
+	k.WebhookDeliver(a, "mechmagnet-event-pump", "page_me", "not muted", true)
+	if !k.IsHot(a) {
+		t.Fatal("an UNMUTED urgent webhook must still wake a cold bubble -- otherwise this test proves nothing about mute")
+	}
+}
