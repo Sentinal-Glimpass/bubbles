@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -1384,5 +1385,25 @@ func TestMuteByStoresAndUnmuteRemoves(t *testing.T) {
 	}
 	if len(k.Reg.MuteRules(a)) != 0 {
 		t.Fatal("rule must be removed")
+	}
+}
+
+func TestMuteByEnforcesMaxRulesCap(t *testing.T) {
+	k := New(runner.NewFake())
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	for i := 0; i < notify.MaxRules; i++ {
+		if _, err := k.MuteBy(a, fmt.Sprintf("src-%d", i), "", "", "1h", ""); err != nil {
+			t.Fatalf("rule %d should be accepted, got %v", i, err)
+		}
+	}
+	if len(k.Reg.MuteRules(a)) != notify.MaxRules {
+		t.Fatalf("want %d stored rules, got %d", notify.MaxRules, len(k.Reg.MuteRules(a)))
+	}
+	_, err := k.MuteBy(a, "one-too-many", "", "", "1h", "")
+	if !errors.Is(err, notify.ErrTooManyRules) {
+		t.Fatalf("rule %d must be rejected with ErrTooManyRules, got %v", notify.MaxRules, err)
+	}
+	if len(k.Reg.MuteRules(a)) != notify.MaxRules {
+		t.Fatalf("a rejected rule must never be stored, still want %d, got %d", notify.MaxRules, len(k.Reg.MuteRules(a)))
 	}
 }

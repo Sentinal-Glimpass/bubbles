@@ -1095,16 +1095,19 @@ func (k *Kernel) MuteBy(by addr.Address, source, subjectRe, bodyRe, window, ttl 
 		TTL:       ttlDur,
 		Created:   k.clockNow(),
 	}
-	if _, err := notify.CompileRule(r); err != nil {
+
+	// Build a RuleSet from the bubble's existing stored rules and let
+	// RuleSet.Add be the single authority for BOTH compile validation and the
+	// MaxRules cap, so this path can never drift from notify's policy (e.g.
+	// if Add's ordering, dedup, or validation sequence ever changes).
+	rs := notify.NewRuleSet()
+	for _, existing := range k.Reg.MuteRules(by) {
+		_ = rs.Add(existing) // already validated at creation time; safe to re-add
+	}
+	if err := rs.Add(r); err != nil {
 		return "", err
 	}
-
-	rules := k.Reg.MuteRules(by)
-	if len(rules) >= notify.MaxRules {
-		return "", notify.ErrTooManyRules
-	}
-	rules = append(rules, r)
-	k.Reg.SetMuteRules(by, rules)
+	k.Reg.SetMuteRules(by, rs.List())
 	return r.ID, nil
 }
 
