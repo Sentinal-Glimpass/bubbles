@@ -625,10 +625,22 @@ Expected: FAIL — `NewPolicy` undefined.
 `internal/notify/policy.go`. Decision order — this order is load-bearing:
 
 1. **Mute check first** (before anything urgency-related). If a rule matches: if inside its window → `{Action: Suppress, MarkMuted: true, Wake: false, Rule: id}`. If the window expired → reset the window, return `Rollup` with text `fmt.Sprintf("📬 %d× %q from %s since %s — call inbox() to read.", n, subject, source, since.Format("15:04"))`.
-2. **INV-2 dedup:** if `st.Notifiable <= st.Announced` → `Suppress`. Compare against the store-derived `Announced`, never against session state.
-3. **INV-1 ceiling:** `if !ceiling.Allow(to, now) → {Action: Suppress}` and the caller records `FNoticesCapped`.
-4. **Coalescing:** non-urgent and window open → buffer and `Suppress`; `Pending` drains it later. Urgent bypasses.
+2. **INV-2 dedup:** if `st.Notifiable <= st.Announced` → `Suppress`. Compare against the store-derived `Announced`, never against session state and never against a policy-local counter — a local high-water mark that can drift above the store's truth reintroduces the *silent-stall* failure direction of `632fe95`.
+3. **Coalescing:** non-urgent and window open → buffer and `Suppress`; `Pending` drains it later. Urgent bypasses.
+4. **INV-1 ceiling:** `if !ceiling.Allow(to, now) → {Action: Suppress}` and the caller records `FNoticesCapped`.
 5. **Inline vs Notice:** sanitise + flatten the body; if `len(clean) <= InlineMaxBytes && st.Notifiable <= InlineMaxBacklog` → `Inline` with `MarkRead`; else `Notice`.
+
+> **Order correction (2026-07-28, approved mid-execution).** This list originally
+> placed the ceiling at step 3, *before* coalescing. That was wrong: a message
+> spent a ceiling token and was then suppressed by coalescing, so tokens burned
+> on messages that produced no notice — contradicting INV-1's own definition as a
+> cap on notices *written*, and letting a burst drain the bucket so genuine later
+> notices were capped. It also made `TestCeilingOverridesPolicy` vacuous (178
+> non-urgent messages coalesced down to `written == 1`, trivially satisfying a
+> `<= 6` assertion without ever exercising the ceiling). The ceiling is now the
+> last gate before any non-Suppress action, and the test uses `Urgent: true`
+> messages with an exact `== DefaultCeilingBurst` assertion. The rollup path
+> keeps its own ceiling check — a rollup is a real write.
 
 Port `sanitizePTY` from `internal/kernel/kernel.go:1294` into this package as an unexported `sanitize` (it must not import kernel — that would be an import cycle). Flatten `\n`/`\r` to a single space *before* sanitising. **Leave the kernel copy in place for now**; Task 7 switches the kernel to the notify one and deletes the kernel copy, keeping the move separate from the behaviour change.
 
