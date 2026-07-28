@@ -57,6 +57,71 @@ func TestSmallMessageIsInlinedAndNeedsNoInboxCall(t *testing.T) {
 	}
 }
 
+// TestInlinedDeliveryDoesNotStallTheNextMessage is the INV-2 shrinkage
+// regression. An inlined message leaves the notifiable set the moment it is
+// delivered, so recording the PRE-delivery backlog as the announced high-water
+// strands that high-water above a backlog that no longer exists — and the next
+// genuine message is deduped away against it. The bubble then misses a real
+// message until the stale-notice sweep, because an unrelated short message
+// happened to arrive just before it.
+func TestInlinedDeliveryDoesNotStallTheNextMessage(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)
+
+	// A short body is inlined, and the notice tells the bubble it is up to
+	// date — so it has no reason to call inbox().
+	k.Send(addr.Root, a, "status", "build green", 0, true)
+	if n := strings.Count(fr.Session(a).Written(), "📬"); n != 1 {
+		t.Fatalf("precondition: the short message should be inlined once, got %d notices", n)
+	}
+
+	// A second, unrelated message must be announced immediately.
+	k.Send(addr.Root, a, "deploy failed", "rollback needed", 0, true)
+	out := fr.Session(a).Written()
+	if n := strings.Count(out, "📬"); n != 2 {
+		t.Fatalf("the message after an inlined one must be announced, not deduped against a backlog that no longer exists: %d notices in %q", n, out)
+	}
+	if !strings.Contains(out, "deploy failed") {
+		t.Fatalf("the second message should be the one announced, got %q", out)
+	}
+}
+
+// TestMuteSuppressionDoesNotStallTheNextMessage: a mute-suppressed message
+// also leaves the notifiable set (SetMuted), so the same shrinkage question
+// applies. It does not strand the high-water, because a suppressed message is
+// never announced and so never raises it — this pins that.
+func TestMuteSuppressionDoesNotStallTheNextMessage(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.Reg.SetMuteRules(a, []notify.Rule{{ID: "r1", Source: "pump", SubjectRe: "^noise$", Window: time.Hour}})
+	k.EnsureAlive(a)
+
+	k.WebhookDeliver(a, "pump", "noise", "first opens the window", true)
+	n0 := strings.Count(fr.Session(a).Written(), "📬")
+	k.WebhookDeliver(a, "pump", "noise", "swallowed", true) // muted
+	if n := strings.Count(fr.Session(a).Written(), "📬"); n != n0 {
+		t.Fatalf("a muted message must not notify, got %d notices (was %d)", n, n0)
+	}
+
+	// Real mail right after must still get through.
+	k.Send(addr.Root, a, "deploy failed", "rollback needed", 0, true)
+	out := fr.Session(a).Written()
+	if strings.Count(out, "📬") != n0+1 {
+		t.Fatalf("real mail after a muted message must be announced, got %q", out)
+	}
+	if !strings.Contains(out, "deploy failed") {
+		t.Fatalf("the real message should be the one announced, got %q", out)
+	}
+	if k.Store.UnreadCount(a) != 3 {
+		t.Fatalf("all three messages must still be filed, got %d", k.Store.UnreadCount(a))
+	}
+}
+
 // TestDrainCoalescedAnnouncesTheBatch: non-urgent follow-ups inside the
 // coalescing window are batched, and the periodic drain is what actually
 // announces them. Without the drain a closed batch would stay silent until the
