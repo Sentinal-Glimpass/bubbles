@@ -141,6 +141,17 @@ func runApp() {
 			k.FlushHeldIfIdle()
 		}
 	}()
+	go func() { // write coalesced batches once their window closes, so a burst of
+		// non-urgent follow-ups costs one notice instead of one per message —
+		// and doesn't sit silent until the next message happens to arrive.
+		// Cadence is well under notify.CoalesceWindow so a closed batch is
+		// announced promptly. Never wakes a cold bubble.
+		t := time.NewTicker(1 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			k.DrainCoalesced()
+		}
+	}()
 	go func() { // periodic inbox drain: page in cold bubbles with pending mail so none go unanswered
 		t := time.NewTicker(time.Duration(messagePollMinutes()) * time.Minute)
 		defer t.Stop()
@@ -375,6 +386,32 @@ func runSampler(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program]) {
 			rows = rows[:5]
 		}
 		prog.Send(tui.UsageMsg{TotalMem: totalMem, TotalCPU: totalCPU, Hot: len(samples), Top: rows})
+		prog.Send(fleetHealthSnapshot(k, len(samples)))
+	}
+}
+
+// fleetHealthSnapshot summarizes the costmeter and fleet state into the
+// dashboard's FLEET block. Reuses the resource sampler's own hot count so it
+// doesn't need a second pass over live sessions.
+func fleetHealthSnapshot(k *kernel.Kernel, hot int) tui.FleetHealthMsg {
+	all := k.Reg.All()
+	var suppressed, capped, inlined int64
+	for _, c := range k.Cost.Snapshot() {
+		suppressed += c.NoticesSuppressed
+		capped += c.NoticesCapped
+		inlined += c.DeliveriesInline
+	}
+	backlog := 0
+	for _, b := range all {
+		backlog += k.Store.UnreadCount(b.Addr)
+	}
+	return tui.FleetHealthMsg{
+		Hot:        hot,
+		Total:      len(all),
+		Suppressed: int(suppressed),
+		Capped:     int(capped),
+		Inlined:    int(inlined),
+		Backlog:    backlog,
 	}
 }
 
@@ -476,6 +513,19 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 		return ipc.Reply{OK: true}
 	case "schedules":
 		return ipc.Reply{OK: true, Messages: k.SchedulesFor(from)}
+	case "mute":
+		id, err := k.MuteBy(from, r.Source, r.SubjectRe, r.BodyRe, r.Window, r.TTL)
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: id}
+	case "unmute":
+		if err := k.UnmuteBy(from, r.Addr); err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true}
+	case "mutes":
+		return ipc.Reply{OK: true, Messages: k.MutesFor(from)}
 	case "webhook":
 		target := addr.Address(r.To)
 		if r.To == "" {

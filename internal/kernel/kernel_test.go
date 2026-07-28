@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/bus"
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
+	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
@@ -361,7 +363,7 @@ func TestDeliverWhenReady(t *testing.T) {
 		time.Sleep(120 * time.Millisecond)
 		fr.Session(a).SetOutput("claude UI painted")
 	}()
-	k.deliverWhenReady(a, []byte("📬 New message"))
+	k.deliverWhenReadyThen(a, []byte("📬 New message"), nil)
 
 	if !strings.Contains(fr.Session(a).Written(), "New message") {
 		t.Fatalf("should deliver once the session is up, got %q", fr.Session(a).Written())
@@ -1277,6 +1279,14 @@ func TestRecoverUnread(t *testing.T) {
 
 // TestNudgeDedup: overlapping nudges for the same backlog don't stack; a new
 // message past the announced level nudges again; reading resets it.
+//
+// This test covers the NON-INLINED path specifically. The bodies are
+// deliberately longer than notify.InlineMaxBytes so every message is announced
+// by a plain notice and stays pending — the accumulating-backlog case these
+// assertions were written for. The inlined path behaves differently (an
+// inlined message is delivered in full and leaves the notifiable set, so there
+// is no shared batch left to drain) and is covered by
+// TestInlinedDeliveryDoesNotStallTheNextMessage.
 func TestNudgeDedup(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
@@ -1285,7 +1295,8 @@ func TestNudgeDedup(t *testing.T) {
 	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
 	k.EnsureAlive(a) // hot
 
-	k.Send(addr.Root, a, "m1", "", 0, true)
+	long := strings.Repeat("x", notify.InlineMaxBytes+1) // too big to inline
+	k.Send(addr.Root, a, "m1", long, 0, true)
 	first := strings.Count(fr.Session(a).Written(), "📬 New message")
 	if first != 1 {
 		t.Fatalf("first message should nudge once, got %d", first)
@@ -1297,13 +1308,20 @@ func TestNudgeDedup(t *testing.T) {
 	}
 	// more messages piling up before it reads do NOT re-nudge — one notice per
 	// batch (it'll drain them all in the one inbox() call)
-	k.Send(addr.Root, a, "m2", "", 0, true)
+	k.Send(addr.Root, a, "m2", long, 0, true)
 	if strings.Count(fr.Session(a).Written(), "📬 New message") != 1 {
 		t.Fatal("a second message before reading should NOT add another notice")
 	}
+	// ...and a drain on top of that still adds nothing (added: the original
+	// test never checked that the suppressed second message could not be
+	// resurrected by the sweep).
+	k.DrainInboxes()
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 1 {
+		t.Fatal("a drain after a suppressed second message must not stack a notice")
+	}
 	// reading resets: the next message nudges again (fresh batch)
 	k.Inbox(a)
-	k.Send(addr.Root, a, "m3", "", 0, true)
+	k.Send(addr.Root, a, "m3", long, 0, true)
 	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
 		t.Fatal("after reading, a new message should start a fresh notice")
 	}
@@ -1334,5 +1352,281 @@ func TestSpawnNameDescription(t *testing.T) {
 	cb, _ := k.Reg.Get(c)
 	if cb.Name != "" || cb.Label() != "legacy" {
 		t.Fatalf("legacy bubble should fall back to Persona: Name=%q Label=%q", cb.Name, cb.Label())
+	}
+}
+
+func TestMuteByRejectsBadRegexWithAUsefulError(t *testing.T) {
+	k := New(runner.NewFake())
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	_, err := k.MuteBy(a, "pump", "([unclosed", "", "1h", "")
+	if err == nil {
+		t.Fatal("a bad regex must be rejected at rule-creation time")
+	}
+	if !strings.Contains(err.Error(), "error parsing regexp") {
+		t.Fatalf("error must explain the regex failure, got %v", err)
+	}
+	if len(k.Reg.MuteRules(a)) != 0 {
+		t.Fatal("a rejected rule must never be stored")
+	}
+}
+
+func TestMuteByStoresAndUnmuteRemoves(t *testing.T) {
+	k := New(runner.NewFake())
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	id, err := k.MuteBy(a, "pump", "^opt_out$", "", "1h", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(k.Reg.MuteRules(a)) != 1 {
+		t.Fatal("rule must be stored")
+	}
+	if err := k.UnmuteBy(a, id); err != nil {
+		t.Fatal(err)
+	}
+	if len(k.Reg.MuteRules(a)) != 0 {
+		t.Fatal("rule must be removed")
+	}
+}
+
+func TestMuteByEnforcesMaxRulesCap(t *testing.T) {
+	k := New(runner.NewFake())
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	for i := 0; i < notify.MaxRules; i++ {
+		if _, err := k.MuteBy(a, fmt.Sprintf("src-%d", i), "", "", "1h", ""); err != nil {
+			t.Fatalf("rule %d should be accepted, got %v", i, err)
+		}
+	}
+	if len(k.Reg.MuteRules(a)) != notify.MaxRules {
+		t.Fatalf("want %d stored rules, got %d", notify.MaxRules, len(k.Reg.MuteRules(a)))
+	}
+	_, err := k.MuteBy(a, "one-too-many", "", "", "1h", "")
+	if !errors.Is(err, notify.ErrTooManyRules) {
+		t.Fatalf("rule %d must be rejected with ErrTooManyRules, got %v", notify.MaxRules, err)
+	}
+	if len(k.Reg.MuteRules(a)) != notify.MaxRules {
+		t.Fatalf("a rejected rule must never be stored, still want %d, got %d", notify.MaxRules, len(k.Reg.MuteRules(a)))
+	}
+}
+
+// The following tests reproduce the real production leak that motivated this
+// phase: a webhook source ("mechmagnet-event-pump") sent an "opt_out" event
+// roughly every few minutes for four days. Webhook messages are urgent by
+// default, and urgent triggers EnsureAlive, so every event paged in a cold
+// bubble and paid a full prompt-cache rewarm just to re-conclude "this is
+// noise". Muting exists to make that cost one-time per window.
+//
+// Each property gets its own focused test rather than one big assertion list,
+// so a failure names exactly which guarantee broke.
+
+// TestMechmagnetNoiseCostsOneNoticePerWindow: 200 muted webhook events must
+// produce at most one terminal notice -- the first opens the mute window, the
+// rest are silent.
+func TestMechmagnetNoiseCostsOneNoticePerWindow(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "qa", "/tmp/qa", runner.SpawnOpts{Persona: "qa"})
+	k.EnsureAlive(a)
+	if _, err := k.MuteBy(a, "mechmagnet-event-pump", "^opt_out$", "", "1h", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	}
+	notices := strings.Count(fr.Session(a).Written(), "📬")
+	if notices != 1 {
+		// Exact, not "at most": 0 notices would mean the bubble was never told
+		// the traffic exists at all, which is the silent-stall failure and would
+		// pass a `> 1` assertion just as happily as the correct answer.
+		t.Fatalf("notices = %d, want exactly 1 for 200 muted events in one window", notices)
+	}
+}
+
+// TestMechmagnetNoiseAllMessagesStayFiled: muting suppresses the NOTIFICATION,
+// never the mail -- all 200 events must still be filed and readable.
+func TestMechmagnetNoiseAllMessagesStayFiled(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "qa", "/tmp/qa", runner.SpawnOpts{Persona: "qa"})
+	k.EnsureAlive(a)
+	if _, err := k.MuteBy(a, "mechmagnet-event-pump", "^opt_out$", "", "1h", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	}
+	if k.Store.UnreadCount(a) != 200 {
+		t.Fatalf("all 200 events must still be filed, got %d", k.Store.UnreadCount(a))
+	}
+}
+
+// TestMechmagnetNoiseSuppressionIsCounted: silent suppression is a defect in
+// this codebase -- every one of the 199 muted-after-the-first events must be
+// metered, or the leak becomes invisible again just in a different way.
+func TestMechmagnetNoiseSuppressionIsCounted(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "qa", "/tmp/qa", runner.SpawnOpts{Persona: "qa"})
+	k.EnsureAlive(a)
+	if _, err := k.MuteBy(a, "mechmagnet-event-pump", "^opt_out$", "", "1h", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	}
+	if got := k.Cost.Snapshot()[a].NoticesSuppressed; got != 199 {
+		t.Fatalf("suppressions must be counted, got %d want 199", got)
+	}
+}
+
+// TestMechmagnetNoiseNeverRewarmsColdBubble is the property the whole phase
+// turns on: once the mute window is open, further matching urgent events must
+// NOT wake a cold bubble -- that page-in is the rewarm cost muting exists to
+// avoid. The second half is the control: an urgent event that does NOT match
+// the rule must still wake the same cold bubble, so the only difference
+// between the two cases is the mute veto, not a broken wake path.
+func TestMechmagnetNoiseNeverRewarmsColdBubble(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "qa", "/tmp/qa", runner.SpawnOpts{Persona: "qa"})
+	k.EnsureAlive(a)
+	if _, err := k.MuteBy(a, "mechmagnet-event-pump", "^opt_out$", "", "1h", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open the mute window, then make the bubble cold (kill/remove its session).
+	k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	_ = k.runner.Kill(a)
+	k.smu.Lock()
+	delete(k.sessions, a)
+	k.smu.Unlock()
+	if k.IsHot(a) {
+		t.Fatal("precondition: bubble should be cold after kill")
+	}
+
+	// More matching urgent events must not wake it.
+	for i := 0; i < 50; i++ {
+		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	}
+	if k.IsHot(a) {
+		t.Fatal("muted urgent webhooks must NOT wake a cold bubble -- that is the rewarm cost the phase exists to avoid")
+	}
+
+	// Control: a non-matching urgent event must still wake it.
+	k.WebhookDeliver(a, "mechmagnet-event-pump", "page_me", "not muted", true)
+	if !k.IsHot(a) {
+		t.Fatal("an UNMUTED urgent webhook must still wake a cold bubble -- otherwise this test proves nothing about mute")
+	}
+}
+
+// mutedHeldBubble sets up the exact production shape the operator-flush paths
+// used to break: a hot bubble holding a backlog of nothing but traffic it
+// declared as noise, with the operator now dived in and typing.
+//
+// The noise arrives BEFORE focus, which is what makes the backlog genuinely
+// muted: the mute policy runs on the send path, so a message held back during
+// typing has not been classified yet. clearNudge then models the bubble having
+// answered the one notice the first event earned, so that INV-2 cannot be what
+// silences the flush -- only the notifiable count can.
+func mutedHeldBubble(t *testing.T) (*runner.FakeRunner, *Kernel, addr.Address) {
+	t.Helper()
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	k.TypingWindow = time.Hour // treat the operator as continuously typing
+	a, _ := k.Spawn(addr.Root, "qa", "/tmp/qa", runner.SpawnOpts{Persona: "qa"})
+	k.EnsureAlive(a)
+	if _, err := k.MuteBy(a, "mechmagnet-event-pump", "^opt_out$", "", "1h", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
+	}
+	if k.Store.NotifiableCount(a) != 0 {
+		t.Fatalf("precondition: a muted backlog must be non-notifiable, got %d", k.Store.NotifiableCount(a))
+	}
+	if k.Store.UnreadCount(a) != 200 {
+		t.Fatalf("precondition: muting suppresses the notice, never the mail, got %d", k.Store.UnreadCount(a))
+	}
+	k.clearNudge(a)
+	k.SetFocus(a)
+	k.NoteKeystroke()
+	return fr, k, a
+}
+
+// TestFlushHeldIfIdleIgnoresAMutedOnlyBacklog: the operator pausing must not
+// undo muting. These paths used to read Store.UnreadCount and write
+// notify.RenderDrain straight to the PTY, so a bubble whose whole backlog was
+// muted noise was told "you have 200 unread" the instant typing stopped -- a
+// full model turn on traffic it had explicitly declared to be noise, in the one
+// bubble the operator is watching.
+func TestFlushHeldIfIdleIgnoresAMutedOnlyBacklog(t *testing.T) {
+	fr, k, a := mutedHeldBubble(t)
+	before := fr.Session(a).Written() // the first event legitimately opened the window
+	k.TypingWindow = time.Nanosecond  // operator pauses
+	k.FlushHeldIfIdle()
+	if got := strings.TrimPrefix(fr.Session(a).Written(), before); got != "" {
+		t.Fatalf("a muted-only backlog must produce NO flush notice, got %q", got)
+	}
+}
+
+// TestUnsetFocusIgnoresAMutedOnlyBacklog is the same guarantee on the other
+// operator path: leaving the pane.
+func TestUnsetFocusIgnoresAMutedOnlyBacklog(t *testing.T) {
+	fr, k, a := mutedHeldBubble(t)
+	before := fr.Session(a).Written()
+	k.UnsetFocus(a)
+	if got := strings.TrimPrefix(fr.Session(a).Written(), before); got != "" {
+		t.Fatalf("leaving the pane must not announce a muted-only backlog, got %q", got)
+	}
+}
+
+// TestFlushHeldIfIdleStillDeliversANotifiableBacklog is the control: the flush
+// paths exist so mail held back during typing lands as soon as the operator
+// pauses. Suppressing the muted case must not have broken that.
+func TestFlushHeldIfIdleStillDeliversANotifiableBacklog(t *testing.T) {
+	fr, k, a := mutedHeldBubble(t)
+	if _, err := k.Send(addr.Root, a, "real work", strings.Repeat("x", 400), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	before := fr.Session(a).Written() // the first event's notice must not count as the flush
+	k.TypingWindow = time.Nanosecond
+	k.FlushHeldIfIdle()
+	if got := strings.TrimPrefix(fr.Session(a).Written(), before); !strings.Contains(got, "unread") {
+		t.Fatalf("a genuinely notifiable backlog must still flush on pause, got %q", got)
+	}
+}
+
+// TestUnsetFocusStillDeliversANotifiableBacklog: same control for leaving.
+func TestUnsetFocusStillDeliversANotifiableBacklog(t *testing.T) {
+	fr, k, a := mutedHeldBubble(t)
+	if _, err := k.Send(addr.Root, a, "real work", strings.Repeat("x", 400), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	before := fr.Session(a).Written()
+	k.UnsetFocus(a)
+	if got := strings.TrimPrefix(fr.Session(a).Written(), before); !strings.Contains(got, "unread") {
+		t.Fatalf("leaving must still announce a genuinely notifiable backlog, got %q", got)
+	}
+}
+
+// TestOperatorFlushRespectsTheINV1Ceiling: the flush paths used to bypass the
+// flood ceiling entirely. INV-1 is not disableable by any path.
+func TestOperatorFlushRespectsTheINV1Ceiling(t *testing.T) {
+	fr, k, a := mutedHeldBubble(t)
+	if _, err := k.Send(addr.Root, a, "real work", strings.Repeat("x", 400), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	k.TypingWindow = time.Nanosecond
+	for i := 0; i < 40; i++ {
+		k.UnsetFocus(a)
+		k.SetFocus(a)
+		k.clearNudge(a) // simulate the bubble draining, so only INV-1 can bound this
+	}
+	if n := strings.Count(fr.Session(a).Written(), "📬"); n > notify.DefaultCeilingBurst {
+		t.Fatalf("operator flushes wrote %d notices, INV-1 caps a burst at %d", n, notify.DefaultCeilingBurst)
 	}
 }

@@ -140,6 +140,29 @@ func headroomRows(h Headroom) []string {
 	return rows
 }
 
+// fleetHealthRows renders the cost/health summary: a header with the hot/total
+// count, a counters line (mute/cap/inline), and a backlog line when non-zero.
+// Metrics whose source doesn't exist yet (Phase 4: stuck/crash-loop/failing-check
+// counts) are simply not rendered — never shown as a misleading zero. Pure over
+// the struct so it's testable without a terminal.
+func fleetHealthRows(h FleetHealth) []string {
+	sev := "normal"
+	switch {
+	case h.Capped > 0:
+		sev = "critical" // INV-1 flood ceiling is actively firing
+	case h.Backlog > 20:
+		sev = "warning"
+	}
+	rows := []string{
+		panelHead.Render(fmt.Sprintf("FLEET · %d/%d hot", h.Hot, h.Total)),
+		sevStyle(sev).Render(fmt.Sprintf("mute %d · cap %d · inline %d", h.Suppressed, h.Capped, h.Inlined)),
+	}
+	if h.Backlog > 0 {
+		rows = append(rows, panelStyle.Render(fmt.Sprintf("backlog %d", h.Backlog)))
+	}
+	return rows
+}
+
 // usagePanel builds the right-hand block: Claude account usage rows on top, then
 // the resources view (RAM/CPU + hot count, always shown), then the top bubbles by
 // CPU when any are live.
@@ -152,6 +175,7 @@ func usagePanel(u Model) []string {
 		panelHead.Render(fmt.Sprintf("RESOURCES · %d hot", u.usage.Hot)),
 		panelStyle.Render(fmt.Sprintf("RAM %s · CPU %.0f%%", humanBytes(u.usage.TotalMem), u.usage.TotalCPU)),
 	)
+	lines = append(lines, fleetHealthRows(u.health)...)
 	for _, r := range u.usage.Top {
 		name := r.Name
 		if len(name) > 12 {

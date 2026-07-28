@@ -625,10 +625,34 @@ Expected: FAIL — `NewPolicy` undefined.
 `internal/notify/policy.go`. Decision order — this order is load-bearing:
 
 1. **Mute check first** (before anything urgency-related). If a rule matches: if inside its window → `{Action: Suppress, MarkMuted: true, Wake: false, Rule: id}`. If the window expired → reset the window, return `Rollup` with text `fmt.Sprintf("📬 %d× %q from %s since %s — call inbox() to read.", n, subject, source, since.Format("15:04"))`.
-2. **INV-2 dedup:** if `st.Notifiable <= st.Announced` → `Suppress`. Compare against the store-derived `Announced`, never against session state.
-3. **INV-1 ceiling:** `if !ceiling.Allow(to, now) → {Action: Suppress}` and the caller records `FNoticesCapped`.
-4. **Coalescing:** non-urgent and window open → buffer and `Suppress`; `Pending` drains it later. Urgent bypasses.
+2. **INV-2 dedup:** if `st.Announced > 0` → `Suppress`. Compare against the store-derived `Announced`, never against session state and never against a policy-local counter — a local high-water mark that can drift above the store's truth reintroduces the *silent-stall* failure direction of `632fe95`.
+
+> **INV-2 correction (2026-07-28, approved mid-execution).** This originally read
+> `st.Notifiable <= st.Announced`, which re-announces whenever the backlog
+> *grows*. That is a **cost regression** in a cost-reduction phase: the superseded
+> `markNudge` fired at most once per backlog regardless of growth, and its comment
+> states why — *"This is what keeps a busy fleet from spending a turn per
+> message."* Under the old rule a trickle of N messages cost N turns instead of 1.
+> `Announced > 0` restores the one-notice-per-batch contract while remaining
+> compatible with the consumption fix below: an inlined message leaves 0 notifiable
+> behind, so `Announced` falls to 0 and the next message announces immediately.
+> No stall is introduced — a bubble announced but unread still has `RecoverUnread`'s
+> staleness recovery behind it.
+3. **Coalescing:** non-urgent and window open → buffer and `Suppress`; `Pending` drains it later. Urgent bypasses.
+4. **INV-1 ceiling:** `if !ceiling.Allow(to, now) → {Action: Suppress}` and the caller records `FNoticesCapped`.
 5. **Inline vs Notice:** sanitise + flatten the body; if `len(clean) <= InlineMaxBytes && st.Notifiable <= InlineMaxBacklog` → `Inline` with `MarkRead`; else `Notice`.
+
+> **Order correction (2026-07-28, approved mid-execution).** This list originally
+> placed the ceiling at step 3, *before* coalescing. That was wrong: a message
+> spent a ceiling token and was then suppressed by coalescing, so tokens burned
+> on messages that produced no notice — contradicting INV-1's own definition as a
+> cap on notices *written*, and letting a burst drain the bucket so genuine later
+> notices were capped. It also made `TestCeilingOverridesPolicy` vacuous (178
+> non-urgent messages coalesced down to `written == 1`, trivially satisfying a
+> `<= 6` assertion without ever exercising the ceiling). The ceiling is now the
+> last gate before any non-Suppress action, and the test uses `Urgent: true`
+> messages with an exact `== DefaultCeilingBurst` assertion. The rollup path
+> keeps its own ceiling check — a rollup is a real write.
 
 Port `sanitizePTY` from `internal/kernel/kernel.go:1294` into this package as an unexported `sanitize` (it must not import kernel — that would be an import cycle). Flatten `\n`/`\r` to a single space *before* sanitising. **Leave the kernel copy in place for now**; Task 7 switches the kernel to the notify one and deletes the kernel copy, keeping the move separate from the behaviour change.
 
@@ -842,7 +866,28 @@ if d.Action == notify.Suppress {
 
 Only after this point may the existing focus/typing hold, the `urgent → EnsureAlive` page-in, and the PTY write run — and the page-in is now additionally gated on `d.Wake`. Preserve verbatim: the `isFocused(to) && typingActive()` hold, the `InputReady()` check with its `deliverWhenReady` fallback, and the `b.SessionID == ""` first-launch case.
 
-On write: `FNoticesWritten`, plus `FDeliveriesInline` and `Store` read-marking for each `d.MarkRead` id, or `FDeliveriesViaTool` for a plain `Notice`.
+On write: `FNoticesWritten`, plus `FDeliveriesInline` and `Store.SetMuted` for each `d.MarkRead` id, or `FDeliveriesViaTool` for a plain `Notice`.
+
+> **Correction (2026-07-28, approved mid-execution).** This step originally said
+> to mark inlined messages **read**. That is unsafe: `Store.Take` skips messages
+> with `Read == true`, so if the PTY write fails afterwards — bubble mid-boot,
+> `deliverWhenReady` timeout, write error — the message is consumed but never
+> seen by anyone. That is silent non-delivery, which §9.1 rule 3 calls a worse
+> failure than redelivery, and it also contradicts this plan's own constraint
+> that every filed message stays readable via `inbox()`. Marking at decision time
+> cannot be correct when the write can fail after the decision. Inlined messages
+> are therefore marked **non-notifiable** (`SetMuted`), not read: they never
+> re-announce, but they remain readable. The only cost is that an inlined body is
+> shown a second time if the bubble later calls `inbox()` for other mail.
+>
+> **Consequence — INV-2 must track a shrinking set.** Because inlined and muted
+> messages leave the notifiable set, an `announced` count high-water compared
+> against `Notifiable` goes stale and silently suppresses the *next* real message
+> (observed: a genuine message stalled for up to the 2-minute stale-notice
+> recovery). The announced high-water must be set to the backlog that REMAINS
+> notifiable after a delivery — `st.Notifiable - len(d.MarkRead)` — not to
+> `st.Notifiable`. This applies to every path that removes messages from the
+> notifiable set.
 
 `announced(to)` replaces the `notified` map as the INV-2 source — it returns the backlog size last announced, and is cleared by `Inbox()` (existing `clearNudge` call site). Delete `markNudge`/`recoverNudge` and route `RecoverUnread` through `Decide` too (Task 8).
 

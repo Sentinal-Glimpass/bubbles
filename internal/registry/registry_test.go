@@ -2,8 +2,10 @@ package registry
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
+	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
 )
 
 func TestRootSeeded(t *testing.T) {
@@ -52,5 +54,37 @@ func TestStatusAndChildren(t *testing.T) {
 	}
 	if _, ok := r.Get("0.9"); ok {
 		t.Fatal("Get unknown should be false")
+	}
+}
+
+func TestMuteRulesRoundTrip(t *testing.T) {
+	r := New()
+	a := r.Add(addr.Root, "w", "/tmp")
+	r.SetMuteRules(a.Addr, []notify.Rule{{ID: "r1", Source: "pump", Window: time.Hour}})
+	got := r.MuteRules(a.Addr)
+	if len(got) != 1 || got[0].ID != "r1" {
+		t.Fatalf("MuteRules = %+v, want one rule r1", got)
+	}
+}
+
+func TestSetMuteRulesBumpsVersion(t *testing.T) {
+	r := New()
+	a := r.Add(addr.Root, "w", "/tmp")
+	v0 := r.Version()
+	r.SetMuteRules(a.Addr, []notify.Rule{{ID: "r1", Source: "pump"}})
+	if r.Version() == v0 {
+		t.Fatal("SetMuteRules must bump version so fleet.json is re-saved")
+	}
+}
+
+func TestMuteRulesReturnsCopy(t *testing.T) {
+	r := New()
+	a := r.Add(addr.Root, "w", "/tmp")
+	r.SetMuteRules(a.Addr, []notify.Rule{{ID: "r1", Source: "pump"}})
+	got := r.MuteRules(a.Addr)
+	got[0].ID = "mutated"
+	got2 := r.MuteRules(a.Addr)
+	if got2[0].ID != "r1" {
+		t.Fatalf("MuteRules must return a copy, got mutated state: %+v", got2)
 	}
 }

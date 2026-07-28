@@ -14,6 +14,9 @@ type Backend interface {
 	Schedule(by, target, subject, body, every, daily string, urgent bool) (string, error)
 	Unschedule(by, id string) error
 	Schedules(by string) []string
+	Mute(by, source, subjectRe, bodyRe, window, ttl string) (string, error) // self-scoped: by may only mute its own inbox
+	Unmute(by, id string) error
+	Mutes(by string) []string
 	Webhook(by, target string) (string, error)       // incoming-webhook URL for target (self or a bubble in by's subtree)
 	WebhookRotate(by, target string) (string, error) // revoke + reissue target's URL (same authority)
 	ControlWebhook(by string, rotate bool) (string, error) // control-webhook URL that spawns/deletes bubbles as the caller
@@ -137,6 +140,35 @@ func (s *Server) tools() []Tool {
 		{
 			Name:        "schedules",
 			Description: "List the wake schedules you can see (ones you created or that target you / your subtree).",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "mute",
+			Description: "Silence noisy inbound traffic to YOUR OWN inbox: matching messages stop waking you AND stop generating a notification, but still land in inbox() so nothing is lost. Give source (exact sender, optional), subject_re/body_re (regex, optional — at least one of the three required), a required window (\"1h\"), and an optional ttl after which the rule expires. Returns the rule id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"source":     map[string]any{"type": "string", "description": "Exact sender to match (optional)."},
+					"subject_re": map[string]any{"type": "string", "description": "Regex to match the subject (optional)."},
+					"body_re":    map[string]any{"type": "string", "description": "Regex to match the body (optional)."},
+					"window":     map[string]any{"type": "string", "description": "Required duration like \"1h\" or \"15m\"."},
+					"ttl":        map[string]any{"type": "string", "description": "Optional: rule expires after this duration."},
+				},
+				"required": []string{"window"},
+			},
+		},
+		{
+			Name:        "unmute",
+			Description: "Remove one of YOUR OWN mute rules by id.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"id": map[string]any{"type": "string", "description": "The mute rule id from mute()/mutes()."}},
+				"required":   []string{"id"},
+			},
+		},
+		{
+			Name:        "mutes",
+			Description: "List YOUR OWN mute rules.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
