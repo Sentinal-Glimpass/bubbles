@@ -104,6 +104,25 @@ func TestNoUsageAnywhereReturnsErrNoUsage(t *testing.T) {
 	}
 }
 
+func TestOversizedLinesDoNotTruncateTheScan(t *testing.T) {
+	// A single line over 1MB (past both the default 64KB scanner buffer and
+	// the enlarged buffer's initial 1MB capacity, forcing it to grow) must
+	// not abort the scan or hide the valid usage entry that follows it.
+	huge := `{"type":"user","message":{"content":"` + strings.Repeat("x", 2<<20) + `"}}`
+	lines := []string{
+		huge,
+		`{"type":"assistant","message":{"usage":{"input_tokens":3,"cache_creation_input_tokens":4,"cache_read_input_tokens":5,"output_tokens":600}}}`,
+	}
+	p := writeFixture(t, lines)
+	got, err := Read(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ContextTokens != 12 { // 3+4+5
+		t.Fatalf("ContextTokens = %d, want 12 (scan must survive the oversized line)", got.ContextTokens)
+	}
+}
+
 func TestMalformedLinesAreSkippedNotFatal(t *testing.T) {
 	lines := []string{
 		`{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":1,"cache_read_input_tokens":1,"output_tokens":1}}}`,

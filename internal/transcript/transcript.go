@@ -13,10 +13,12 @@ import (
 	"os"
 )
 
-// compactMarker is the exact byte signature Claude Code writes for a
-// compaction boundary. Kept identical to cmd/bubbles/health.go's compactMarker
-// so the two readers never disagree about what counts as compacted.
-var compactMarker = []byte(`"isCompactSummary":true`)
+// CompactMarker is the exact byte signature Claude Code writes for a
+// compaction boundary. This package is the single authority for what a
+// compaction looks like — everything that reads transcripts (including
+// cmd/bubbles/health.go's trimTranscript) must use this constant rather than
+// re-deriving the literal, so the two never drift apart.
+var CompactMarker = []byte(`"isCompactSummary":true`)
 
 // ErrNoUsage is returned when a transcript contains no entry carrying a usage
 // object, so ContextTokens has no basis (e.g. a conversation with only user
@@ -83,7 +85,7 @@ func Read(path string) (Stats, error) {
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if bytes.Contains(line, compactMarker) {
+		if bytes.Contains(line, CompactMarker) {
 			stats.HasCompaction = true
 		}
 

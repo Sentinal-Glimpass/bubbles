@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
+	"github.com/Sentinal-Glimpass/bubbles/internal/transcript"
 )
 
 // HealthManager is the fleet-health daemon: background upkeep that keeps the
@@ -67,10 +68,10 @@ func (m *HealthManager) trimTranscripts() {
 	}
 }
 
-// compactMarker is the exact byte signature Claude Code writes for a compaction
-// boundary. Everything after it is a self-contained conversation tree rooted at
-// a parentUuid:null entry, so cutting before it never breaks the active thread.
-var compactMarker = []byte(`"isCompactSummary":true`)
+// Everything after transcript.CompactMarker is a self-contained conversation
+// tree rooted at a parentUuid:null entry, so cutting before it never breaks
+// the active thread. See internal/transcript for the single definition of
+// what a compaction boundary looks like.
 
 // trimTranscript rewrites path in place, discarding everything before
 // (latestCompaction - keepBefore) lines. No-op if there's no compaction yet or
@@ -85,7 +86,7 @@ func trimTranscript(path string, keepBefore int) error {
 	lines := bytes.SplitAfter(data, []byte{'\n'}) // keeps the trailing \n on each line
 	latest := -1
 	for i, l := range lines {
-		if bytes.Contains(l, compactMarker) {
+		if bytes.Contains(l, transcript.CompactMarker) {
 			latest = i
 		}
 	}
