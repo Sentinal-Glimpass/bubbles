@@ -281,7 +281,7 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 // deliver renders the terminal Inline-or-Notice choice for a message that has
 // already passed every suppression gate.
 func deliver(msg Message, st State, wake bool) Decision {
-	clean := sanitize(flatten(msg.Body))
+	clean := Sanitize(flatten(msg.Body))
 	if len(clean) <= InlineMaxBytes && st.Notifiable <= InlineMaxBacklog {
 		return Decision{
 			Action:   Inline,

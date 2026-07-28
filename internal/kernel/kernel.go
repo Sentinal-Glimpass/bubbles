@@ -573,7 +573,7 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 // cold bubble isn't typed into a still-initializing claude (where it would sit
 // unsubmitted until something else pressed Enter). Bounded by a timeout, after
 // which it delivers anyway. Runs off the send path (in a goroutine).
-func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte) {
+func (k *Kernel) deliverWhenReady(a addr.Address, line []byte) {
 	deadline := time.Now().Add(35 * time.Second) // covers a long resume + the summary-menu autopilot
 	for time.Now().Before(deadline) {
 		s := k.session(a)
@@ -581,13 +581,13 @@ func (k *Kernel) deliverWhenReady(a addr.Address, notify []byte) {
 			return
 		}
 		if s.InputReady() {
-			_, _ = s.Write(notify)
+			_, _ = s.Write(line)
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	if s := k.session(a); s != nil && s.Alive() {
-		_, _ = s.Write(notify)
+		_, _ = s.Write(line)
 	}
 }
 
@@ -811,7 +811,9 @@ func (k *Kernel) Compact(a addr.Address, focus string) error {
 		return fmt.Errorf("kernel: %s is not running", a)
 	}
 	cmd := "/compact"
-	if focus = strings.TrimSpace(focus); focus != "" {
+	// The focus comes from a calling bubble, and this is typed into another
+	// session: unsanitised it is a keystroke-injection path.
+	if focus = notify.Sanitize(strings.TrimSpace(focus)); focus != "" {
 		cmd += " " + focus
 	}
 	_, err := s.Write([]byte(cmd)) // Write appends Enter, submitting the command
@@ -1288,30 +1290,4 @@ func (k *Kernel) StartRoot(dir string) error {
 	}
 	k.setSession(addr.Root, sess)
 	return nil
-}
-
-// formatNotify renders the non-interrupting "you have mail" line typed into a
-// recipient's session (no Esc, so claude queues it for its next turn). It only
-// announces the message; the content is read via inbox().
-func formatNotify(from addr.Address, name, subject string, unread int) string {
-	f := from.String()
-	if name != "" {
-		f += " (" + sanitizePTY(name) + ")"
-	}
-	// single line (no newlines) so it isn't treated as a multi-line paste
-	return fmt.Sprintf("📬 New message from %s: %q — you have %d unread. Call the inbox() tool to read.", f, sanitizePTY(subject), unread)
-}
-
-// sanitizePTY strips control characters from text that gets TYPED into another
-// bubble's terminal (names, subjects). Without this, a crafted subject could
-// inject escape sequences or extra keystrokes into the recipient's session —
-// one agent puppeting another. Bodies are safe (read via the inbox() tool, not
-// typed), so only the typed fields are scrubbed.
-func sanitizePTY(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f { // C0 controls (incl. ESC, CR, LF, TAB) + DEL
-			return ' '
-		}
-		return r
-	}, s)
 }
