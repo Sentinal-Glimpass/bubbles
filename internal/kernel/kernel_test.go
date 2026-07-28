@@ -9,6 +9,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/bus"
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
+	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
@@ -1277,6 +1278,14 @@ func TestRecoverUnread(t *testing.T) {
 
 // TestNudgeDedup: overlapping nudges for the same backlog don't stack; a new
 // message past the announced level nudges again; reading resets it.
+//
+// This test covers the NON-INLINED path specifically. The bodies are
+// deliberately longer than notify.InlineMaxBytes so every message is announced
+// by a plain notice and stays pending — the accumulating-backlog case these
+// assertions were written for. The inlined path behaves differently (an
+// inlined message is delivered in full and leaves the notifiable set, so there
+// is no shared batch left to drain) and is covered by
+// TestInlinedDeliveryDoesNotStallTheNextMessage.
 func TestNudgeDedup(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
@@ -1285,7 +1294,8 @@ func TestNudgeDedup(t *testing.T) {
 	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
 	k.EnsureAlive(a) // hot
 
-	k.Send(addr.Root, a, "m1", "", 0, true)
+	long := strings.Repeat("x", notify.InlineMaxBytes+1) // too big to inline
+	k.Send(addr.Root, a, "m1", long, 0, true)
 	first := strings.Count(fr.Session(a).Written(), "📬 New message")
 	if first != 1 {
 		t.Fatalf("first message should nudge once, got %d", first)
@@ -1295,16 +1305,25 @@ func TestNudgeDedup(t *testing.T) {
 	if strings.Count(fr.Session(a).Written(), "unread message") != 0 {
 		t.Fatal("drain re-announced an already-nudged backlog")
 	}
-	// more messages piling up before it reads do NOT re-nudge — one notice per
-	// batch (it'll drain them all in the one inbox() call)
-	k.Send(addr.Root, a, "m2", "", 0, true)
-	if strings.Count(fr.Session(a).Written(), "📬 New message") != 1 {
-		t.Fatal("a second message before reading should NOT add another notice")
+	// A second message GROWS the backlog past the announced level, so it IS
+	// announced again: the standing notice says "1 unread" and is now stale.
+	// The dedup guarantee is that an UNCHANGED backlog is never re-announced
+	// (the drain above) — not that a growing one stays silent, which is the
+	// silent-stall half of the 632fe95 oscillation. The flood half is bounded
+	// by INV-1, asserted in TestNoticeCountNeverExceedsCeiling.
+	k.Send(addr.Root, a, "m2", long, 0, true)
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
+		t.Fatal("a second message grows the backlog past the announced level and must re-announce")
+	}
+	// ...but exactly once: the grown backlog must not then stack notices.
+	k.DrainInboxes()
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
+		t.Fatal("a drain after the re-announcement must not stack another notice")
 	}
 	// reading resets: the next message nudges again (fresh batch)
 	k.Inbox(a)
-	k.Send(addr.Root, a, "m3", "", 0, true)
-	if strings.Count(fr.Session(a).Written(), "📬 New message") != 2 {
+	k.Send(addr.Root, a, "m3", long, 0, true)
+	if strings.Count(fr.Session(a).Written(), "📬 New message") != 3 {
 		t.Fatal("after reading, a new message should start a fresh notice")
 	}
 }

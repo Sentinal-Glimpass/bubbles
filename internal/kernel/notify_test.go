@@ -36,6 +36,17 @@ func TestMutedUrgentMessageDoesNotWakeColdBubble(t *testing.T) {
 	if k.Store.UnreadCount(a) != 2 {
 		t.Fatalf("both messages must still be filed, got %d", k.Store.UnreadCount(a))
 	}
+
+	// Control. Without this the test would pass just as well if the wake path
+	// were broken outright, or if some unrelated gate (INV-2, the ceiling)
+	// happened to suppress the event -- which is exactly how this test passed
+	// while mute rules were silently matching nothing at all. An urgent event
+	// that does NOT match the rule must still wake the same cold bubble, so
+	// the only difference between the two cases is the mute veto.
+	k.WebhookDeliver(a, "pump", "page_me", "e3", true)
+	if !k.IsHot(a) {
+		t.Fatal("an UNMUTED urgent webhook must still wake a cold bubble -- otherwise this test proves nothing about mute")
+	}
 }
 
 // TestSmallMessageIsInlinedAndNeedsNoInboxCall: a short body rides along with
