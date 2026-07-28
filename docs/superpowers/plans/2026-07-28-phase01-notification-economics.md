@@ -854,7 +854,28 @@ if d.Action == notify.Suppress {
 
 Only after this point may the existing focus/typing hold, the `urgent → EnsureAlive` page-in, and the PTY write run — and the page-in is now additionally gated on `d.Wake`. Preserve verbatim: the `isFocused(to) && typingActive()` hold, the `InputReady()` check with its `deliverWhenReady` fallback, and the `b.SessionID == ""` first-launch case.
 
-On write: `FNoticesWritten`, plus `FDeliveriesInline` and `Store` read-marking for each `d.MarkRead` id, or `FDeliveriesViaTool` for a plain `Notice`.
+On write: `FNoticesWritten`, plus `FDeliveriesInline` and `Store.SetMuted` for each `d.MarkRead` id, or `FDeliveriesViaTool` for a plain `Notice`.
+
+> **Correction (2026-07-28, approved mid-execution).** This step originally said
+> to mark inlined messages **read**. That is unsafe: `Store.Take` skips messages
+> with `Read == true`, so if the PTY write fails afterwards — bubble mid-boot,
+> `deliverWhenReady` timeout, write error — the message is consumed but never
+> seen by anyone. That is silent non-delivery, which §9.1 rule 3 calls a worse
+> failure than redelivery, and it also contradicts this plan's own constraint
+> that every filed message stays readable via `inbox()`. Marking at decision time
+> cannot be correct when the write can fail after the decision. Inlined messages
+> are therefore marked **non-notifiable** (`SetMuted`), not read: they never
+> re-announce, but they remain readable. The only cost is that an inlined body is
+> shown a second time if the bubble later calls `inbox()` for other mail.
+>
+> **Consequence — INV-2 must track a shrinking set.** Because inlined and muted
+> messages leave the notifiable set, an `announced` count high-water compared
+> against `Notifiable` goes stale and silently suppresses the *next* real message
+> (observed: a genuine message stalled for up to the 2-minute stale-notice
+> recovery). The announced high-water must be set to the backlog that REMAINS
+> notifiable after a delivery — `st.Notifiable - len(d.MarkRead)` — not to
+> `st.Notifiable`. This applies to every path that removes messages from the
+> notifiable set.
 
 `announced(to)` replaces the `notified` map as the INV-2 source — it returns the backlog size last announced, and is cleared by `Inbox()` (existing `clearNudge` call site). Delete `markNudge`/`recoverNudge` and route `RecoverUnread` through `Decide` too (Task 8).
 
