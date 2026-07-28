@@ -515,11 +515,40 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	if to == addr.Root {
 		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard (root is the human; always notified)
 	}
+	// Pre-flight, BEFORE any policy state is spent. Both arms below end in "no
+	// write happens", and Decide MUTATES: it spends an INV-1 token and, on the
+	// non-urgent path, opens a coalescing window that policy.go grants only to
+	// a message that is actually written. Deciding first and bailing after
+	// would let followers buffer against a window this kernel never honoured,
+	// and would discard a rendered Inline body with no counter behind it.
+	//
+	// While the operator is ACTIVELY TYPING in the recipient, hold the
+	// notification: typing it in would submit their half-written line. It
+	// stays in the inbox and is delivered as soon as they pause
+	// (FlushHeldIfIdle) or leave (UnsetFocus). If they're just idle-viewing
+	// the bubble, deliver normally so they see it.
+	if k.isFocused(to) && k.typingActive() {
+		return id
+	}
+	hot := k.IsHot(to)
+	if !urgent && !hot {
+		// A previously-run but paged-out bubble (it has a SessionID) stays
+		// pooled for the periodic DrainInboxes, so we don't wake a whole
+		// sleeping fleet on every message. Only a never-launched bubble boots
+		// here: a freshly-spawned worker awaiting its first task must start
+		// when a charter is delegated to it -- the "spawn a worker and message
+		// it a charter" flow.
+		if b, ok := k.Reg.Get(to); !ok || to.IsRoot() || b.SessionID != "" {
+			return id
+		}
+	}
+
 	// Notification policy runs HERE, before anything that could page the
 	// recipient in. A muted message must not wake a cold bubble: the wake is a
 	// full prompt-cache rewarm and is the dominant cost of noisy traffic, so
 	// suppressing only the notice would leave that cost untouched. The message
 	// is already filed above, so a Suppress loses nothing.
+	//
 	// The match key a mute rule is written against is the STABLE identifier:
 	// the webhook source for programmatic mail, the sender's address
 	// otherwise. The decorated persona label is display only -- matching on it
@@ -532,54 +561,39 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	if fromName != "" {
 		display += " (" + fromName + ")"
 	}
-	d, notifiable := k.decide(to, id, source, display, subject, body, urgent)
+	d, prevAnnounced, notifiable := k.decide(to, id, source, display, subject, body, urgent, hot)
 	if !notifiable {
 		return id
 	}
-	// Delivery policy:
-	//   - urgent: wake the recipient now (page it in if cold), then nudge it.
-	//   - non-urgent, already hot: deliver immediately (free — it's running).
-	//   - non-urgent, never launched: boot it. A freshly-spawned bubble awaiting
-	//     its first task must start when delegated to, instead of sitting cold
-	//     until the next drain — this is the "spawn a worker and message it a
-	//     charter" flow.
-	//   - non-urgent, previously run but paged out (has a SessionID): leave it
-	//     pooled for the periodic DrainInboxes, so we don't wake a whole sleeping
-	//     fleet on every message.
-	// Either way the message is already safely in the inbox.
-	// While the operator is ACTIVELY TYPING in the recipient, hold the notification:
-	// typing it in would submit their half-written line. It stays in the inbox and
-	// is delivered as soon as they pause (FlushHeldIfIdle) or leave (UnsetFocus).
-	// If they're just idle-viewing the bubble, deliver normally so they see it.
-	if k.isFocused(to) && k.typingActive() {
-		return id
-	}
-	// deliver types the notice in — but only when we're actually going to reach
-	// the recipient (a pooled/paged-out message writes nothing here and is left
-	// for DrainInboxes). writeNotice records the announcement (INV-2) and the
-	// cost, and handles a session that hasn't rendered its input yet: typing
-	// into a still-booting claude would sit unsubmitted, so that write is
-	// deferred off the send path.
-	deliver := func(s runner.Session) { k.writeNotice(to, s, d) }
+
+	wrote := false
 	switch {
 	case urgent:
-		// A hot recipient is written to directly; a COLD one is paged in only
-		// if the policy granted the wake. This gate is the phase's whole point.
-		if k.IsHot(to) || d.Wake {
-			deliver(k.EnsureAlive(to))
+		// NOTE: d.Wake is near-vacuous on this arm -- for an urgent message it
+		// is true exactly when the bubble is cold, so `hot || d.Wake` is
+		// almost always true. That is fine and it is NOT the safety gate. The
+		// real wake veto is the `!notifiable` early return above: a muted
+		// message returns there and never reaches EnsureAlive, which is the
+		// entire cost saving of this phase. Do not "simplify" this condition
+		// away on the grounds that it looks redundant -- keep the Suppress
+		// return, and keep d.Wake here so a future non-urgent wake policy
+		// (AlwaysOn, or a Rollup that must never wake) is honoured.
+		if hot || d.Wake {
+			wrote = k.writeNotice(to, k.EnsureAlive(to), d)
 		}
-	case k.IsHot(to):
-		s := k.session(to)
+	case hot:
 		k.touch(to)
-		deliver(s)
+		wrote = k.writeNotice(to, k.session(to), d)
 	default:
-		// First-launch case: a freshly-spawned bubble with no session id yet
-		// must start when it is first delegated to, instead of sitting cold
-		// until the next drain — the "spawn a worker and message it a charter"
-		// flow. A previously-run, paged-out bubble stays pooled.
-		if b, ok := k.Reg.Get(to); ok && b.SessionID == "" && !to.IsRoot() {
-			deliver(k.EnsureAlive(to))
-		}
+		// First launch: pre-flight above already established this is a
+		// never-launched, non-root bubble.
+		wrote = k.writeNotice(to, k.EnsureAlive(to), d)
+	}
+	if !wrote {
+		// Unreachable after all (disabled bubble, failed launch): give back
+		// the announcement claim so the backlog is not recorded as advertised
+		// when no notice exists.
+		k.unclaimAnnounced(to, d.Announce, prevAnnounced)
 	}
 	return id
 }
@@ -590,20 +604,35 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 // unsubmitted until something else pressed Enter). Bounded by a timeout, after
 // which it delivers anyway. Runs off the send path (in a goroutine).
 func (k *Kernel) deliverWhenReady(a addr.Address, line []byte) {
+	k.deliverWhenReadyThen(a, line, nil)
+}
+
+// deliverWhenReadyThen is deliverWhenReady with a completion hook that runs
+// ONLY after the line has actually been written. Anything that treats the
+// message as consumed belongs there and nowhere else: this function can return
+// without writing at all (the session died while booting, or never became
+// ready before the deadline), and a message marked consumed by a write that
+// never happened is content nobody will ever see.
+func (k *Kernel) deliverWhenReadyThen(a addr.Address, line []byte, onWritten func()) {
+	write := func(s runner.Session) {
+		if _, err := s.Write(line); err == nil && onWritten != nil {
+			onWritten()
+		}
+	}
 	deadline := time.Now().Add(35 * time.Second) // covers a long resume + the summary-menu autopilot
 	for time.Now().Before(deadline) {
 		s := k.session(a)
 		if s == nil || !s.Alive() {
-			return
+			return // never written: the caller's consume hook must not run
 		}
 		if s.InputReady() {
-			_, _ = s.Write(line)
+			write(s)
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	if s := k.session(a); s != nil && s.Alive() {
-		_, _ = s.Write(line)
+		write(s)
 	}
 }
 

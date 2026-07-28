@@ -1,7 +1,9 @@
 package kernel
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -209,5 +211,159 @@ func TestNoticeCountNeverExceedsCeiling(t *testing.T) {
 	got := strings.Count(fr.Session(a).Written(), "📬")
 	if got > notify.DefaultCeilingBurst {
 		t.Fatalf("notices = %d, exceeds INV-1 ceiling %d", got, notify.DefaultCeilingBurst)
+	}
+}
+
+// TestConcurrentDeliveriesAnnounceOnce is the double-notification race gate.
+// Two sends to the same hot bubble race: if the announced level is READ, then
+// Decide runs, and only later is the level MARKED, both callers observe zero
+// and both write a notice. -race will never report it -- it is a logic race,
+// not a memory race -- so this test is the only thing standing between the
+// design and a silent regression to two turns per backlog.
+//
+// Bodies are longer than InlineMaxBytes on purpose: an inlined message is
+// consumed and returns the announced level to 0, which legitimately lets the
+// second message announce. The accumulating-backlog case is the one with an
+// unambiguous answer, so it is the one asserted here.
+func TestConcurrentDeliveriesAnnounceOnce(t *testing.T) {
+	for trial := 0; trial < 50; trial++ {
+		fr := runner.NewFake()
+		k := New(fr)
+		k.RelaunchProbe = 0
+		a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+		k.EnsureAlive(a)
+
+		long := strings.Repeat("x", notify.InlineMaxBytes+1)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start // barrier: both are in flight before either proceeds
+				k.Send(addr.Root, a, fmt.Sprintf("m%d", i), long, 0, true)
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		if n := strings.Count(fr.Session(a).Written(), "📬"); n != 1 {
+			t.Fatalf("trial %d: two concurrent deliveries produced %d notices, want exactly 1 "+
+				"— the announced level must be read, decided and claimed in one critical section", trial, n)
+		}
+	}
+}
+
+// TestDrainCoalescedKeepsBatchWhenSessionIsDead: Policy.Pending CONSUMES the
+// coalescing buffer as it returns it, so a liveness check after the call would
+// throw a due batch away with no notice and no counter. The messages must stay
+// notifiable so the ordinary drain still reports them.
+func TestDrainCoalescedKeepsBatchWhenSessionIsDead(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)
+	k.Send(addr.Root, a, "first", "opens the window", 0, false)
+	k.Send(addr.Root, a, "follow", "batched", 0, false)
+
+	// The session dies while the batch is still buffering.
+	fr.Session(a).Die()
+	time.Sleep(notify.CoalesceWindow + 200*time.Millisecond)
+	k.DrainCoalesced()
+
+	// The bubble comes back; the batch must still be there to announce.
+	k.EnsureAlive(a)
+	k.DrainCoalesced()
+	if !strings.Contains(fr.Session(a).Written(), "📬") {
+		t.Fatalf("a batch due while the session was dead was consumed and lost, got %q", fr.Session(a).Written())
+	}
+}
+
+// TestTypingHoldSpendsNoPolicyState: the typing hold must be evaluated before
+// Decide, or the held message burns an INV-1 token and opens a coalescing
+// window that no write ever justified.
+func TestTypingHoldSpendsNoPolicyState(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	k.TypingWindow = time.Hour
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)
+	k.SetFocus(a)
+	k.NoteKeystroke()
+
+	for i := 0; i < 20; i++ { // far more than the INV-1 burst
+		k.Send(addr.Root, a, "held", "body", 0, true)
+	}
+	if w := fr.Session(a).Written(); strings.Contains(w, "📬") {
+		t.Fatalf("nothing may be typed while the operator is typing, got %q", w)
+	}
+
+	// The operator pauses and the backlog flushes. If the held sends had been
+	// run through Decide, the ceiling would already be drained and this would
+	// be silently capped.
+	k.TypingWindow = time.Nanosecond
+	k.FlushHeldIfIdle()
+	if !strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatalf("the held backlog must flush once typing pauses, got %q", fr.Session(a).Written())
+	}
+	if c := k.Cost.Snapshot()[a]; c.NoticesCapped != 0 {
+		t.Fatalf("a held message must not spend an INV-1 token, got %d capped", c.NoticesCapped)
+	}
+}
+
+// TestPooledMessageSpendsNoPolicyState: same guarantee for the paged-out arm,
+// which also never writes. A pooled message that opened a coalescing window
+// would make later arrivals buffer against a window the kernel never honoured.
+func TestPooledMessageSpendsNoPolicyState(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)    // gives it a SessionID
+	fr.Session(a).Die() // now paged out: cold, but previously run
+
+	for i := 0; i < 20; i++ {
+		k.Send(addr.Root, a, "pooled", "body", 0, false)
+	}
+	if c := k.Cost.Snapshot()[a]; c.NoticesCapped != 0 || c.NoticesWritten != 0 {
+		t.Fatalf("a pooled message must spend no policy state: written=%d capped=%d", c.NoticesWritten, c.NoticesCapped)
+	}
+	if k.Store.UnreadCount(a) != 20 {
+		t.Fatalf("every pooled message must still be filed, got %d", k.Store.UnreadCount(a))
+	}
+
+	// The drain pages it back in and announces the backlog.
+	k.DrainInboxes()
+	if !strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatalf("the drain must announce the pooled backlog, got %q", fr.Session(a).Written())
+	}
+}
+
+// TestDeferredWriteThatNeverLandsDoesNotConsumeTheMessage: an inlined body is
+// marked non-notifiable only once it has actually been typed. A session that
+// dies while the deferred write is waiting must leave the message intact, or
+// the content is in no terminal and no longer announces.
+func TestDeferredWriteThatNeverLandsDoesNotConsumeTheMessage(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)
+	fr.Session(a).SetInputReady(false) // still booting: the write is deferred
+
+	k.Send(addr.Root, a, "status", "build green", 0, true)
+	fr.Session(a).Die() // it dies before ever accepting input
+	time.Sleep(500 * time.Millisecond)
+
+	if w := fr.Session(a).Written(); strings.Contains(w, "📬") {
+		t.Fatalf("nothing should have been written to a session that never became ready, got %q", w)
+	}
+	if n := k.Store.NotifiableCount(a); n != 1 {
+		t.Fatalf("a message whose write never landed must stay notifiable, got %d", n)
+	}
+	if c := k.Cost.Snapshot()[a]; c.DeliveriesInline != 0 || c.NoticesWritten != 0 {
+		t.Fatalf("a write that never happened must not be counted: written=%d inline=%d", c.NoticesWritten, c.DeliveriesInline)
 	}
 }

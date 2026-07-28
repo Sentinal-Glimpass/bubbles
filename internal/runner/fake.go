@@ -9,14 +9,15 @@ import (
 
 // FakeSession records everything written to it (for tests).
 type FakeSession struct {
-	mu      sync.Mutex
-	written []byte
-	closed  bool
-	dead    bool          // simulate a crashed process (Alive() -> false)
-	mem     uint64        // simulated resident memory (tests set it)
-	cpu     time.Duration // simulated cumulative CPU (tests set it)
-	lastAct time.Time     // simulated last-activity stamp (tests set it)
-	output  string        // simulated recent output (tests set it)
+	mu       sync.Mutex
+	written  []byte
+	closed   bool
+	dead     bool          // simulate a crashed process (Alive() -> false)
+	mem      uint64        // simulated resident memory (tests set it)
+	cpu      time.Duration // simulated cumulative CPU (tests set it)
+	lastAct  time.Time     // simulated last-activity stamp (tests set it)
+	output   string        // simulated recent output (tests set it)
+	notReady bool          // simulate a session that hasn't rendered its input yet
 }
 
 // RecentOutput returns the simulated recent output.
@@ -33,8 +34,22 @@ func (s *FakeSession) SetOutput(o string) {
 	s.mu.Unlock()
 }
 
-// InputReady: fake sessions are always ready (no startup menu in tests).
-func (s *FakeSession) InputReady() bool { return true }
+// InputReady: fake sessions are ready by default (no startup menu in tests);
+// SetInputReady(false) simulates one still booting, so the deferred-write path
+// can be exercised.
+func (s *FakeSession) InputReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.notReady
+}
+
+// SetInputReady sets whether the simulated session accepts input (test
+// helper). Default is ready, so existing tests are unaffected.
+func (s *FakeSession) SetInputReady(ready bool) {
+	s.mu.Lock()
+	s.notReady = !ready
+	s.mu.Unlock()
+}
 
 // CPUTime returns the simulated cumulative CPU.
 func (s *FakeSession) CPUTime() time.Duration {
