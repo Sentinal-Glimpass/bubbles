@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
+	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
 )
 
 type Status string
@@ -51,6 +52,12 @@ type Bubble struct {
 	// live session immediately — no cold-wake to fail. For critical receivers
 	// (e.g. a WhatsApp/OOF channel bubble) that must never miss a message.
 	AlwaysOn bool
+
+	// MuteRules are the mute predicates this bubble has declared for inbound
+	// traffic (see package notify): a message matching one is noise and the
+	// kernel stops waking this bubble for it. Persisted so a bubble that has
+	// silenced a noisy pump stays silenced across restarts.
+	MuteRules []notify.Rule
 }
 
 // Label is what to show for a bubble: its Name, or its legacy Persona if Name is
@@ -164,6 +171,27 @@ func (r *Registry) SetAlwaysOn(a addr.Address, on bool) {
 		b.AlwaysOn = on
 		r.version++
 	}
+}
+
+// SetMuteRules replaces a bubble's mute rules (nil/empty clears them all).
+func (r *Registry) SetMuteRules(a addr.Address, rules []notify.Rule) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.MuteRules = append([]notify.Rule(nil), rules...)
+		r.version++
+	}
+}
+
+// MuteRules returns a copy of a bubble's mute rules, so a caller mutating the
+// returned slice can't corrupt registry state.
+func (r *Registry) MuteRules(a addr.Address) []notify.Rule {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		return append([]notify.Rule(nil), b.MuteRules...)
+	}
+	return nil
 }
 
 // AlwaysOnAddrs returns every always-on receiver (for keep-alive sweeps).

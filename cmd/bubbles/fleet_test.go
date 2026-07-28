@@ -5,10 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
+	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/tasks"
@@ -51,6 +53,23 @@ func TestFleetSaveRestore(t *testing.T) {
 	// New spawns continue numbering instead of colliding.
 	if a3, _ := k2.Spawn(addr.Root, "carol", filepath.Join(base, "carol"), runner.SpawnOpts{Persona: "carol"}); a3 != addr.Address("0.3") {
 		t.Fatalf("post-restore spawn = %q want 0.3", a3)
+	}
+}
+
+func TestFleetPersistsMuteRules(t *testing.T) {
+	base := t.TempDir()
+	k1 := kernel.New(runner.NewFake())
+	a, _ := k1.Spawn(addr.Root, "w", filepath.Join(base, "w"), runner.SpawnOpts{Persona: "w"})
+	k1.Reg.SetMuteRules(a, []notify.Rule{{ID: "r1", Source: "pump", SubjectRe: "^opt_out$", Window: time.Hour}})
+	if err := saveFleet(base, k1, map[int]addr.Address{}); err != nil {
+		t.Fatal(err)
+	}
+
+	k2 := kernel.New(runner.NewFake())
+	restoreFleet(base, k2)
+	got := k2.Reg.MuteRules(a)
+	if len(got) != 1 || got[0].SubjectRe != "^opt_out$" {
+		t.Fatalf("restored rules = %+v", got)
 	}
 }
 
