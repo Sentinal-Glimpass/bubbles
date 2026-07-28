@@ -45,7 +45,7 @@ func TestWindowExpiryProducesRollup(t *testing.T) {
 	for i := 2; i <= 15; i++ {
 		p.Decide("0.1", Message{ID: i, Source: "pump", Subject: "opt_out"}, State{Notifiable: i}, now.Add(time.Minute))
 	}
-	d := p.Decide("0.1", Message{ID: 16, Source: "pump", Subject: "opt_out"}, State{Notifiable: 16}, now.Add(2*time.Hour))
+	d := p.Decide("0.1", Message{ID: 16, Source: "pump", Subject: "opt_out"}, State{Notifiable: 16, Hot: true}, now.Add(2*time.Hour))
 	if d.Action != Rollup {
 		t.Fatalf("Action = %v, want Rollup after window expiry", d.Action)
 	}
@@ -215,7 +215,7 @@ func TestCappedMuteRollupPreservesCount(t *testing.T) {
 		p.Decide("0.1", Message{ID: i, Source: "other", Subject: "x", Urgent: true}, State{Notifiable: i}, expired)
 	}
 
-	capped := p.Decide("0.1", Message{ID: 7, Source: "pump", Subject: "opt_out"}, State{Notifiable: 7}, expired)
+	capped := p.Decide("0.1", Message{ID: 7, Source: "pump", Subject: "opt_out"}, State{Notifiable: 7, Hot: true}, expired)
 	if capped.Action != Suppress {
 		t.Fatalf("Action = %v, want Suppress -- the ceiling must cap the rollup", capped.Action)
 	}
@@ -223,7 +223,7 @@ func TestCappedMuteRollupPreservesCount(t *testing.T) {
 	// Once tokens refill, the rollup must still report all 3 swallowed
 	// messages; a capped attempt that reset the count would lose them forever.
 	later := expired.Add(time.Minute)
-	d := p.Decide("0.1", Message{ID: 8, Source: "pump", Subject: "opt_out"}, State{Notifiable: 8}, later)
+	d := p.Decide("0.1", Message{ID: 8, Source: "pump", Subject: "opt_out"}, State{Notifiable: 8, Hot: true}, later)
 	if d.Action != Rollup {
 		t.Fatalf("Action = %v, want Rollup once the ceiling refills", d.Action)
 	}
@@ -244,7 +244,7 @@ func TestExpiryRollupAbsorbsItsTriggerMessage(t *testing.T) {
 	p.Decide("0.1", Message{ID: 2, Source: "pump", Subject: "opt_out"}, State{Notifiable: 2}, now.Add(time.Minute))
 	p.Decide("0.1", Message{ID: 3, Source: "pump", Subject: "opt_out"}, State{Notifiable: 3}, now.Add(time.Minute))
 
-	d := p.Decide("0.1", Message{ID: 4, Source: "pump", Subject: "opt_out"}, State{Notifiable: 4}, now.Add(2*time.Hour))
+	d := p.Decide("0.1", Message{ID: 4, Source: "pump", Subject: "opt_out"}, State{Notifiable: 4, Hot: true}, now.Add(2*time.Hour))
 	if d.Action != Rollup {
 		t.Fatalf("Action = %v, want Rollup", d.Action)
 	}
@@ -395,5 +395,44 @@ func TestRecoverGates(t *testing.T) {
 	}
 	if !capped {
 		t.Fatal("the sweep must be subject to the INV-1 ceiling; it re-emitted without limit")
+	}
+}
+
+// TestColdRollupPreservesCountInsteadOfLosingIt: a rollup carries Wake: false,
+// so a COLD recipient cannot receive it -- the kernel's delivery arm declines
+// to write. Reopening the window there would reset count to 0 and erase the
+// only record of the swallowed messages (they are MarkMuted, so nothing else
+// mentions them), losing the rollup line permanently. Same shape as the
+// ceiling guard: suppress, keep counting, report the full total once the
+// bubble is hot enough to be told.
+func TestColdRollupPreservesCountInsteadOfLosingIt(t *testing.T) {
+	rs := NewRuleSet()
+	_ = rs.Add(Rule{ID: "r1", Source: "pump", SubjectRe: "^opt_out$", Window: time.Hour})
+	p := NewPolicy(func(addr.Address) *RuleSet { return rs }, NewCeiling(6, 6))
+	now := time.Unix(0, 0)
+
+	// Open the window and swallow two.
+	p.Decide("0.1", Message{ID: 1, Source: "pump", Subject: "opt_out"}, State{Notifiable: 1}, now)
+	p.Decide("0.1", Message{ID: 2, Source: "pump", Subject: "opt_out"}, State{Notifiable: 2}, now.Add(time.Minute))
+	p.Decide("0.1", Message{ID: 3, Source: "pump", Subject: "opt_out"}, State{Notifiable: 3}, now.Add(time.Minute))
+
+	// Window expires while the bubble is COLD: no rollup may be emitted.
+	expired := now.Add(2 * time.Hour)
+	d := p.Decide("0.1", Message{ID: 4, Source: "pump", Subject: "opt_out"}, State{Notifiable: 4}, expired)
+	if d.Action != Suppress {
+		t.Fatalf("Action = %v, want Suppress: a rollup never wakes, so a cold bubble cannot receive it", d.Action)
+	}
+	if !d.MarkMuted {
+		t.Fatal("the swallowed trigger must still be marked muted so the suppression is counted")
+	}
+
+	// The count survived AND grew, so nothing was lost: 2 swallowed inside the
+	// window + the 1 suppressed while cold = 3.
+	hot := p.Decide("0.1", Message{ID: 6, Source: "pump", Subject: "opt_out"}, State{Notifiable: 6, Hot: true}, expired.Add(time.Minute))
+	if hot.Action != Rollup {
+		t.Fatalf("Action = %v, want Rollup once the bubble is hot", hot.Action)
+	}
+	if !strings.Contains(hot.Text, "3×") {
+		t.Fatalf("the count must survive the cold period, got %q", hot.Text)
 	}
 }

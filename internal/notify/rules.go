@@ -117,7 +117,22 @@ func CompileRule(r Rule) (*Compiled, error) {
 // predicates (AND semantics; an empty/nil predicate matches anything). body
 // is truncated to MaxBodyMatchBytes before scanning, so a rule can never be
 // used to force an unbounded regex pass over an arbitrarily large message.
-func (c *Compiled) Match(source, subject, body string) bool {
+//
+// EXPIRY IS ENFORCED HERE, at match time, and deliberately NOWHERE ELSE. A
+// rule with TTL > 0 stops matching once now is more than TTL past Created; a
+// TTL of 0 means "never expires". now is supplied by the caller because this
+// package never reads the clock itself.
+//
+// The check must not move into CompileRule or RuleSet.Add: kernel.MuteBy
+// rebuilds a RuleSet by re-adding every STORED rule and then persists
+// rs.List(), so an Add that rejected expired rules would silently and
+// permanently delete them from the registry. Reaping is a separate, explicit
+// step (deferred to a later phase); matching is where the contract the
+// mute()/mutes() tools advertise has to hold.
+func (c *Compiled) Match(source, subject, body string, now time.Time) bool {
+	if c.Expired(now) {
+		return false
+	}
 	if c.rule.Source != "" && c.rule.Source != source {
 		return false
 	}
@@ -133,6 +148,17 @@ func (c *Compiled) Match(source, subject, body string) bool {
 		}
 	}
 	return true
+}
+
+// Expired reports whether c's TTL has elapsed by now. A zero TTL never
+// expires; a zero Created with a non-zero TTL is treated as expired rather
+// than immortal, so a rule that lost its creation stamp fails CLOSED (it stops
+// muting) instead of silently deafening the bubble forever.
+func (c *Compiled) Expired(now time.Time) bool {
+	if c.rule.TTL <= 0 {
+		return false
+	}
+	return now.Sub(c.rule.Created) > c.rule.TTL
 }
 
 // RuleSet is an ordered collection of compiled rules for one bubble. Order is
@@ -193,12 +219,14 @@ func (rs *RuleSet) List() []Rule {
 }
 
 // Match returns the first rule (in insertion order) whose predicate matches
-// source, subject, and body, and whether any rule matched at all.
-func (rs *RuleSet) Match(source, subject, body string) (*Rule, bool) {
+// source, subject, and body at now, and whether any rule matched at all.
+// Expired rules are skipped but NOT removed -- see Compiled.Match for why
+// reaping must stay out of the matching path.
+func (rs *RuleSet) Match(source, subject, body string, now time.Time) (*Rule, bool) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	for _, c := range rs.rules {
-		if c.Match(source, subject, body) {
+		if c.Match(source, subject, body, now) {
 			r := c.rule
 			return &r, true
 		}

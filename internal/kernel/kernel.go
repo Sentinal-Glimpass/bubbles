@@ -1100,6 +1100,14 @@ func (k *Kernel) MuteBy(by addr.Address, source, subjectRe, bodyRe, window, ttl 
 	// RuleSet.Add be the single authority for BOTH compile validation and the
 	// MaxRules cap, so this path can never drift from notify's policy (e.g.
 	// if Add's ordering, dedup, or validation sequence ever changes).
+	//
+	// HAZARD -- DO NOT MOVE TTL EXPIRY INTO Add OR CompileRule. This loop
+	// re-adds every STORED rule and the result is PERSISTED via SetMuteRules
+	// below. Any check that makes Add reject a rule therefore DELETES that rule
+	// from the registry, permanently and silently, the next time the bubble
+	// calls mute(). Expiry is enforced in notify.Compiled.Match instead, where
+	// an expired rule simply stops matching and stays on disk until an explicit
+	// reaping step removes it.
 	rs := notify.NewRuleSet()
 	for _, existing := range k.Reg.MuteRules(by) {
 		_ = rs.Add(existing) // already validated at creation time; safe to re-add

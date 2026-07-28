@@ -24,11 +24,6 @@ const (
 	CoalesceWindow = 3 * time.Second
 )
 
-// maxCoalesceIDs bounds the ids remembered per coalescing window. The count
-// keeps growing past this, so the summary stays truthful while the buffer
-// stays O(1) under a flood.
-const maxCoalesceIDs = 64
-
 // Action is what the caller should do with a message's notification. It says
 // nothing about storing the message: the message is always stored, so no
 // message is ever dropped by this engine.
@@ -143,26 +138,6 @@ type Decision struct {
 	Announce int
 }
 
-// muteWindow tracks one open mute window for a (bubble, rule) pair: when it
-// opened and how many messages it has swallowed since, which is exactly the
-// material the expiry rollup reports.
-type muteWindow struct {
-	opened  time.Time
-	count   int
-	source  string
-	subject string
-}
-
-// coalesceBuf batches non-urgent follow-ups so a burst costs one notice
-// instead of one per message.
-type coalesceBuf struct {
-	opened  time.Time
-	count   int
-	ids     []int
-	last    Message
-	backlog int // recipient's Notifiable at the time of the last buffered message
-}
-
 // bubbleState is all per-recipient policy state. It is only ever touched
 // under Policy.mu. Note that it deliberately holds no announced counter: the
 // store-derived State.Announced is the single source of truth for INV-2, and
@@ -229,55 +204,9 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 	defer p.mu.Unlock()
 	b := p.bubble(to)
 
-	// 1. Mute. This runs before any urgency handling: an urgent muted message
-	// must not page in a cold bubble, because that costs a full prompt-cache
-	// rewarm for traffic the bubble has already declared to be noise.
-	if rs := p.rules(to); rs != nil {
-		if r, ok := rs.Match(msg.Source, msg.Subject, msg.Body); ok {
-			w := b.windows[r.ID]
-			switch {
-			case w == nil:
-				// First match opens the window; this message still delivers,
-				// so the bubble learns the traffic exists at least once.
-				b.windows[r.ID] = &muteWindow{opened: now, source: msg.label(), subject: msg.Subject}
-			case now.Sub(w.opened) < r.Window:
-				w.count++
-				w.source, w.subject = msg.label(), msg.Subject
-				return Decision{Action: Suppress, MarkMuted: true, Wake: false, Rule: r.ID}
-			default:
-				// Window expired: report what was swallowed, then reopen.
-				n, since, src, subj := w.count, w.opened, w.source, w.subject
-				if n == 0 {
-					// Nothing accumulated; reopen and deliver normally.
-					b.windows[r.ID] = &muteWindow{opened: now, source: msg.label(), subject: msg.Subject}
-					break
-				}
-				// The ceiling still applies: a rollup is a real write. It is
-				// checked BEFORE the window is reopened, because the swallowed
-				// messages carry MarkMuted and are therefore not notifiable in
-				// the store -- resetting the count on a capped rollup would
-				// erase the only remaining record of them, which is the
-				// silent-stall failure direction.
-				if !p.ceiling.Allow(to, now) {
-					return Decision{Action: Suppress, Rule: r.ID, Capped: true}
-				}
-				// The message that triggers the rollup is deliberately neither
-				// delivered on its own nor counted in the rollup it triggered:
-				// it is the first message of the window it opens here, exactly
-				// like the first match that opened the previous one.
-				b.windows[r.ID] = &muteWindow{opened: now, source: msg.label(), subject: msg.Subject}
-				return Decision{
-					Action: Rollup,
-					Text:   renderRollup(n, subj, src, since),
-					Wake:   false, // a rollup is by definition not worth a wake
-					Rule:   r.ID,
-					// The message that triggered the rollup is not delivered
-					// and stays notifiable, so the backlog it belongs to is
-					// what remains announced.
-					Announce: st.Notifiable,
-				}
-			}
-		}
+	// 1. Mute (mute.go), including TTL expiry and the window/rollup handling.
+	if d, ok := p.mute(to, b, msg, st, now); ok {
+		return d
 	}
 
 	// 2. INV-2 dedup. One notice per backlog: while ANY announcement is
@@ -297,23 +226,24 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 	// 632fe95 flood direction). It does not stall a consumed backlog either,
 	// because Announce reports what REMAINS after a delivery -- an inlined
 	// message drops the level back to 0 and the next arrival is announced.
+	//
+	// COUPLING (load-bearing, see mute.go's Rollup): a mute rollup sets
+	// Announce = st.Notifiable while its trigger message is neither delivered
+	// nor marked muted, so this gate then suppresses that trigger and
+	// everything after it until the backlog is consumed. That is only safe
+	// because renderRollup's text ends with "call inbox() to read." -- the
+	// standing instruction is what covers the suppressed messages. If that
+	// wording ever loses its inbox() instruction, this gate turns a rollup into
+	// a permanent stall.
 	if st.Announced > 0 {
 		return Decision{Action: Suppress}
 	}
 
-	// 3. Coalesce. Urgent mail bypasses entirely. A first message delivers
-	// and opens the window; its non-urgent followers inside the window are
-	// buffered and drained by Pending.
-	if !msg.Urgent {
-		if c := b.coalesce; c != nil && now.Sub(c.opened) < CoalesceWindow {
-			c.count++
-			if len(c.ids) < maxCoalesceIDs {
-				c.ids = append(c.ids, msg.ID)
-			}
-			c.last = msg
-			c.backlog = st.Notifiable
-			return Decision{Action: Suppress}
-		}
+	// 3. Coalesce (coalesce.go). Urgent mail bypasses entirely. A first message
+	// delivers and opens the window; its non-urgent followers inside the window
+	// are buffered and drained by Pending.
+	if d, ok := p.coalesce(b, msg, st, now); ok {
+		return d
 	}
 
 	// 4. INV-1 ceiling, last gate before the write. Nothing above may bypass
@@ -407,60 +337,3 @@ func (p *Policy) Recover(to addr.Address, st State, stale bool, now time.Time) D
 	}
 }
 
-// Pending drains to's coalescing window if it has expired, returning the
-// decision the caller should act on. The second result is false when there is
-// nothing to write, which is the common case. When it is false because the
-// INV-1 ceiling denied the write (rather than because nothing was due), the
-// returned Decision has Capped set so the caller can meter it.
-func (p *Policy) Pending(to addr.Address, now time.Time) (Decision, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	b := p.st[to]
-	if b == nil || b.coalesce == nil {
-		return Decision{}, false
-	}
-	c := b.coalesce
-	if now.Sub(c.opened) < CoalesceWindow {
-		return Decision{}, false
-	}
-	b.coalesce = nil
-	if c.count == 0 {
-		// The window opened on a message that was delivered immediately and
-		// never gained siblings: nothing left to say.
-		return Decision{}, false
-	}
-	if !p.ceiling.Allow(to, now) {
-		// Dropping the notice is safe: the messages remain notifiable in the
-		// store, so a later Decide will announce them. Capped is reported even
-		// though ok is false, so the caller can tell this apart from "nothing
-		// due" and record it: a suppression no counter records is
-		// indistinguishable from a message the system lost.
-		return Decision{Action: Suppress, Capped: true}, false
-	}
-
-	if c.count == 1 {
-		d := deliver(c.last, State{Notifiable: c.backlog, Hot: true}, false)
-		d.IDs = c.ids
-		return d, true
-	}
-	return Decision{
-		Action:   Rollup,
-		Text:     renderRollup(c.count, c.last.Subject, c.last.label(), c.opened),
-		IDs:      c.ids,
-		Announce: c.backlog,
-	}, true
-}
-
-// Clear drops to's coalescing buffer and mute windows, and is called when the
-// bubble reads its inbox: a drained backlog makes a pending batch summary
-// stale, and the next arrival deserves a fresh announcement. INV-2 needs no
-// reset here because it reads the store's count, not anything local.
-func (p *Policy) Clear(to addr.Address) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if b := p.st[to]; b != nil {
-		b.coalesce = nil
-		b.windows = map[string]*muteWindow{}
-	}
-}
