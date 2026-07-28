@@ -223,15 +223,35 @@ window. The bubble is throttled, never permanently blind.
 
 **TTL.** Optional. An expired rule is removed by a Phase 4 health check.
 
-### 5.2 Flip the webhook urgent default
+### 5.2 Flip the webhook urgent default — DESIGNED, NOT IMPLEMENTED IN THIS PASS
 
-`webhook.go:95` and `webhook.go:126`. Programmatic pokes pool by default;
-`urgent=true` becomes explicit opt-in. This alone removes the majority of the
-observed `mechmagnet` cost.
+`webhook.go:95` and `webhook.go:126`. Programmatic pokes would pool by default;
+`urgent=true` would become explicit opt-in.
 
-**Migration note:** any existing caller relying on the implicit wake must set
-`urgent=true`. This is a deliberate breaking change to the webhook contract and
-is called out in the release notes.
+**Deferred by operator decision (2026-07-28).** This is a breaking change to the
+webhook contract — any existing caller relying on the implicit wake goes silent
+until it sets `urgent=true`. Rishi is auditing the live pumps first. The design
+stays in this spec; implementation is gated on that audit and lands as a
+follow-up.
+
+**Consequence for §5.1 — mute must gate the wake, not just the notice.** In
+`deliverMessage`, `urgent` calls `EnsureAlive(to)` (paging a cold bubble in)
+*before* any notification decision is reached. If a mute rule suppressed only
+the typed notice, a muted `urgent=true` webhook would still wake the bubble on
+every event and pay a full prompt-cache rewarm — the dominant cost (§7). Since
+webhooks remain urgent-by-default for now, this is not a corner case; it is the
+`mechmagnet` case.
+
+Therefore: **mute evaluation happens before the urgent wake decision.** A
+message matching an active mute rule inside its throttle window does not page in
+a cold bubble, does not touch LRU, and does not write to the PTY. It is filed
+and read on the bubble's next `inbox()` call. Mute overrides `urgent`; this is
+deliberate, because a mute rule is the bubble's own explicit statement that the
+traffic is noise, and only the bubble can know that.
+
+`AlwaysOn` receivers are exempt from mute-suppressed wakes only in the sense
+that they are already hot — no page-in occurs either way, so the notice
+suppression still applies and still saves the turn.
 
 ### 5.3 Direct injection of small bodies
 
@@ -402,14 +422,39 @@ itself stays a fixed-height summary.
   reach the PTY unescaped.
 - Existing `go test ./...` must stay green at every phase boundary.
 
+### 9.1 Non-regression discipline
+
+The explicit operator requirement is *upgrade, not degrade*. Every phase
+observes the following, and a phase that cannot is not merged:
+
+1. **No existing test is deleted or weakened to make new code pass.** If an
+   existing test must change, the behaviour change is intentional, called out,
+   and approved — not folded silently into an implementation commit.
+2. **Extractions are behaviour-preserving by construction.** `internal/notify`,
+   `internal/sessions`, and `internal/supervisor` move logic; they do not change
+   it. Behaviour changes land in separate commits from the moves, so a
+   regression bisects to an obvious culprit.
+3. **Every new suppression path is reversible and observable.** Anything that
+   stops a message, a notice, or a wake increments a Phase 0 counter. Silent
+   suppression is a defect — the failure mode of `632fe95` was invisible
+   redelivery, and the mirror failure (invisible non-delivery) is worse.
+4. **No message is ever dropped.** Mute, coalescing, and inlining affect
+   *notification*, never storage. `Store.UnreadCount()` stays truthful and every
+   filed message remains readable via `inbox()`.
+5. **Each phase leaves the tree green, shippable, and independently
+   revertable.**
+
 ---
 
 ## 10. Non-goals
 
-- **Model tiering.** Forcing `claude-opus-5[1m]` fleet-wide is a deliberate
-  operator decision (`internal/runner/local.go:166`). Cheaper models for
-  mechanical work (e.g. checklist verifiers) is the single largest raw cost
-  lever available, and is explicitly out of scope here.
+- **Model tiering.** Forcing `claude-opus-5[1m]` fleet-wide
+  (`internal/runner/local.go:166`) is **already the cost-optimal choice**, per
+  operator (2026-07-28): opus-5 matches fable on performance at a lower rate,
+  and sonnet-5's higher token consumption cancels its lower per-token price,
+  making it no cheaper in practice. Tiering is therefore not a lever left
+  unpulled — it is closed on purpose. The setting is trivially reversible in
+  `opusOneM` if the economics change.
 - Rewriting the TUI.
 - Changing the task/verification protocol beyond steering assigners toward
   `check_cmd` (which is token-free) over checklist verifier bubbles.
