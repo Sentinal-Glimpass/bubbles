@@ -26,6 +26,8 @@ type fakeBackend struct {
 	schedules   [][]string  // by, target, subject, every, daily
 	unschedules [][2]string // by, id
 	webhooks    []string    // owners who asked for their URL
+	mutes       [][]string  // by, source, subjectRe, bodyRe, window, ttl
+	unmutes     [][2]string // by, id
 }
 
 func (f *fakeBackend) Send(from, to, subject, body string, replyTo int, urgent bool) (int, error) {
@@ -49,6 +51,15 @@ func (f *fakeBackend) Unschedule(by, id string) error {
 	return nil
 }
 func (f *fakeBackend) Schedules(by string) []string { return []string{"[s-1] -> 0.2"} }
+func (f *fakeBackend) Mute(by, source, subjectRe, bodyRe, window, ttl string) (string, error) {
+	f.mutes = append(f.mutes, []string{by, source, subjectRe, bodyRe, window, ttl})
+	return "m-abcd", nil
+}
+func (f *fakeBackend) Unmute(by, id string) error {
+	f.unmutes = append(f.unmutes, [2]string{by, id})
+	return nil
+}
+func (f *fakeBackend) Mutes(by string) []string { return []string{"[m-1] source=\"pump\""} }
 func (f *fakeBackend) Webhook(by, target string) (string, error) {
 	f.webhooks = append(f.webhooks, by+"->"+target)
 	return "http://127.0.0.1:8899/w/tok-" + target, nil
@@ -175,7 +186,7 @@ func TestServeFlow(t *testing.T) {
 	for _, tdef := range listR.Tools {
 		names = append(names, tdef.Name)
 	}
-	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact,schedule,unschedule,schedules,webhook,webhook_rotate,bubbles_port,submit_task,verdict,tasks,cancel_task,log_decision" {
+	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact,schedule,unschedule,schedules,mute,unmute,mutes,webhook,webhook_rotate,bubbles_port,submit_task,verdict,tasks,cancel_task,log_decision" {
 		t.Fatalf("tools = %v", names)
 	}
 
@@ -199,12 +210,12 @@ func TestServeFlow(t *testing.T) {
 
 func TestSpawnGated(t *testing.T) {
 	base := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: false}
-	if len(base.tools()) != 17 { // send..webhook_rotate + submit_task, verdict, tasks, cancel_task, log_decision
-		t.Fatalf("base server should advertise 17 tools, got %d", len(base.tools()))
+	if len(base.tools()) != 20 { // send..webhook_rotate + submit_task, verdict, tasks, cancel_task, log_decision + mute, unmute, mutes
+		t.Fatalf("base server should advertise 20 tools, got %d", len(base.tools()))
 	}
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 24 { // + spawn, edit, delete, introduce, broadcast, control_webhook, assign_task
-		t.Fatalf("spawnable server should advertise 24 tools, got %d", len(s.tools()))
+	if len(s.tools()) != 27 { // + spawn, edit, delete, introduce, broadcast, control_webhook, assign_task
+		t.Fatalf("spawnable server should advertise 27 tools, got %d", len(s.tools()))
 	}
 }
 

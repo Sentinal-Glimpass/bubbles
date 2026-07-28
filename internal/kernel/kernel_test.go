@@ -1353,3 +1353,36 @@ func TestSpawnNameDescription(t *testing.T) {
 		t.Fatalf("legacy bubble should fall back to Persona: Name=%q Label=%q", cb.Name, cb.Label())
 	}
 }
+
+func TestMuteByRejectsBadRegexWithAUsefulError(t *testing.T) {
+	k := New(runner.NewFake())
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	_, err := k.MuteBy(a, "pump", "([unclosed", "", "1h", "")
+	if err == nil {
+		t.Fatal("a bad regex must be rejected at rule-creation time")
+	}
+	if !strings.Contains(err.Error(), "error parsing regexp") {
+		t.Fatalf("error must explain the regex failure, got %v", err)
+	}
+	if len(k.Reg.MuteRules(a)) != 0 {
+		t.Fatal("a rejected rule must never be stored")
+	}
+}
+
+func TestMuteByStoresAndUnmuteRemoves(t *testing.T) {
+	k := New(runner.NewFake())
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	id, err := k.MuteBy(a, "pump", "^opt_out$", "", "1h", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(k.Reg.MuteRules(a)) != 1 {
+		t.Fatal("rule must be stored")
+	}
+	if err := k.UnmuteBy(a, id); err != nil {
+		t.Fatal(err)
+	}
+	if len(k.Reg.MuteRules(a)) != 0 {
+		t.Fatal("rule must be removed")
+	}
+}

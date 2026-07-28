@@ -302,6 +302,33 @@ func (b *ipcBackend) Schedules(by string) []string {
 	return rep.Messages
 }
 
+func (b *ipcBackend) Mute(by, source, subjectRe, bodyRe, window, ttl string) (string, error) {
+	rep, err := b.c.Do(ipc.Request{Op: "mute", From: by, Source: source, SubjectRe: subjectRe, BodyRe: bodyRe, Window: window, TTL: ttl})
+	if err != nil {
+		return "", err
+	}
+	if !rep.OK {
+		return "", errors.New(rep.Err)
+	}
+	return rep.Addr, nil // Addr carries the mute rule id
+}
+
+func (b *ipcBackend) Unmute(by, id string) error {
+	rep, err := b.c.Do(ipc.Request{Op: "unmute", From: by, Addr: id})
+	if err != nil {
+		return err
+	}
+	if !rep.OK {
+		return errors.New(rep.Err)
+	}
+	return nil
+}
+
+func (b *ipcBackend) Mutes(by string) []string {
+	rep, _ := b.c.Do(ipc.Request{Op: "mutes", From: by})
+	return rep.Messages
+}
+
 func (b *ipcBackend) Webhook(by, target string) (string, error) {
 	rep, err := b.c.Do(ipc.Request{Op: "webhook", From: by, To: target})
 	if err != nil {

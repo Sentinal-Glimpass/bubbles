@@ -169,6 +169,23 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return toolOK(msg.ID, "(no schedules)")
 		}
 		return toolOK(msg.ID, strings.Join(ss, "\n"))
+	case "mute":
+		id, err := s.B.Mute(s.Self, arg("source"), arg("subject_re"), arg("body_re"), arg("window"), arg("ttl"))
+		if err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "muted "+id+" — matching messages will still land in inbox(), just without a notification/wake")
+	case "unmute":
+		if err := s.B.Unmute(s.Self, arg("id")); err != nil {
+			return toolErr(msg.ID, err.Error())
+		}
+		return toolOK(msg.ID, "unmuted "+arg("id"))
+	case "mutes":
+		ms := s.B.Mutes(s.Self)
+		if len(ms) == 0 {
+			return toolOK(msg.ID, "(no mute rules)")
+		}
+		return toolOK(msg.ID, strings.Join(ms, "\n"))
 	case "webhook":
 		target := arg("addr")
 		if target == "" {

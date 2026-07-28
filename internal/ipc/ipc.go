@@ -27,6 +27,12 @@ type Request struct {
 	Every   string `json:"every,omitempty"` // schedule interval ("15m")
 	Daily   string `json:"daily,omitempty"` // schedule daily time ("08:00")
 
+	Source    string `json:"source,omitempty"`    // mute: exact sender match (optional)
+	SubjectRe string `json:"subjectRe,omitempty"` // mute: subject regex (optional)
+	BodyRe    string `json:"bodyRe,omitempty"`    // mute: body regex (optional)
+	Window    string `json:"window,omitempty"`    // mute: required duration ("1h")
+	TTL       string `json:"ttl,omitempty"`       // mute: optional expiry duration
+
 	Task          string `json:"task,omitempty"`          // task id (submit_task / verdict)
 	Checklist     string `json:"checklist,omitempty"`     // assign_task checklist (newline-separated)
 	Deterministic bool   `json:"deterministic,omitempty"` // assign_task: true=tests, false=subjective

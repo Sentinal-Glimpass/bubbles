@@ -1054,6 +1054,87 @@ func (k *Kernel) SchedulesFor(by addr.Address) []string {
 	return out
 }
 
+// newMuteID mints a short mute-rule id, matching the "s-<hex>" style used for
+// schedule ids (internal/sched.newID) so ids across the kernel look uniform.
+func newMuteID() string {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("m-%x", b)
+}
+
+// MuteBy declares a mute predicate for `by`'s own inbox: inbound traffic
+// matching it is noise, and the kernel stops waking `by` for it (the message
+// still lands in the inbox — inbox() still shows it). A bubble may only mute
+// its own traffic; there is no target/cross-bubble muting. window is
+// required and must parse to a positive duration; ttl is optional ("" =
+// never expires). The rule is validated via notify.CompileRule BEFORE it is
+// stored, so a bad regex is rejected with its raw parse error (never stored)
+// instead of silently matching nothing (or everything) later.
+func (k *Kernel) MuteBy(by addr.Address, source, subjectRe, bodyRe, window, ttl string) (string, error) {
+	win, err := time.ParseDuration(window)
+	if err != nil {
+		return "", fmt.Errorf("kernel: invalid window %q: %w", window, err)
+	}
+	if win <= 0 {
+		return "", fmt.Errorf("kernel: window must be positive, got %s", win)
+	}
+	var ttlDur time.Duration
+	if ttl != "" {
+		ttlDur, err = time.ParseDuration(ttl)
+		if err != nil {
+			return "", fmt.Errorf("kernel: invalid ttl %q: %w", ttl, err)
+		}
+	}
+
+	r := notify.Rule{
+		ID:        newMuteID(),
+		Source:    source,
+		SubjectRe: subjectRe,
+		BodyRe:    bodyRe,
+		Window:    win,
+		TTL:       ttlDur,
+		Created:   k.clockNow(),
+	}
+	if _, err := notify.CompileRule(r); err != nil {
+		return "", err
+	}
+
+	rules := k.Reg.MuteRules(by)
+	if len(rules) >= notify.MaxRules {
+		return "", notify.ErrTooManyRules
+	}
+	rules = append(rules, r)
+	k.Reg.SetMuteRules(by, rules)
+	return r.ID, nil
+}
+
+// UnmuteBy removes one of `by`'s own mute rules by id.
+func (k *Kernel) UnmuteBy(by addr.Address, id string) error {
+	rules := k.Reg.MuteRules(by)
+	for i, r := range rules {
+		if r.ID == id {
+			rules = append(rules[:i], rules[i+1:]...)
+			k.Reg.SetMuteRules(by, rules)
+			return nil
+		}
+	}
+	return fmt.Errorf("kernel: no mute rule %s", id)
+}
+
+// MutesFor renders `by`'s own mute rules for display.
+func (k *Kernel) MutesFor(by addr.Address) []string {
+	rules := k.Reg.MuteRules(by)
+	out := make([]string, 0, len(rules))
+	for _, r := range rules {
+		line := fmt.Sprintf("[%s] source=%q subject=%q body=%q window=%s", r.ID, r.Source, r.SubjectRe, r.BodyRe, r.Window)
+		if r.TTL > 0 {
+			line += fmt.Sprintf(" ttl=%s", r.TTL)
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
 // FireDue delivers every schedule that has come due — waking each target via the
 // normal delivery path (cold bubbles page in). Called on a short daemon tick.
 func (k *Kernel) FireDue() {

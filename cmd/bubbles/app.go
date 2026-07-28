@@ -487,6 +487,19 @@ func handleIPC(k *kernel.Kernel, r ipc.Request) ipc.Reply {
 		return ipc.Reply{OK: true}
 	case "schedules":
 		return ipc.Reply{OK: true, Messages: k.SchedulesFor(from)}
+	case "mute":
+		id, err := k.MuteBy(from, r.Source, r.SubjectRe, r.BodyRe, r.Window, r.TTL)
+		if err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true, Addr: id}
+	case "unmute":
+		if err := k.UnmuteBy(from, r.Addr); err != nil {
+			return ipc.Reply{OK: false, Err: err.Error()}
+		}
+		return ipc.Reply{OK: true}
+	case "mutes":
+		return ipc.Reply{OK: true, Messages: k.MutesFor(from)}
 	case "webhook":
 		target := addr.Address(r.To)
 		if r.To == "" {
