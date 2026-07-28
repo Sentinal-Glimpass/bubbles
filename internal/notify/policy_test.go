@@ -357,3 +357,43 @@ func TestReadingResetsTheAnnouncedBacklog(t *testing.T) {
 		t.Fatalf("after reading, a new message = %v, want Notice", r.Action)
 	}
 }
+
+// TestRecoverGates pins the sweep half of the single decision point. It shares
+// INV-2 and INV-1 with Decide, which is the entire reason it lives here: the
+// 632fe95 flood came from a sweep that could re-emit a backlog on its own terms.
+func TestRecoverGates(t *testing.T) {
+	p := NewPolicy(func(addr.Address) *RuleSet { return nil }, NewCeiling(DefaultCeilingPerMinute, DefaultCeilingBurst))
+	now := time.Unix(0, 0)
+
+	if d := p.Recover("0.1", State{Notifiable: 0, Announced: 0}, true, now); d.Action != Suppress {
+		t.Fatalf("empty backlog = %v, want Suppress (nothing to announce)", d.Action)
+	}
+	// Never announced: the anti-stall direction. A backlog nobody was told
+	// about must always be announced, stale or not.
+	d := p.Recover("0.1", State{Notifiable: 2, Announced: 0}, false, now)
+	if d.Action != Notice || d.Announce != 2 {
+		t.Fatalf("unannounced backlog = %v/%d, want Notice/2", d.Action, d.Announce)
+	}
+	// Already announced and the notice is fresh: silence. This is the flood
+	// direction — without it every sweep re-emits the same backlog.
+	if s := p.Recover("0.1", State{Notifiable: 2, Announced: 2}, false, now); s.Action != Suppress {
+		t.Fatalf("fresh announced backlog = %v, want Suppress", s.Action)
+	}
+	// Stale overrides: a notice that never landed is retried.
+	if r := p.Recover("0.1", State{Notifiable: 2, Announced: 2}, true, now); r.Action != Notice {
+		t.Fatalf("stale announced backlog = %v, want Notice (the safety net)", r.Action)
+	}
+	// INV-1 still bounds it: a sweep cannot re-emit without limit even if
+	// every notice keeps looking stale.
+	capped := false
+	for i := 0; i < 40; i++ {
+		x := p.Recover("0.1", State{Notifiable: 2, Announced: 2}, true, now)
+		if x.Action == Suppress && x.Capped {
+			capped = true
+			break
+		}
+	}
+	if !capped {
+		t.Fatal("the sweep must be subject to the INV-1 ceiling; it re-emitted without limit")
+	}
+}

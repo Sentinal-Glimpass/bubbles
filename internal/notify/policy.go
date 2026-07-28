@@ -356,6 +356,52 @@ func deliver(msg Message, st State, wake bool) Decision {
 	}
 }
 
+// Recover is the SWEEP half of the same decision Decide makes for a freshly
+// filed message: it answers "does this standing backlog still need to be
+// announced?". Both halves live here so the send path and the periodic sweep
+// reach one decision point and cannot both announce the same backlog -- the
+// double-notice observed live as two notices for one webhook event.
+//
+// It takes no Message because a sweep has none: the backlog is whatever is
+// left notifiable, and there is nothing new to mute-match, inline or coalesce.
+// It deliberately DOES apply the two gates that bound cost:
+//
+//   - INV-2, so an announced-and-unconsumed backlog is not re-announced. stale
+//     overrides it: that is the safety net for a notice that never landed (a
+//     bubble that stalled booting, a lost write), and it is keyed by the
+//     caller off WHEN it last wrote, not off the announced count -- the count
+//     legitimately falls to zero when a delivery consumes the backlog it
+//     announced, which does not mean nothing was ever written.
+//   - INV-1, because a drain line is a real write. This is the ceiling that
+//     bounds the 632fe95 direction: a backlog whose notice keeps failing to
+//     land cannot re-emit on every sweep forever.
+//
+// Notifiable is the caller's NotifiableCount, never its UnreadCount: a backlog
+// of nothing but mute-suppressed traffic must never wake anything, or the
+// sweep pays exactly the prompt-cache rewarm that muting exists to prevent.
+func (p *Policy) Recover(to addr.Address, st State, stale bool, now time.Time) Decision {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if st.Notifiable == 0 {
+		return Decision{Action: Suppress} // nothing to say; not a suppression
+	}
+	if st.Announced > 0 && !stale {
+		return Decision{Action: Suppress}
+	}
+	if !p.ceiling.Allow(to, now) {
+		return Decision{Action: Suppress, Capped: true}
+	}
+	return Decision{
+		Action: Notice,
+		Text:   RenderDrain(st.Notifiable),
+		// A backlog that has waited for a sweep is worth a page-in; the caller
+		// still decides whether this pass wakes cold bubbles at all.
+		Wake:     true,
+		Announce: st.Notifiable,
+	}
+}
+
 // Pending drains to's coalescing window if it has expired, returning the
 // decision the caller should act on. The second result is false when there is
 // nothing to write, which is the common case. When it is false because the

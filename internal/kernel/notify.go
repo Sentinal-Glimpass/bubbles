@@ -118,6 +118,63 @@ func (k *Kernel) decide(to addr.Address, id int, source, display, subject, body 
 	return d, prev, true
 }
 
+// nudgeRecovery is how long an already-announced backlog can sit before a sweep
+// re-announces it — the safety net for a notice that never landed (a cold bubble
+// that stalled booting, a lost write). Well under the drain interval.
+const nudgeRecovery = 2 * time.Minute
+
+// decideRecovery is decide's sweep-side twin: same critical section, same
+// policy, same claim. RecoverUnread used to make this call itself (recoverNudge
+// + a hand-formatted drain line), which meant the fleet had TWO places that
+// could decide to announce a backlog — the send path and the 45s sweep — and
+// nothing stopping both from doing it for the same messages.
+//
+// The staleness question is answered here rather than in the policy because
+// only the kernel knows when it last wrote: it is keyed off lastNudge, NOT off
+// notified == 0. Those are different questions. The announced count is INV-2's
+// high-water and legitimately falls to zero when a delivery consumes the
+// backlog it announced, which does not mean nothing was ever written; reading
+// it as "never announced" made every inlined delivery trigger a redundant drain
+// nudge.
+//
+// Notifiable, not unread: a bubble whose entire backlog is mute-suppressed must
+// stay cold. UnreadCount counts muted messages (correctly — they are unread and
+// inbox() still shows them), so keying the sweep off it paged in exactly the
+// bubbles muting exists to leave alone, paying the full prompt-cache rewarm for
+// traffic already declared to be noise.
+func (k *Kernel) decideRecovery(a addr.Address, hot bool) (d notify.Decision, prev int, proceed bool) {
+	now := time.Now()
+	k.notifyMu.Lock()
+	prev = k.notified[a]
+	last := k.lastNudge[a]
+	n := k.Store.NotifiableCount(a)
+	d = k.Notify.Recover(a, notify.State{
+		Notifiable: n,
+		Announced:  prev,
+		Hot:        hot,
+		AlwaysOn:   k.isAlwaysOn(a),
+	}, last.IsZero() || now.Sub(last) >= nudgeRecovery, now)
+	if d.Action != notify.Suppress {
+		// Claimed under the same lock as the read, so a concurrent send-path
+		// delivery sees the claim rather than a stale zero.
+		k.notified[a] = d.Announce
+		k.lastNudge[a] = time.Now()
+	}
+	k.notifyMu.Unlock()
+
+	if d.Action == notify.Suppress {
+		switch {
+		case n == 0: // nothing to announce is not a suppression; there was no notice to spend
+		case d.Capped:
+			k.Cost.Add(a, costmeter.FNoticesCapped, 1)
+		default:
+			k.Cost.Add(a, costmeter.FNoticesSuppressed, 1)
+		}
+		return d, prev, false
+	}
+	return d, prev, true
+}
+
 // unclaimAnnounced puts the announced level back when the delivery the claim
 // was made for turns out to be unreachable (a disabled bubble, a launch that
 // failed). Without it such a message would be marked announced despite no

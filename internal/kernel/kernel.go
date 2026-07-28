@@ -114,35 +114,6 @@ type Kernel struct {
 	lastNudge map[addr.Address]time.Time // when we last wrote a notice to it (for stale-notice recovery)
 }
 
-// nudgeRecovery is how long an already-announced backlog can sit before a sweep
-// re-nudges it — the safety net for a notice that never landed (a cold bubble
-// that stalled booting, a lost write). Well under the drain interval.
-const nudgeRecovery = 2 * time.Minute
-
-// recoverNudge is the SWEEP/drain path: it fires for a backlog that was never
-// announced (pooled, or the send happened while the bubble was cold), OR for one
-// announced so long ago that the notice was likely missed. This is the safety net
-// that guarantees a bubble with unread mail gets told — so an inbox can never grow
-// silently, and after a restart every bubble with pending mail is re-notified.
-func (k *Kernel) recoverNudge(a addr.Address, unread int) bool {
-	if unread == 0 {
-		return false
-	}
-	k.notifyMu.Lock()
-	defer k.notifyMu.Unlock()
-	// Keyed off WHEN we last wrote, not off the announced count. Those are
-	// different questions: the count is INV-2's high-water and legitimately
-	// falls to zero when a delivery consumes the backlog it announced, which
-	// does not mean nothing was ever written. Reading notified == 0 as "never
-	// announced" made every inlined delivery trigger a redundant drain nudge.
-	if k.lastNudge[a].IsZero() || time.Since(k.lastNudge[a]) >= nudgeRecovery {
-		k.notified[a] = unread
-		k.lastNudge[a] = time.Now()
-		return true
-	}
-	return false
-}
-
 func (k *Kernel) clearNudge(a addr.Address) {
 	k.notifyMu.Lock()
 	k.notified[a] = 0
@@ -187,7 +158,7 @@ func (k *Kernel) UnsetFocus(a addr.Address) {
 	k.focusMu.Unlock()
 	if n := k.Store.UnreadCount(a); n > 0 && k.announceOnce(a, n) {
 		if s := k.session(a); s != nil && s.Alive() {
-			_, _ = s.Write([]byte(formatDrain(n)))
+			_, _ = s.Write([]byte(notify.RenderDrain(n)))
 		}
 	}
 }
@@ -213,9 +184,18 @@ func (k *Kernel) FlushHeldIfIdle() {
 	k.focusMu.Unlock()
 	if n := k.Store.UnreadCount(foc); n > 0 && k.announceOnce(foc, n) {
 		if s := k.session(foc); s != nil && s.Alive() {
-			_, _ = s.Write([]byte(formatDrain(n)))
+			_, _ = s.Write([]byte(notify.RenderDrain(n)))
 		}
 	}
+}
+
+// operatorPresent reports whether the operator has typed anything recently —
+// the signal that a dive/focus is live rather than a stale focus left behind by
+// a detached terminal. The window is generous (2m) so an operator who is
+// reading rather than typing still counts as present.
+func (k *Kernel) operatorPresent() bool {
+	last := k.lastKey.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) < 2*time.Minute
 }
 
 // isFocused reports whether a is the currently dived-into bubble.
@@ -650,19 +630,34 @@ func (k *Kernel) DrainInboxes() { k.RecoverUnread(false) }
 // operator's typing isn't interrupted.
 func (k *Kernel) RecoverUnread(hotOnly bool) {
 	type job struct {
-		a addr.Address
-		n int
+		a    addr.Address
+		d    notify.Decision
+		prev int
 	}
 	var jobs []job
+	operatorAway := !k.operatorPresent()
 	for _, b := range k.Reg.All() {
-		if b.Addr.IsRoot() || k.isFocused(b.Addr) {
+		if b.Addr.IsRoot() {
 			continue
 		}
-		if hotOnly && !k.IsHot(b.Addr) {
+		// Skip the focused bubble only while the operator is actually AROUND
+		// (recent keystrokes). Focus is not unset when a terminal client
+		// detaches mid-dive, so skipping unconditionally exempted exactly the
+		// bubble the operator lives in from recovery — unread mail sat there for
+		// hours until a manual reopen (3cfb0d9).
+		if k.isFocused(b.Addr) && !operatorAway {
 			continue
 		}
-		if n := k.Store.UnreadCount(b.Addr); n > 0 && k.recoverNudge(b.Addr, n) {
-			jobs = append(jobs, job{b.Addr, n})
+		hot := k.IsHot(b.Addr)
+		if hotOnly && !hot {
+			continue
+		}
+		// One decision point with the send path: the notifiable count is read,
+		// the policy consulted and the announcement claimed in a single critical
+		// section shared with deliverMessage, so a send racing this sweep cannot
+		// produce a second notice for the same backlog.
+		if d, prev, ok := k.decideRecovery(b.Addr, hot); ok {
+			jobs = append(jobs, job{b.Addr, d, prev})
 		}
 	}
 	if len(jobs) == 0 {
@@ -680,25 +675,20 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 			var s runner.Session
 			if hotOnly {
 				s = k.session(j.a)
-			} else {
+			} else if j.d.Wake {
 				s = k.EnsureAlive(j.a) // page a cold bubble in so it has a terminal to notify
 			}
-			if s == nil || !s.Alive() {
-				return
-			}
-			line := []byte(formatDrain(j.n))
-			if s.InputReady() { // don't type into a still-booting claude
-				_, _ = s.Write(line)
-			} else {
-				go k.deliverWhenReady(j.a, line)
+			// writeNotice handles the still-booting case (deferred write) and
+			// meters what it costs; no PTY write happens under notifyMu.
+			if !k.writeNotice(j.a, s, j.d) {
+				// Unreachable after all (disabled bubble, failed launch): give
+				// back the claim so the backlog is not recorded as advertised
+				// when no notice exists, and the next sweep retries it.
+				k.unclaimAnnounced(j.a, j.d.Announce, j.prev)
 			}
 		}(j)
 	}
 	wg.Wait()
-}
-
-func formatDrain(n int) string {
-	return fmt.Sprintf("📬 You have %d unread message(s) — call the inbox() tool to read and reply.", n)
 }
 
 // EnsureAlive returns a live session for a, relaunching it if its process has

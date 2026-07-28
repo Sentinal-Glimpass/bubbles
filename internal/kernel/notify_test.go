@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
+	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 )
@@ -365,5 +366,138 @@ func TestDeferredWriteThatNeverLandsDoesNotConsumeTheMessage(t *testing.T) {
 	}
 	if c := k.Cost.Snapshot()[a]; c.DeliveriesInline != 0 || c.NoticesWritten != 0 {
 		t.Fatalf("a write that never happened must not be counted: written=%d inline=%d", c.NoticesWritten, c.DeliveriesInline)
+	}
+}
+
+// TestSweepDoesNotWakeForMutedOnlyBacklog is the headline guarantee of this
+// phase made true FLEET-WIDE. The send path already refuses to wake a cold
+// bubble for muted traffic, but the 45s/10m recovery sweep keyed off
+// UnreadCount — which counts muted messages, correctly, since they are unread
+// and inbox() still shows them. So a bubble whose entire backlog was
+// mute-suppressed webhook events was paged back in by the sweep anyway, paying
+// the exact prompt-cache rewarm muting exists to prevent. The sweep must key
+// off NotifiableCount.
+func TestSweepDoesNotWakeForMutedOnlyBacklog(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.Reg.SetMuteRules(a, []notify.Rule{{ID: "r1", Source: "pump", SubjectRe: "^noise$", Window: time.Hour}})
+
+	// The first match opens the mute window and is delivered (inlined, so it
+	// spends its notification); everything after it inside the window is
+	// swallowed. Then the bubble goes cold.
+	k.WebhookDeliver(a, "pump", "noise", "e0", true)
+	_ = k.runner.Kill(a)
+	k.smu.Lock()
+	delete(k.sessions, a)
+	k.smu.Unlock()
+	for i := 1; i < 4; i++ {
+		k.WebhookDeliver(a, "pump", "noise", fmt.Sprintf("e%d", i), true)
+	}
+	if k.IsHot(a) {
+		t.Fatal("precondition: muted events must not have woken it on the send path")
+	}
+	if n := k.Store.NotifiableCount(a); n != 0 {
+		t.Fatalf("precondition: the whole backlog should be non-notifiable, got %d", n)
+	}
+	if k.Store.UnreadCount(a) != 4 {
+		t.Fatalf("precondition: all 4 must be filed and unread, got %d", k.Store.UnreadCount(a))
+	}
+
+	k.DrainInboxes() // the full sweep, which pages cold bubbles in
+
+	if k.IsHot(a) {
+		t.Fatal("the recovery sweep woke a bubble whose entire backlog is muted -- that is the rewarm cost muting is meant to avoid")
+	}
+	// No message is dropped and UnreadCount stays truthful: mute suppresses the
+	// NOTIFICATION, never the mail.
+	if k.Store.UnreadCount(a) != 4 {
+		t.Fatalf("muted messages must stay unread and filed, got %d", k.Store.UnreadCount(a))
+	}
+	if got := k.Inbox(a); len(got) != 4 {
+		t.Fatalf("every muted message must still be readable via inbox(), got %d: %v", len(got), got)
+	}
+	if c := k.Cost.Snapshot()[a]; c.NoticesSuppressed == 0 {
+		t.Fatal("every suppression must be metered; NoticesSuppressed is 0")
+	}
+}
+
+// TestSweepStillWakesForRealBacklog is the control for the test above, and the
+// anti-stall direction of the 632fe95 pair: making the sweep notifiable-keyed
+// must not make it blind. An UNMUTED cold backlog is still paged in and told.
+func TestSweepStillWakesForRealBacklog(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)    // give it a SessionID so the next sends stay pooled
+	fr.Session(a).Die() // cold
+	k.Send(addr.Root, a, "real", "work to do", 0, false)
+
+	k.DrainInboxes()
+	if !k.IsHot(a) {
+		t.Fatal("the sweep must still wake a cold bubble that has genuinely notifiable mail")
+	}
+	if !strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatalf("it must be told about the backlog, got %q", fr.Session(a).Written())
+	}
+}
+
+// TestSendAndRecoverDoNotDoubleNotify: the send path and the 45s sweep are one
+// decision point. Before unification each had its own — deliverMessage's Decide
+// and RecoverUnread's recoverNudge — and the same backlog could be announced by
+// both, seen live as two notices for one webhook event.
+func TestSendAndRecoverDoNotDoubleNotify(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)
+
+	k.Send(addr.Root, a, "real", strings.Repeat("x", notify.InlineMaxBytes+1), 0, true)
+	k.RecoverUnread(true) // the sweep, racing the send path
+	k.RecoverUnread(true) // and again: still one backlog, still one notice
+
+	if got := strings.Count(fr.Session(a).Written(), "📬"); got != 1 {
+		t.Fatalf("notices = %d, want 1 -- send path and recovery sweep double-notified", got)
+	}
+}
+
+// TestRecoveryCoversStaleFocus: focus is never unset when a terminal client
+// detaches mid-dive, so skipping the focused bubble unconditionally exempted
+// the operator's own bubble from recovery for hours (3cfb0d9). The skip must be
+// keyed on the operator actually being PRESENT.
+func TestRecoveryCoversStaleFocus(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)
+	k.SetFocus(a) // dived in, but no keystroke has ever been recorded: stale
+
+	k.Store.Append(inbox.Message{From: addr.Root, To: a, Subject: "pending"})
+	k.RecoverUnread(true)
+	if !strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatalf("a focused-but-abandoned bubble must still be recovered, got %q", fr.Session(a).Written())
+	}
+}
+
+// TestRecoverySkipsTheLiveOperator is the other half: while the operator is
+// actually typing, the sweep must not submit a line into their half-written
+// prompt.
+func TestRecoverySkipsTheLiveOperator(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	k.EnsureAlive(a)
+	k.SetFocus(a)
+	k.NoteKeystroke() // the operator is present
+
+	k.Store.Append(inbox.Message{From: addr.Root, To: a, Subject: "pending"})
+	k.RecoverUnread(true)
+	if strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatalf("the sweep must not type into the bubble the operator is live in, got %q", fr.Session(a).Written())
 	}
 }

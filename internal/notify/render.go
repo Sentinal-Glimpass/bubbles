@@ -57,6 +57,14 @@ func renderInline(source, subject, body string, unread int) string {
 		Sanitize(flatten(source)), Sanitize(flatten(subject)), body, unread)
 }
 
+// RenderDrain is the backlog line: it names no single sender because it stands
+// for the whole queue. Exported because the operator paths (leaving a bubble,
+// pausing typing) flush a held backlog with the same line, and every "you have
+// mail" notice in the system must read identically to the recipient.
+func RenderDrain(unread int) string {
+	return fmt.Sprintf("📬 You have %d unread message(s) — call the inbox() tool to read and reply.", unread)
+}
+
 // renderRollup summarises a batch that was never individually announced, so
 // the recipient learns both the volume and how long it has been accumulating.
 func renderRollup(n int, subject, source string, since time.Time) string {
