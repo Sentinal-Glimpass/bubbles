@@ -37,7 +37,7 @@ type Action int
 const (
 	Suppress Action = iota // file silently: no wake, no notice
 	Notice                 // write the "you have mail" notice
-	Inline                 // write the notice WITH bodies inlined; mark those read
+	Inline                 // write the notice WITH bodies inlined; those ids have spent their notification
 	Rollup                 // write an "N× subject since T" summary
 )
 
@@ -74,8 +74,8 @@ type State struct {
 	Announced  int  // backlog size already announced (INV-2)
 	Hot        bool // recipient has a live session
 	// AlwaysOn marks a bubble that is contracted to stay reachable, and so
-	// may be woken for non-urgent mail. Nothing sets it yet -- the kernel
-	// wiring in Task 7 populates it from the bubble's capabilities.
+	// may be woken for non-urgent mail. The kernel populates it from the
+	// registry's always-on flag.
 	AlwaysOn bool
 }
 
@@ -83,8 +83,12 @@ type State struct {
 // single-line, so the caller may type it verbatim.
 //
 // MarkRead and IDs answer different questions and must not be conflated.
-// MarkRead is "these messages were delivered in full, mark them read"; it is
-// only ever populated by an Inline delivery. IDs is "this decision covers
+// MarkRead is "these messages were delivered in full, they have spent their
+// notification"; it is only ever populated by an Inline delivery. The kernel
+// records that by marking them non-notifiable, NOT by marking them read --
+// read state belongs to the recipient's own inbox() call, and flipping it
+// here would drop the message out of UnreadCount and out of inbox(), i.e.
+// consume the recipient's mail on its behalf. IDs is "this decision covers
 // these queued messages", populated when Pending drains a coalescing batch,
 // and says nothing about whether they were read. They overlap in exactly one
 // case: a drained batch of one that was small enough to inline, where the
