@@ -15,8 +15,10 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/bus"
 	"github.com/Sentinal-Glimpass/bubbles/internal/caps"
+	"github.com/Sentinal-Glimpass/bubbles/internal/costmeter"
 	"github.com/Sentinal-Glimpass/bubbles/internal/groups"
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
+	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
@@ -41,6 +43,16 @@ type Kernel struct {
 	Groups *groups.Store
 	Sched  *sched.Store
 	Tasks  *tasks.Store
+
+	// Notify decides, for each inbound message, whether it earns a notice and
+	// whether it may wake a cold recipient. Mute is evaluated here BEFORE any
+	// page-in, which is what stops noisy traffic from paying a prompt-cache
+	// rewarm.
+	Notify *notify.Policy
+
+	// Cost is the per-bubble cost/efficiency tally. Without it a notification
+	// win and a notification regression look identical from the outside.
+	Cost *costmeter.Meter
 
 	// VerifierReap, when set (tests), replaces the delayed post-verdict deletion
 	// of a task's verifier bubble with an inline call.
@@ -107,22 +119,6 @@ type Kernel struct {
 // that stalled booting, a lost write). Well under the drain interval.
 const nudgeRecovery = 2 * time.Minute
 
-// markNudge is the FAST (send) path: it fires at most ONCE per unread backlog —
-// the first message into an empty inbox gets a notice; further messages that pile
-// up before the bubble reads are suppressed (it drains them all in one inbox()
-// call). clearNudge resets it when the bubble reads. This is what keeps a busy
-// fleet from spending a turn per message.
-func (k *Kernel) markNudge(a addr.Address, unread int) bool {
-	k.notifyMu.Lock()
-	defer k.notifyMu.Unlock()
-	if unread == 0 || k.notified[a] != 0 {
-		return false
-	}
-	k.notified[a] = unread
-	k.lastNudge[a] = time.Now()
-	return true
-}
-
 // recoverNudge is the SWEEP/drain path: it fires for a backlog that was never
 // announced (pooled, or the send happened while the bubble was cold), OR for one
 // announced so long ago that the notice was likely missed. This is the safety net
@@ -180,7 +176,7 @@ func (k *Kernel) UnsetFocus(a addr.Address) {
 		k.focused = ""
 	}
 	k.focusMu.Unlock()
-	if n := k.Store.UnreadCount(a); n > 0 && k.markNudge(a, n) {
+	if n := k.Store.UnreadCount(a); n > 0 && k.announceOnce(a, n) {
 		if s := k.session(a); s != nil && s.Alive() {
 			_, _ = s.Write([]byte(formatDrain(n)))
 		}
@@ -206,7 +202,7 @@ func (k *Kernel) FlushHeldIfIdle() {
 	}
 	k.heldFlushed = true
 	k.focusMu.Unlock()
-	if n := k.Store.UnreadCount(foc); n > 0 && k.markNudge(foc, n) {
+	if n := k.Store.UnreadCount(foc); n > 0 && k.announceOnce(foc, n) {
 		if s := k.session(foc); s != nil && s.Alive() {
 			_, _ = s.Write([]byte(formatDrain(n)))
 		}
@@ -222,7 +218,7 @@ func (k *Kernel) isFocused(a addr.Address) bool {
 
 // New builds a Kernel over the given runner, with root seeded.
 func New(r runner.Runner) *Kernel {
-	return &Kernel{
+	k := &Kernel{
 		Bus:           bus.New(),
 		Caps:          caps.New(),
 		Reg:           registry.New(),
@@ -236,7 +232,13 @@ func New(r runner.Runner) *Kernel {
 		lastUsed:      map[addr.Address]int64{},
 		notified:      map[addr.Address]int{},
 		lastNudge:     map[addr.Address]time.Time{},
+		Cost:          costmeter.New(),
 	}
+	// The ceiling is constructed with the package defaults and has no bypass:
+	// it is the last line of defense against the 632fe95 flood, so nothing
+	// above it (rule, capability, config) can raise or disable it.
+	k.Notify = notify.NewPolicy(k.muteRules, notify.NewCeiling(notify.DefaultCeilingPerMinute, notify.DefaultCeilingBurst))
+	return k
 }
 
 // touch stamps a as most-recently-used (for LRU eviction).
@@ -504,8 +506,20 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	if to == addr.Root {
 		_ = k.Bus.Send(bus.Message{From: from, To: to, Subject: subject, Body: body}) // blink the dashboard (root is the human; always notified)
 	}
-	unread := k.Store.UnreadCount(to)
-	notify := []byte(formatNotify(from, fromName, subject, unread))
+	// Notification policy runs HERE, before anything that could page the
+	// recipient in. A muted message must not wake a cold bubble: the wake is a
+	// full prompt-cache rewarm and is the dominant cost of noisy traffic, so
+	// suppressing only the notice would leave that cost untouched. The message
+	// is already filed above, so a Suppress loses nothing.
+	source := from.String()
+	if fromName != "" {
+		source += " (" + fromName + ")"
+	}
+	d, notifiable := k.decide(to, id, source, subject, body, urgent)
+	if !notifiable {
+		return id
+	}
+	backlog := k.Store.NotifiableCount(to)
 	// Delivery policy:
 	//   - urgent: wake the recipient now (page it in if cold), then nudge it.
 	//   - non-urgent, already hot: deliver immediately (free — it's running).
@@ -526,28 +540,30 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	}
 	// deliver types the notice in — but only when we're actually going to reach
 	// the recipient (a pooled/paged-out message writes nothing here and is left
-	// for DrainInboxes). markNudge dedups: it's true only when unread has grown
-	// past the last announced level (reset when the bubble reads), so overlapping
-	// nudges (send + idle-flush + drain) don't stack up "you have mail" notices.
-	// A freshly-launched real session hasn't rendered its input yet, so typing now
-	// would sit unsubmitted; wait (off the send path) until it's booted.
-	deliver := func(s runner.Session) {
-		if s == nil || !k.markNudge(to, unread) {
-			return
+	// for DrainInboxes). writeNotice records the announcement (INV-2) and the
+	// cost, and handles a session that hasn't rendered its input yet: typing
+	// into a still-booting claude would sit unsubmitted, so that write is
+	// deferred off the send path.
+	deliver := func(s runner.Session) { k.writeNotice(to, s, d, backlog) }
+	switch {
+	case urgent:
+		// A hot recipient is written to directly; a COLD one is paged in only
+		// if the policy granted the wake. This gate is the phase's whole point.
+		if k.IsHot(to) || d.Wake {
+			deliver(k.EnsureAlive(to))
 		}
-		if !s.InputReady() { // still booting / sitting on the resume menu — wait, off the send path
-			go k.deliverWhenReady(to, notify)
-			return
-		}
-		_, _ = s.Write(notify)
-	}
-	if urgent {
-		deliver(k.EnsureAlive(to))
-	} else if s := k.session(to); s != nil && s.Alive() {
+	case k.IsHot(to):
+		s := k.session(to)
 		k.touch(to)
 		deliver(s)
-	} else if b, ok := k.Reg.Get(to); ok && b.SessionID == "" && !to.IsRoot() {
-		deliver(k.EnsureAlive(to))
+	default:
+		// First-launch case: a freshly-spawned bubble with no session id yet
+		// must start when it is first delegated to, instead of sitting cold
+		// until the next drain — the "spawn a worker and message it a charter"
+		// flow. A previously-run, paged-out bubble stays pooled.
+		if b, ok := k.Reg.Get(to); ok && b.SessionID == "" && !to.IsRoot() {
+			deliver(k.EnsureAlive(to))
+		}
 	}
 	return id
 }
@@ -625,11 +641,11 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 			if s == nil || !s.Alive() {
 				return
 			}
-			notify := []byte(formatDrain(j.n))
+			line := []byte(formatDrain(j.n))
 			if s.InputReady() { // don't type into a still-booting claude
-				_, _ = s.Write(notify)
+				_, _ = s.Write(line)
 			} else {
-				go k.deliverWhenReady(j.a, notify)
+				go k.deliverWhenReady(j.a, line)
 			}
 		}(j)
 	}

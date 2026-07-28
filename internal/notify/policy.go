@@ -97,6 +97,12 @@ type Decision struct {
 	MarkMuted bool   // caller must call Store.SetMuted for this message
 	Wake      bool   // caller may page in a cold bubble (false => never wake)
 	Rule      string // id of the matching mute rule, "" if none
+	// Capped records that this Suppress was the INV-1 flood ceiling denying a
+	// write, as opposed to mute/dedup/coalescing. The caller cannot infer this
+	// from Action alone, and it must be able to: a capped notice and a
+	// coalesced one have very different cost meanings, and a suppression that
+	// no counter records at all is indistinguishable from a bug.
+	Capped bool
 }
 
 // muteWindow tracks one open mute window for a (bubble, rule) pair: when it
@@ -215,7 +221,7 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 				// erase the only remaining record of them, which is the
 				// silent-stall failure direction.
 				if !p.ceiling.Allow(to, now) {
-					return Decision{Action: Suppress, Rule: r.ID}
+					return Decision{Action: Suppress, Rule: r.ID, Capped: true}
 				}
 				// The message that triggers the rollup is deliberately neither
 				// delivered on its own nor counted in the rollup it triggered:
@@ -258,7 +264,7 @@ func (p *Policy) Decide(to addr.Address, msg Message, st State, now time.Time) D
 	// 4. INV-1 ceiling, last gate before the write. Nothing above may bypass
 	// it; the caller records this as NoticesCapped.
 	if !p.ceiling.Allow(to, now) {
-		return Decision{Action: Suppress}
+		return Decision{Action: Suppress, Capped: true}
 	}
 
 	// Only a message that is actually written earns a coalescing window. If

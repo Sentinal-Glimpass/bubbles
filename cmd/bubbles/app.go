@@ -141,6 +141,17 @@ func runApp() {
 			k.FlushHeldIfIdle()
 		}
 	}()
+	go func() { // write coalesced batches once their window closes, so a burst of
+		// non-urgent follow-ups costs one notice instead of one per message —
+		// and doesn't sit silent until the next message happens to arrive.
+		// Cadence is well under notify.CoalesceWindow so a closed batch is
+		// announced promptly. Never wakes a cold bubble.
+		t := time.NewTicker(1 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			k.DrainCoalesced()
+		}
+	}()
 	go func() { // periodic inbox drain: page in cold bubbles with pending mail so none go unanswered
 		t := time.NewTicker(time.Duration(messagePollMinutes()) * time.Minute)
 		defer t.Stop()
