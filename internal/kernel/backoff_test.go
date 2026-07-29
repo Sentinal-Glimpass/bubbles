@@ -396,3 +396,30 @@ func TestDeleteBubbleClearsCrashLoopState(t *testing.T) {
 		t.Fatal("deleted subtree child still has crash-loop state")
 	}
 }
+
+// A retry the backoff suppresses must still release the dead session's PTY and
+// fds. The gate returns early, so if the close sits behind it the fds leak on
+// every suppressed sweep — and leak permanently once the bubble is given up on,
+// because no later attempt ever gets past the gate.
+func TestSuppressedRetryStillClosesDeadSession(t *testing.T) {
+	f := newCrashLoop(t)
+	f.fr.FailLaunch = true
+
+	// One failed relaunch puts the address into a suppression window.
+	f.k.EnsureAlive(f.a)
+	if tr, ok := f.k.RelaunchTroubleFor(f.a); !ok || tr.Fails != 1 {
+		t.Fatalf("setup: want one recorded failure, got %+v (%v)", tr, ok)
+	}
+
+	// A dead session for the same address, as a crashed process would leave.
+	dead := &runner.FakeSession{}
+	dead.Die()
+	f.k.setSession(f.a, dead)
+
+	if s := f.k.EnsureAlive(f.a); s != nil {
+		t.Fatal("EnsureAlive returned a session while suppressed")
+	}
+	if !dead.Closed() {
+		t.Fatal("suppressed retry left the dead session's PTY open")
+	}
+}

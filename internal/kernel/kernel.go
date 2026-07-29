@@ -782,13 +782,21 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	// lock released across everything slow: see internal/kernel/backoff.go. A
 	// healthy bubble never has state here, so its path is a map lookup and is
 	// otherwise unchanged.
-	epoch, mayLaunch := k.relaunchAllowed(a)
-	if !mayLaunch {
-		// Nothing is metered: a relaunch that never happened rewarmed nothing.
-		return nil
-	}
+	//
+	// The dead session is released BEFORE the gate, not after it. Reaching here
+	// means cur is not alive, so its PTY and fds are pure waste whether or not a
+	// relaunch follows; returning early without closing would leak them on every
+	// suppressed retry and leak them permanently on a give-up, since no later
+	// attempt gets past the gate. Closing unconditionally is also what the code
+	// did before the gate existed.
 	if cur != nil {
 		_ = cur.Close()
+	}
+	epoch, mayLaunch := k.relaunchAllowed(a)
+	if !mayLaunch {
+		// Nothing is metered as a rewarm: a relaunch that never happened rewarmed
+		// nothing.
+		return nil
 	}
 	// The session id is read into a LOCAL here and every use below is that local.
 	// It lives in the registry map, which SyncSessionIDs and other ensureAlive
