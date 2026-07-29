@@ -423,3 +423,26 @@ func TestSuppressedRetryStillClosesDeadSession(t *testing.T) {
 		t.Fatal("suppressed retry left the dead session's PTY open")
 	}
 }
+
+// Every suppression path in this repo increments a costmeter counter, so that a
+// decision NOT to act is as visible in the telemetry as an action. The
+// crash-loop gate is a suppression path.
+func TestSuppressedRelaunchIsMetered(t *testing.T) {
+	f := newCrashLoop(t)
+	f.fr.FailLaunch = true
+
+	f.k.EnsureAlive(f.a) // failure 1: a real attempt, not a suppression
+	if got := f.k.Cost.Snapshot()[f.a].RelaunchesSuppressed; got != 0 {
+		t.Fatalf("an attempted relaunch was metered as suppressed (%d)", got)
+	}
+
+	f.k.EnsureAlive(f.a) // inside the window: suppressed
+	f.k.EnsureAlive(f.a)
+	if got := f.k.Cost.Snapshot()[f.a].RelaunchesSuppressed; got != 2 {
+		t.Fatalf("RelaunchesSuppressed = %d want 2", got)
+	}
+	// FRewarms stays untouched: nothing was warmed.
+	if got := f.k.Cost.Snapshot()[f.a].Rewarms; got != 0 {
+		t.Fatalf("suppression inflated FRewarms (%d)", got)
+	}
+}

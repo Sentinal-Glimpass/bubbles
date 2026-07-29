@@ -15,7 +15,7 @@ import (
 // callers don't need a separate method per counter.
 type Field int
 
-// The ten counters tracked per bubble. Written/Suppressed/Capped describe
+// The eleven counters tracked per bubble. Written/Suppressed/Capped describe
 // notice production; Inline/ViaTool describe how a delivered notice reached the
 // model; TurnsTriggered counts turns a notice caused to run; Evictions/Rewarms
 // describe context-window churn; ContextTokens is a live gauge, not a running
@@ -25,6 +25,11 @@ type Field int
 // truncated. It is throttled with the warning it accompanies, so it counts
 // distinct reports rather than sweeps: a parked bubble must not read as an
 // incident count that climbs with the sweep cadence.
+// RelaunchesSuppressed counts relaunches the crash-loop backoff refused (a
+// window still open, or the bubble given up on): every suppression path in this
+// repo increments a counter, so that a decision NOT to act is as visible in the
+// telemetry as an action. It deliberately counts refusals, not distinct
+// bubbles -- the cost being avoided is per attempt.
 const (
 	FNoticesWritten Field = iota
 	FNoticesSuppressed
@@ -36,6 +41,7 @@ const (
 	FRewarms
 	FContextTokens
 	FOversizedTranscripts
+	FRelaunchesSuppressed
 )
 
 // Counters holds one bubble's cost/efficiency tally. All fields are int64 so
@@ -51,6 +57,7 @@ type Counters struct {
 	Rewarms              int64
 	ContextTokens        int64
 	OversizedTranscripts int64
+	RelaunchesSuppressed int64
 }
 
 // field maps f to the corresponding pointer inside c, so Add and Set can share
@@ -79,6 +86,8 @@ func field(c *Counters, f Field) *int64 {
 		return &c.ContextTokens
 	case FOversizedTranscripts:
 		return &c.OversizedTranscripts
+	case FRelaunchesSuppressed:
+		return &c.RelaunchesSuppressed
 	default:
 		return nil
 	}

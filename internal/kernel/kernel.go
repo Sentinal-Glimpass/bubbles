@@ -794,8 +794,13 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	}
 	epoch, mayLaunch := k.relaunchAllowed(a)
 	if !mayLaunch {
-		// Nothing is metered as a rewarm: a relaunch that never happened rewarmed
-		// nothing.
+		// FRewarms is NOT touched: a relaunch that never happened rewarmed
+		// nothing. What is metered is the suppression itself — every suppression
+		// path in this repo increments a counter, so a refusal to act is as
+		// visible in the telemetry as an action.
+		if k.Cost != nil {
+			k.Cost.Add(a, costmeter.FRelaunchesSuppressed, 1)
+		}
 		return nil
 	}
 	// The session id is read into a LOCAL here and every use below is that local.
