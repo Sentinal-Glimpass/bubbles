@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/transcript"
+	"github.com/creack/pty"
 )
 
 // PTYSession is a Session backed by a PTY, exposing the master file (for input +
@@ -36,17 +36,18 @@ type PTYSession interface {
 // enough to hold a full claude repaint, small enough to be cheap per bubble.
 const scrollbackCap = 256 * 1024
 
-
 // LocalRunner launches real claude sessions in PTYs on this machine.
 type LocalRunner struct {
-	Bin           string                    // default "claude"
-	CitizenPrompt string                    // appended via --append-system-prompt
-	MCPConfig     func(addr.Address) string // inline JSON for --mcp-config (nil = none)
-	InterruptByte byte                      // optional byte before a delivered message (0 = none; default 0 so urgent messages are queued, not interrupting)
-	AllowAll      *bool                     // shared toggle: true => --dangerously-skip-permissions
-	MemMaxMB      int                       // default per-bubble RAM ceiling (0 = uncapped); each bubble runs in its own memory-capped cgroup so a runaway dies alone
-	SessionFile   func(addr.Address) string // per-bubble file where a hook records the live session id (nil = no session-id tracking)
-	BrainDir      func(addr.Address) string // per-bubble private brain folder, told to the bubble via its system prompt (nil = none)
+	Bin                string                    // default "claude"
+	CitizenPrompt      string                    // base prompt, appended via --append-system-prompt to EVERY bubble
+	CitizenPromptSpawn string                    // extra prompt appended only when CanSpawn(a) is true
+	CanSpawn           func(addr.Address) bool   // MUST be the same capability check that gates the spawn-family MCP tool schemas (nil = never)
+	MCPConfig          func(addr.Address) string // inline JSON for --mcp-config (nil = none)
+	InterruptByte      byte                      // optional byte before a delivered message (0 = none; default 0 so urgent messages are queued, not interrupting)
+	AllowAll           *bool                     // shared toggle: true => --dangerously-skip-permissions
+	MemMaxMB           int                       // default per-bubble RAM ceiling (0 = uncapped); each bubble runs in its own memory-capped cgroup so a runaway dies alone
+	SessionFile        func(addr.Address) string // per-bubble file where a hook records the live session id (nil = no session-id tracking)
+	BrainDir           func(addr.Address) string // per-bubble private brain folder, told to the bubble via its system prompt (nil = none)
 
 	// StrictMCP passes --strict-mcp-config so a bubble sees ONLY our MCP server,
 	// not the operator's inherited ones (github/playwright/gmail/…) — no context
@@ -278,7 +279,11 @@ func (r *LocalRunner) Kill(a addr.Address) error {
 // citizen embeds the bubble's address (and its private brain folder, when
 // configured) into the citizen system prompt.
 func (r *LocalRunner) citizen(a addr.Address) string {
-	p := r.CitizenPrompt + "\nYou are bubble " + a.String() + ". Root (the human) is address 0."
+	p := r.CitizenPrompt
+	if r.CanSpawn != nil && r.CanSpawn(a) {
+		p += r.CitizenPromptSpawn
+	}
+	p += "\nYou are bubble " + a.String() + ". Root (the human) is address 0."
 	if r.BrainDir != nil {
 		if d := r.BrainDir(a); d != "" {
 			p += "\nYour PRIVATE brain folder is " + d + " (start with BRAIN.md there). Keep durable notes, decisions, and state in it — your working directory may be shared with other bubbles, but this folder is yours alone."

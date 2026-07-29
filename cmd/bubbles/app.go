@@ -86,7 +86,8 @@ func runApp() {
 	defer headroom.stop()
 
 	lr := runner.NewLocal()
-	lr.CitizenPrompt = citizenPrompt
+	lr.CitizenPrompt = citizenPromptBase
+	lr.CitizenPromptSpawn = citizenPromptSpawn
 	// Fleet default model. Unset => "sonnet" (subscription). Set BUBBLES_MODEL to a
 	// specific model id, or to "auto"/"env" to pass NO --model so claude uses its
 	// own default (ANTHROPIC_MODEL) — the path for AWS Bedrock / Vertex, where the
@@ -109,13 +110,18 @@ func runApp() {
 	k.BrainBase = filepath.Join(baseDir, ".bubbles", "brains")
 	k.DecisionsPath = filepath.Join(baseDir, ".bubbles", "memory", "decisions.md")
 	lr.BrainDir = func(a addr.Address) string { return filepath.Join(k.BrainBase, a.String()) }
-	k.MemBudget = 45 << 30       // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
-	k.IdleTimeout = 30 * time.Minute  // page out sessions silent (no output) this long; they resume on next use
-	k.TypingWindow = 10 * time.Second // hold a focused bubble's messages while you're typing; deliver once you pause this long
+	k.MemBudget = 45 << 30                            // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
+	k.IdleTimeout = 30 * time.Minute                  // page out sessions silent (no output) this long; they resume on next use
+	k.TypingWindow = 10 * time.Second                 // hold a focused bubble's messages while you're typing; deliver once you pause this long
 	inheritedMCP := resolveMCPServers(mcpAllowList()) // curated operator servers bubbles inherit (e.g. playwright)
 	lr.MCPConfig = func(a addr.Address) string {
 		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a), inheritedMCP)
 	}
+	// Same Caps.CanSpawn value that gates the spawn-family MCP tool schemas above
+	// also gates the spawn/edit/delete/introduce/broadcast/assign_task prose in the
+	// citizen prompt — a leaf worker must not pay tokens describing tools it can't
+	// call, and a regrant must not leave the prompt and tool list disagreeing.
+	lr.CanSpawn = k.Caps.CanSpawn
 	// Session-id tracking: a hook records each session's live id to this file; the
 	// kernel reads it so an in-session /resume is what resumes next time.
 	lr.SessionFile = func(a addr.Address) string { return sessionFile(baseDir, a) }
