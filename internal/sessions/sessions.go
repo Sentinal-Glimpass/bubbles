@@ -9,9 +9,10 @@
 // those operations out of here makes that a structural property rather than a
 // convention someone has to remember.
 //
-// The one exception is Session.Alive(), a cheap non-blocking process check,
-// which Live and Take evaluate under the lock exactly as the kernel did before
-// this table was extracted.
+// The one exception is Session.Alive(), a cheap non-blocking process check.
+// Live evaluates it under the lock; IsHot deliberately evaluates it AFTER
+// unlocking. Both match exactly what the kernel did before this table was
+// extracted — do not "tidy" IsHot by pulling Alive inside the mutex.
 package sessions
 
 import (

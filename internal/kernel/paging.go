@@ -12,10 +12,10 @@ import (
 // policy owns WHO is evicted and in what order; the kernel owns the process
 // table, the locking, and the killing.
 
-// gatherLive snapshots every live non-root worker session. Only the map read
-// happens under the table lock: measuring a session (MemBytes shells out to the
-// OS) and consulting the registry both take their own locks and must never nest
-// inside the session lock.
+// gatherLive snapshots every live session. The lock discipline now lives in
+// internal/sessions: only the map read happens under the table lock, because
+// measuring a session (MemBytes shells out to the OS) and consulting the
+// registry both take their own locks and must never nest inside it.
 func (k *Kernel) gatherLive() []sessions.Live { return k.sessions.Live() }
 
 // candidates measures the gathered sessions and builds the policy's view of
