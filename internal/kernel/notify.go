@@ -127,6 +127,48 @@ func (k *Kernel) SystemNotice(a addr.Address, text string) bool {
 	return k.writeNotice(a, s, d)
 }
 
+// SystemCompact is the AUTOMATED compaction path: it types `/compact` into a's
+// live session on the pump's behalf, under the same input-safety discipline as
+// SystemNotice. It reports whether the command was actually written.
+//
+// It exists as a sibling of SystemNotice rather than as a flag on Compact
+// because the two callers want opposite things and the guards are exactly the
+// difference:
+//
+//   - the operator typing-hold, so a 2-minute background ticker can never
+//     submit `/compact` into the half-typed prompt of the bubble the operator
+//     is dived into. Compact's own callers are interactive (the operator's
+//     command, a bubble's compact() tool call); adding this check in there
+//     would turn a deliberate human request into a silent no-op;
+//   - InputReady, so a session still booting or sitting on the resume menu does
+//     not swallow the line unsubmitted.
+//
+// UNLIKE writeNotice it does NOT hand a not-yet-ready session's line to
+// deliverWhenReadyThen, and that is deliberate: this returns "written", not
+// "accepted for delivery", because the caller spends a 30-minute throttle
+// window on a true. A deferred write that later finds a dead session would burn
+// that window on a compaction that never happened. Returning false costs at
+// most one sweep (2 minutes) of delay, and the pump retries.
+//
+// It uses k.session, NEVER EnsureAlive: a cold bubble is left cold.
+func (k *Kernel) SystemCompact(a addr.Address, focus string) bool {
+	if a == "" || a.IsRoot() {
+		return false
+	}
+	if k.isFocused(a) && k.typingActive() {
+		return false // don't submit the operator's half-typed line
+	}
+	s := k.session(a)
+	if s == nil || !s.Alive() {
+		return false // cold or dead: never worth a rewarm to compact
+	}
+	if !s.InputReady() {
+		return false // still booting / resume menu: it would swallow the line
+	}
+	_, err := s.Write([]byte(compactCommand(focus))) // Write appends Enter
+	return err == nil
+}
+
 // decide runs the notification policy for a freshly-filed message, records the
 // announcement, and records the cost of whatever it decides. It returns the
 // decision, the announced level it replaced (so a delivery that turns out to

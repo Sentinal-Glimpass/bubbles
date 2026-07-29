@@ -146,3 +146,103 @@ func TestSystemNoticeDoesNotDisturbTheAnnouncedBacklog(t *testing.T) {
 		t.Fatalf("a genuine message after a system notice must still be announced, got %q", s.Written())
 	}
 }
+
+// TestSystemCompactWritesToAReadySession is the happy path: the automated
+// compaction path must still actually compact.
+func TestSystemCompactWritesToAReadySession(t *testing.T) {
+	k, a, s := newNoticeKernel(t)
+
+	if !k.SystemCompact(a, "keep the schema") {
+		t.Fatal("SystemCompact reported no write to a hot, ready session")
+	}
+	if got := s.Written(); !strings.Contains(got, "/compact keep the schema") {
+		t.Fatalf("compaction command not typed, got %q", got)
+	}
+}
+
+// TestSystemCompactHoldsWhileTheOperatorIsTyping is the serious one: the pump
+// runs on a 2-minute ticker, and typing /compact plus Enter into the bubble the
+// operator is dived into would submit their half-written prompt. That is the
+// exact hazard the typing window exists for, and the forced tier used to walk
+// straight past it by calling Compact.
+func TestSystemCompactHoldsWhileTheOperatorIsTyping(t *testing.T) {
+	k, a, s := newNoticeKernel(t)
+	k.TypingWindow = time.Hour // treat the operator as continuously typing
+	k.SetFocus(a)
+	k.NoteKeystroke()
+
+	if k.SystemCompact(a, "") {
+		t.Fatal("SystemCompact must refuse while the operator is typing in the focused bubble")
+	}
+	if strings.Contains(s.Written(), "/compact") {
+		t.Fatalf("/compact reached the PTY mid-typing: %q", s.Written())
+	}
+
+	// ... and it is retried, not abandoned: the pump only stops asking while
+	// the operator is actually typing.
+	k.TypingWindow = time.Nanosecond
+	if !k.SystemCompact(a, "") {
+		t.Fatal("SystemCompact must proceed once the operator has paused")
+	}
+	if !strings.Contains(s.Written(), "/compact") {
+		t.Fatalf("/compact was never written after the pause, got %q", s.Written())
+	}
+}
+
+// TestSystemCompactRefusesASessionThatIsNotInputReady: a session still booting
+// or sitting on the resume menu swallows the line unsubmitted. Reporting false
+// (rather than deferring the write) is what keeps the caller's throttle window
+// unclaimed for a compaction that never happened.
+func TestSystemCompactRefusesASessionThatIsNotInputReady(t *testing.T) {
+	k, a, s := newNoticeKernel(t)
+	s.SetInputReady(false)
+
+	if k.SystemCompact(a, "") {
+		t.Fatal("SystemCompact must report false for a session that is not InputReady")
+	}
+	if strings.Contains(s.Written(), "/compact") {
+		t.Fatalf("/compact must not be typed into a session that would swallow it, got %q", s.Written())
+	}
+
+	s.SetInputReady(true)
+	if !k.SystemCompact(a, "") {
+		t.Fatal("SystemCompact must succeed once the session is ready -- the refusal is a retry, not a giving-up")
+	}
+}
+
+// TestSystemCompactNeverWakesAColdBubble: compacting a cold bubble would pay a
+// full prompt-cache rewarm to save context the bubble is not spending.
+func TestSystemCompactNeverWakesAColdBubble(t *testing.T) {
+	k := New(runner.NewFake())
+	k.RelaunchProbe = 0
+	a, err := k.Spawn(addr.Root, "w", "/tmp/w", runner.SpawnOpts{Persona: "w"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+
+	if k.SystemCompact(a, "") {
+		t.Fatal("SystemCompact reported a write to a cold bubble")
+	}
+	if k.IsHot(a) {
+		t.Fatal("SystemCompact paged in a cold bubble")
+	}
+}
+
+// TestInteractiveCompactStillWritesWhileTyping pins the reason SystemCompact is
+// a separate entry point rather than a guard inside Compact: the operator's own
+// command and a bubble's compact() tool call are deliberate, present-tense
+// requests, and must never silently become no-ops because the typing window
+// happens to be open.
+func TestInteractiveCompactStillWritesWhileTyping(t *testing.T) {
+	k, a, s := newNoticeKernel(t)
+	k.TypingWindow = time.Hour
+	k.SetFocus(a)
+	k.NoteKeystroke()
+
+	if err := k.Compact(a, ""); err != nil {
+		t.Fatalf("interactive Compact must still work while typing: %v", err)
+	}
+	if !strings.Contains(s.Written(), "/compact") {
+		t.Fatalf("interactive Compact wrote nothing, got %q", s.Written())
+	}
+}

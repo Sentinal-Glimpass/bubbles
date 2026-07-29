@@ -870,19 +870,32 @@ func (k *Kernel) SyncSessionIDs() {
 // after its current turn. A bubble calls this at a natural checkpoint (task done,
 // key context written down) so its context is reclaimed deliberately instead of
 // auto-compacting only once it's near the limit. No-op if the bubble is cold.
+//
+// This is the INTERACTIVE entry point: the operator's own command and a
+// bubble's compact() tool call, both of which are a human or the session
+// itself asking, right now, on purpose. It deliberately writes immediately.
+// AUTOMATED callers (anything on a ticker) MUST use SystemCompact instead,
+// which honours the operator typing-hold and the InputReady discipline; see
+// the comment there for why the guards cannot live in here.
 func (k *Kernel) Compact(a addr.Address, focus string) error {
 	s := k.session(a)
 	if s == nil || !s.Alive() {
 		return fmt.Errorf("kernel: %s is not running", a)
 	}
+	_, err := s.Write([]byte(compactCommand(focus))) // Write appends Enter, submitting the command
+	return err
+}
+
+// compactCommand builds the exact line both compaction paths type, so the
+// interactive caller (Compact) and the automated one (SystemCompact) can never
+// disagree about what is typed. The focus comes from a calling bubble and is
+// typed into another session: unsanitised it is a keystroke-injection path.
+func compactCommand(focus string) string {
 	cmd := "/compact"
-	// The focus comes from a calling bubble, and this is typed into another
-	// session: unsanitised it is a keystroke-injection path.
 	if focus = notify.Sanitize(strings.TrimSpace(focus)); focus != "" {
 		cmd += " " + focus
 	}
-	_, err := s.Write([]byte(cmd)) // Write appends Enter, submitting the command
-	return err
+	return cmd
 }
 
 // WebhookFrom is the pseudo-address programmatic (webhook) messages arrive from.

@@ -85,9 +85,16 @@ func (m *HealthManager) pumpContext() {
 			if !m.pumpDue(b.Addr, pumpForce, now) {
 				continue
 			}
-			// Compact writes /compact to a LIVE session and errors on a cold
-			// one; it is never allowed to wake anything.
-			if err := m.k.Compact(b.Addr, ""); err == nil {
+			// SystemCompact, NOT Compact: the automated path carries the same
+			// input-safety guards as SystemNotice (operator typing-hold,
+			// InputReady) and never wakes a cold bubble. Compact is the
+			// interactive entry point and writes unconditionally, which on a
+			// 2-minute ticker would submit /compact into the operator's
+			// half-typed line, or hand it to a session still on the resume
+			// menu where it is swallowed unsubmitted. It reports "written",
+			// not "accepted", so the window below is only ever claimed for a
+			// compaction that actually landed; a refusal is retried next sweep.
+			if m.k.SystemCompact(b.Addr, "") {
 				m.markPumped(b.Addr, pumpForce, now)
 			}
 			continue

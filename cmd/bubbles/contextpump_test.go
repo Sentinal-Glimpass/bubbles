@@ -359,3 +359,77 @@ func TestSweepRunsTheContextPump(t *testing.T) {
 		t.Fatalf("Sweep must run pumpContext, got %q", s.Written())
 	}
 }
+
+// forceWindowClaimed reports whether the force tier's 30-minute throttle window
+// has been spent on this bubble.
+func (f *pumpFixture) forceWindowClaimed() bool {
+	f.m.pumpMu.Lock()
+	defer f.m.pumpMu.Unlock()
+	return !f.m.lastPump[f.a].force.IsZero()
+}
+
+// TestContextPumpDoesNotForceCompactIntoTheOperatorsTyping is the input-safety
+// property for the FORCED tier. The pump is a background ticker; typing
+// /compact plus Enter into the bubble the operator is currently dived into
+// would submit their half-written prompt. The nudge tier has always honoured
+// this (SystemNotice); the force tier used to call Compact and walk past it.
+func TestContextPumpDoesNotForceCompactIntoTheOperatorsTyping(t *testing.T) {
+	f := newPumpFixture(t)
+	s := f.hot(t)
+	f.k.TypingWindow = time.Hour // the operator is continuously typing
+	f.k.SetFocus(f.a)
+	f.k.NoteKeystroke()
+	f.writeContext(t, transcript.ContextForceTokens+50_000)
+
+	f.m.pumpContext()
+
+	if strings.Contains(s.Written(), "/compact") {
+		t.Fatalf("forced compaction was typed into a half-written prompt: %q", s.Written())
+	}
+	if f.forceWindowClaimed() {
+		t.Fatal("a compaction that never happened must not claim the 30-minute window")
+	}
+
+	// Retried on a later sweep once the operator pauses -- the hold is a delay,
+	// not a cancellation, and the bubble is still 800k+.
+	f.k.TypingWindow = time.Nanosecond
+	f.m.pumpContext()
+
+	if n := strings.Count(s.Written(), "/compact"); n != 1 {
+		t.Fatalf("/compact written %d times after the operator paused, want 1", n)
+	}
+	if !f.forceWindowClaimed() {
+		t.Fatal("a compaction that DID land must claim the window")
+	}
+}
+
+// TestContextPumpDoesNotBurnTheWindowOnANotReadySession: a session still
+// booting or parked on the resume menu swallows /compact unsubmitted. Claiming
+// the throttle window there would buy 30 minutes of silence for an action that
+// never happened -- an 800k bubble left uncompacted for half an hour.
+func TestContextPumpDoesNotBurnTheWindowOnANotReadySession(t *testing.T) {
+	f := newPumpFixture(t)
+	s := f.hot(t)
+	s.SetInputReady(false)
+	f.writeContext(t, transcript.ContextForceTokens+50_000)
+
+	f.m.pumpContext()
+
+	if strings.Contains(s.Written(), "/compact") {
+		t.Fatalf("/compact must not be typed into a session that would swallow it: %q", s.Written())
+	}
+	if f.forceWindowClaimed() {
+		t.Fatal("the force window was claimed for a compaction the session never received")
+	}
+
+	// The next sweep finds it ready and compacts -- no 30-minute wait.
+	s.SetInputReady(true)
+	f.m.pumpContext()
+
+	if n := strings.Count(s.Written(), "/compact"); n != 1 {
+		t.Fatalf("/compact written %d times once the session was ready, want 1", n)
+	}
+	if !f.forceWindowClaimed() {
+		t.Fatal("the delivered compaction must claim the window")
+	}
+}
