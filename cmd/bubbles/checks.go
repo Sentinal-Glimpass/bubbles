@@ -52,6 +52,11 @@ type checkDeps struct {
 
 	stuck *stuckTracker // hot-but-wedged detector; keeps the previous sample set
 
+	// tempSweep removes the per-launch temp configs this process orphaned. It is
+	// a closure rather than a *runner.LocalRunner so the inventory stays free of
+	// a concrete runner type (the fake runner has no temp files to sweep).
+	tempSweep func()
+
 	sampler       func() // resource sampler -> TUI usage + fleet-health panel
 	claudeUsage   func() // account /usage -> TUI (no-op when not logged in)
 	headroomStats func() // compression savings -> TUI (no-op unless --headroom)
@@ -111,6 +116,21 @@ func backgroundChecks(d checkDeps) []bgCheck {
 		// hot-but-wedged (unread mail, no new output). Observation only — it
 		// never wakes, nudges or kills anything; the list feeds the TUI panel.
 		{Check: supervisor.Check{Name: "stuck-scan", Every: stuckEvery, Fn: plain(d.stuck.Step)}, phase: phaseBoot},
+		// disk caps. Both are pure housekeeping: they touch no session, take no
+		// kernel lock, and never call EnsureAlive.
+		//
+		// log-rotate caps .bubbles/daemon.log, which swallows the daemon's entire
+		// stderr and was never rotated. 5 minutes is far more often than an 8 MiB
+		// budget can realistically fill, so the file is effectively always inside
+		// its cap; a stat on an in-cap file is all a tick costs.
+		{Check: supervisor.Check{Name: "log-rotate", Every: 5 * time.Minute, Fn: plain(rotateDaemonLog(d.baseDir))}, phase: phaseBoot},
+		// temp-config-sweep is the BACKSTOP for the per-launch --mcp-config and
+		// --settings files. Kill already removes a session's pair; this catches
+		// the ones a crash or a failed launch orphaned. It matches strictly on
+		// this process's own pid and skips any address that still has a session,
+		// because deleting another live daemon's config would be an outage in a
+		// fleet we do not own.
+		{Check: supervisor.Check{Name: "temp-config-sweep", Every: 10 * time.Minute, Fn: plain(d.tempSweep)}, phase: phaseBoot},
 		// fleet-health manager: background upkeep (transcript trimming and the
 		// context pump today). Off the request path, on its own slow cadence.
 		{Check: supervisor.Check{Name: "health-sweep", Every: 2 * time.Minute, Fn: plain(d.health.Sweep)}, phase: phaseAfterLoad},

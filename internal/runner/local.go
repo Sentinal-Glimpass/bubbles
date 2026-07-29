@@ -102,7 +102,7 @@ func (r *LocalRunner) writeSettings(a addr.Address) string {
 	if err != nil {
 		return ""
 	}
-	p := filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-settings-%d-%s.json", os.Getpid(), a))
+	p := settingsFilePath(os.TempDir(), os.Getpid(), a)
 	if os.WriteFile(p, b, 0o600) != nil {
 		return ""
 	}
@@ -177,7 +177,7 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	if r.MCPConfig != nil {
 		// Write the config to a temp file (not the bubble's working dir, which
 		// may be a real project folder we don't want to litter).
-		cfgPath := filepath.Join(os.TempDir(), fmt.Sprintf("bubbles-mcp-%d-%s.json", os.Getpid(), a))
+		cfgPath := mcpConfigPath(os.TempDir(), os.Getpid(), a)
 		if err := os.WriteFile(cfgPath, []byte(r.MCPConfig(a)), 0o600); err != nil {
 			return nil, err
 		}
@@ -273,7 +273,12 @@ func (r *LocalRunner) Kill(a addr.Address) error {
 	if !ok {
 		return nil
 	}
-	return s.Close()
+	err := s.Close()
+	// Only now, with a gone from the map, is it safe to delete its temp configs:
+	// the names are per-(pid, address), so a relaunch that raced ahead of this
+	// Kill would otherwise have its live config pulled out from under it.
+	r.removeTempConfigs(a)
+	return err
 }
 
 // CitizenPromptFor composes the capability-gated citizen prompt: the base
