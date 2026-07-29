@@ -153,7 +153,21 @@ func runApp() {
 	// and makes progress. This is an ordering preference only: if draining every
 	// settled bubble still leaves the fleet over MemBudget, bubbles inside their
 	// grace window page out too. The budget is never exceeded to honour it.
+	//
+	// BUBBLES_PAGING_GRACE overrides it; 0 removes the floor. An operator who
+	// raises BUBBLES_CACHE_TTL should raise this alongside it — the floor only
+	// has to outlast a sweep or two, so it is deliberately NOT derived from
+	// CacheTTL, but leaving it at 5m under a 1h cache simply makes it weaker,
+	// never a budget risk.
 	k.Grace = 5 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("BUBBLES_PAGING_GRACE")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			fmt.Fprintf(os.Stderr, "bubbles: ignoring BUBBLES_PAGING_GRACE=%q (%v); using %s\n", v, err, k.Grace)
+		} else {
+			k.Grace = d
+		}
+	}
 	k.TypingWindow = 10 * time.Second               // hold a focused bubble's messages while you're typing; deliver once you pause this long
 	inheritedMCP := resolveMCPServers(mcpAllowList()) // curated operator servers bubbles inherit (e.g. playwright)
 	lr.MCPConfig = func(a addr.Address) string {
