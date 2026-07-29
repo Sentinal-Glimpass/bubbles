@@ -40,6 +40,13 @@ type Status struct {
 	Consecutive int   // consecutive failures, 0 after a success
 	Panicked    bool  // last run panicked (recovered)
 	Runs        int64
+
+	// RunningSince is when the in-flight run of this check was claimed, or the
+	// zero time if it is not currently running. It is what makes a WEDGED check
+	// visible: RunDue bounds a hung check's blast radius to itself, but without
+	// this the check would simply stop appearing to run, with nothing to
+	// distinguish "hung forever" from "idle between intervals".
+	RunningSince time.Time
 }
 
 // entry is a registered check plus its schedule and mutable status. All fields
@@ -161,6 +168,7 @@ func (r *Registry) claimDue(at time.Time) []*entry {
 			continue
 		}
 		e.running = true
+		e.status.RunningSince = at
 		due = append(due, e)
 	}
 	sort.Slice(due, func(i, j int) bool { return due[i].check.Name < due[j].check.Name })
@@ -172,6 +180,7 @@ func (r *Registry) record(e *entry, at time.Time, err error, panicked bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e.running = false
+	e.status.RunningSince = time.Time{}
 	// Scheduled from the TICK time, not from when Fn returned: a check is due
 	// every Every, not Every-after-it-finishes. A check whose Fn outruns its own
 	// interval is therefore due again the moment it completes, which is right for

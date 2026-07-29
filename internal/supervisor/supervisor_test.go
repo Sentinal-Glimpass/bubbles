@@ -498,3 +498,62 @@ func TestRunDueWaitsForEveryCheckItClaimed(t *testing.T) {
 		}
 	}
 }
+
+// TestRunningSinceMarksAWedgedCheck pins the one signal that distinguishes a
+// check hung forever from a check merely idle between intervals. RunDue bounds a
+// hung check's blast radius to itself, so without this the wedge is silent.
+func TestRunningSinceMarksAWedgedCheck(t *testing.T) {
+	base := time.Unix(0, 0).UTC()
+	r := New(func() time.Time { return base })
+
+	release := make(chan struct{})
+	if err := r.Register(Check{Name: "hang", Every: time.Second, Fn: func(context.Context) error {
+		<-release
+		return nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(Check{Name: "quick", Every: time.Second, Fn: func(context.Context) error {
+		return nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	at := base.Add(time.Second)
+	done := make(chan struct{})
+	go func() { r.RunDue(context.Background(), at); close(done) }()
+
+	// "hang" is in flight, so it reports a RunningSince; "quick" finishes and
+	// must report the zero time, or every healthy check would look wedged.
+	deadline := time.After(5 * time.Second)
+	for {
+		got := byName(t, r.Snapshot())
+		if got["hang"].RunningSince.Equal(at) && got["quick"].Runs == 1 {
+			if !got["quick"].RunningSince.IsZero() {
+				t.Fatalf("a completed check still reports RunningSince = %v", got["quick"].RunningSince)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for the wedged check to report RunningSince")
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	close(release)
+	<-done
+	if s := byName(t, r.Snapshot())["hang"]; !s.RunningSince.IsZero() {
+		t.Fatalf("RunningSince not cleared after the run finished: %v", s.RunningSince)
+	}
+}
+
+func byName(t *testing.T, ss []Status) map[string]Status {
+	t.Helper()
+	m := make(map[string]Status, len(ss))
+	for _, s := range ss {
+		m[s.Name] = s
+	}
+	return m
+}
