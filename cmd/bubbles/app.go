@@ -135,7 +135,7 @@ func runApp() {
 	if v := strings.TrimSpace(os.Getenv("BUBBLES_CACHE_TTL")); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < 0 {
-			fmt.Fprintf(os.Stderr, "bubbles: ignoring BUBBLES_CACHE_TTL=%q (%v); using %s\n", v, err, k.CacheTTL)
+			fmt.Fprintf(os.Stderr, "bubbles: ignoring BUBBLES_CACHE_TTL=%q (%s); using %s\n", v, durErr(err), k.CacheTTL)
 		} else {
 			k.CacheTTL = d
 		}
@@ -163,7 +163,7 @@ func runApp() {
 	if v := strings.TrimSpace(os.Getenv("BUBBLES_PAGING_GRACE")); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < 0 {
-			fmt.Fprintf(os.Stderr, "bubbles: ignoring BUBBLES_PAGING_GRACE=%q (%v); using %s\n", v, err, k.Grace)
+			fmt.Fprintf(os.Stderr, "bubbles: ignoring BUBBLES_PAGING_GRACE=%q (%s); using %s\n", v, durErr(err), k.Grace)
 		} else {
 			k.Grace = d
 		}
@@ -1057,4 +1057,15 @@ func defaultWorkspace() string {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "bubbles:", err)
 	os.Exit(1)
+}
+
+// durErr explains why a duration env var was rejected. Both callers reject on
+// `err != nil || d < 0`, so on the negative-but-parseable branch err is nil and
+// printing it verbatim yields "%!v(<nil>)" — useless to the operator staring at
+// the line that tells them their setting was ignored.
+func durErr(err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return "must not be negative"
 }
