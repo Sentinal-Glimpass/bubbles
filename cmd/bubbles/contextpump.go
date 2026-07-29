@@ -53,7 +53,14 @@ func (m *HealthManager) pumpContext() {
 		if b.Addr.IsRoot() || b.SessionID == "" || b.Dir == "" {
 			continue
 		}
-		st, err := transcript.Read(convPath(m.home, b.Dir, b.SessionID))
+		// transcriptStats, not transcript.Read: trimTranscripts has already
+		// decoded this exact file earlier in the same sweep, and re-decoding it
+		// costs a full json.Unmarshal per line for an answer that cannot have
+		// changed. The memo returns precisely what transcript.Read returns, so
+		// nothing this loop decides changes (the pump reads ContextTokens, which
+		// a trim cannot move: trimming drops a prefix, and the size is taken
+		// from the LAST usage-bearing entry).
+		st, err := m.transcriptStats(convPath(m.home, b.Dir, b.SessionID))
 		if err != nil {
 			// Missing file, ErrNoUsage (only user turns so far), or an
 			// unreadable line: all mean "no measurement this sweep", which is

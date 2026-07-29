@@ -35,6 +35,87 @@ type HealthManager struct {
 	// the pump's escalation tiers.
 	reportMu            sync.Mutex
 	lastOversizedReport map[addr.Address]time.Time
+
+	// Decoded-transcript memo, keyed by conversation path, live only for the
+	// duration of one Sweep. See transcriptStats: it is what stops a sweep from
+	// JSON-decoding every bubble's whole transcript two or three times over.
+	statMu    sync.Mutex
+	sweeping  bool
+	statCache map[string]cachedStats
+}
+
+// cachedStats is one transcript's decoded Stats, exactly as transcript.Read
+// returned them.
+//
+// There is deliberately no size/mtime stamp and no cross-sweep lifetime. A
+// size+mtime key looks like the obvious invalidation rule and is not safe here:
+// two writes of the same length can land on the same mtime on a
+// coarse-granularity filesystem, and a cache that outlived the sweep would then
+// serve a stale context size for as long as the file held still — the pump
+// silently measuring a number that had already moved. Scoping the memo to one
+// sweep needs no invalidation rule at all (see transcriptStats).
+type cachedStats struct {
+	st  transcript.Stats
+	err error
+}
+
+// transcriptStats is the ONLY way this package reads a transcript. It returns
+// exactly what transcript.Read would return, decoding at most once per distinct
+// file state.
+//
+// It exists because the sweep had three full reads per cold bubble every 2
+// minutes: pumpContext read it, trimTranscripts read it again for the oversized
+// check, and trimTranscript read the raw bytes a third time. transcript.Read
+// json.Unmarshals every line, so at the 4 MiB oversized ceiling that is ~12 MiB
+// of I/O plus two full JSON decodes per parked bubble per sweep — the pump
+// leaking cost in a different currency than the one it was written to save.
+//
+// The memo is scoped to ONE sweep (see beginSweep/endSweep), which is what
+// makes it behaviour-preserving rather than merely cheaper. Within a sweep the
+// only bubbles read twice are COLD ones — trimTranscripts skips hot bubbles
+// outright, so the pump is the first and only reader of a live transcript —
+// and a cold bubble is by definition not appending, so nothing can move under
+// the memo. The single in-sweep mutation is trimTranscript's own rewrite, which
+// drops a prefix and never touches the last usage-bearing entry, so the
+// ContextTokens the pump reads afterwards is the same number either way.
+//
+// Outside a sweep every call reads afresh: no cheap file stamp is strong enough
+// to trust across the 2-minute gap (see cachedStats).
+func (m *HealthManager) transcriptStats(path string) (transcript.Stats, error) {
+	m.statMu.Lock()
+	e, ok := m.statCache[path]
+	live := m.sweeping
+	m.statMu.Unlock()
+	if live && ok {
+		return e.st, e.err
+	}
+
+	st, err := transcript.Read(path)
+
+	m.statMu.Lock()
+	if m.sweeping {
+		m.statCache[path] = cachedStats{st: st, err: err}
+	}
+	m.statMu.Unlock()
+	return st, err
+}
+
+// beginSweep/endSweep bound the memo's lifetime. Outside a sweep every read is
+// a fresh read: nothing else in the process shares this manager's cadence, and
+// a memo that outlives the sweep would be a cache with no invalidation event
+// strong enough to trust (see cachedStats).
+func (m *HealthManager) beginSweep() {
+	m.statMu.Lock()
+	m.sweeping = true
+	m.statCache = map[string]cachedStats{}
+	m.statMu.Unlock()
+}
+
+func (m *HealthManager) endSweep() {
+	m.statMu.Lock()
+	m.sweeping = false
+	m.statCache = map[string]cachedStats{} // release the decoded Stats between sweeps
+	m.statMu.Unlock()
 }
 
 // NewHealthManager builds the manager over a kernel.
@@ -45,6 +126,7 @@ func NewHealthManager(k *kernel.Kernel) *HealthManager {
 		home:                home,
 		lastPump:            map[addr.Address]pumpWindows{},
 		lastOversizedReport: map[addr.Address]time.Time{},
+		statCache:           map[string]cachedStats{},
 	}
 }
 
@@ -59,8 +141,10 @@ func (m *HealthManager) Run(interval time.Duration) {
 
 // Sweep runs every health check once. Add checks here as they land.
 func (m *HealthManager) Sweep() {
+	m.beginSweep()
 	m.trimTranscripts()
 	m.pumpContext()
+	m.endSweep()
 }
 
 // transcriptKeepBeforeCompact is how many lines to keep BEFORE the latest
@@ -114,8 +198,20 @@ func (m *HealthManager) trimTranscripts() {
 		// a hard I/O error (missing file, unreadable line) yields no usable
 		// Stats and is skipped here; trimTranscript below performs its own read
 		// and handles os.IsNotExist the normal way.
-		if st, err := transcript.Read(path); (err == nil || err == transcript.ErrNoUsage) && !st.HasCompaction && st.Bytes > transcriptOversizedBytes {
+		st, err := m.transcriptStats(path)
+		measured := err == nil || err == transcript.ErrNoUsage
+		if measured && !st.HasCompaction && st.Bytes > transcriptOversizedBytes {
 			m.reportOversizedTranscript(b.Addr, st.Bytes)
+		}
+		if measured && !st.HasCompaction {
+			// A file with no compaction marker anywhere in it has no boundary
+			// to cut before, so trimTranscript is a guaranteed no-op — and its
+			// os.ReadFile would pull the whole (possibly multi-MiB) file in to
+			// prove it. HasCompaction answers the marker question from the same
+			// transcript.CompactMarker scan trimTranscript itself performs, so
+			// skipping here decides nothing differently; it just declines to
+			// re-read to learn what was already read.
+			continue
 		}
 
 		if err := trimTranscript(path, transcriptKeepBeforeCompact); err != nil && !os.IsNotExist(err) {
