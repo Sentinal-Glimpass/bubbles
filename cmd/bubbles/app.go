@@ -119,22 +119,40 @@ func runApp() {
 	// throws away a LIVE cache, so the next use re-pays full uncached input for
 	// its whole context — an idle eviction inside the window is a pure loss.
 	//
-	// 5m is the provider's DEFAULT ephemeral cache TTL, and nothing in this repo
-	// opts into the 1-hour extended cache (no beta header, no cache_control TTL
-	// in internal/runner or here). Do not raise it on the assumption that we do.
+	// 1h = the EXTENDED cache TTL, set as the default on operator instruction:
+	// per-bubble memory and CPU surge detection plus context compaction have cut
+	// the fleet's resource floor far enough that idle residency is no longer the
+	// scarce thing, so we spend it to keep caches reachable as long as possible.
+	//
+	// WHAT THIS DOES AND DOES NOT DO — read before reasoning about savings.
+	// The prompt cache lives SERVER-SIDE at the provider, keyed on the prompt
+	// prefix, and its TTL refreshes on a REQUEST, not on this process existing.
+	// Keeping a bubble resident therefore does NOT keep its cache warm: a hot,
+	// silent bubble's cache expires on exactly the same clock as an evicted
+	// one's. What residency actually saves is the relaunch, the --resume
+	// transcript reload, and the risk of a resume that fails and starts a fresh
+	// conversation with no history. Those are the wins this value buys.
+	//
+	// Whether the 1h cache is REAL depends on the provider request carrying
+	// cache_control ttl=1h, which claude code owns — this repo never constructs
+	// an API request. If extended caching is not actually enabled there, the
+	// true TTL is 5m and this setting only holds RAM longer; it cannot make a
+	// cache outlive its own TTL. cmd.Env is never set in internal/runner, so
+	// every bubble inherits the daemon's environment: anything claude code reads
+	// from env to enable extended caching can be exported before launching.
 	//
 	// READ BEFORE CHANGING: idle eviction requires a session to be idle past
-	// BOTH bars, so the EFFECTIVE idle timeout is max(IdleTimeout, CacheTTL).
-	// Raising CacheTTL above IdleTimeout (30m) therefore extends how long every
-	// silent session stays RESIDENT — more RAM held for longer, and evictions
-	// pushed onto the MemBudget above instead. That is a fleet-memory change,
-	// not just a cache hint. Kept below IdleTimeout by default so it protects
-	// warm caches without moving the memory behaviour.
+	// BOTH bars, so the EFFECTIVE idle timeout is max(IdleTimeout, CacheTTL) —
+	// now 1h, not the 30m IdleTimeout above. Every silent session stays RESIDENT
+	// for an hour, and evictions are pushed onto the MemBudget instead, where
+	// the cost-aware policy (internal/paging) decides who goes. That is
+	// deliberate: the budget is still absolute and is never exceeded to honour
+	// this window.
 	//
-	// BUBBLES_CACHE_TTL overrides it (any time.ParseDuration value, e.g. "1h")
-	// for an operator who HAS enabled extended caching; 0 disables the
-	// protection entirely, restoring plain idle-timeout eviction.
-	k.CacheTTL = 5 * time.Minute
+	// BUBBLES_CACHE_TTL overrides it (any time.ParseDuration value, e.g. "5m"
+	// to go back to the plain ephemeral TTL); 0 disables the protection
+	// entirely, restoring plain idle-timeout eviction.
+	k.CacheTTL = time.Hour
 	if v := strings.TrimSpace(os.Getenv("BUBBLES_CACHE_TTL")); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < 0 {
