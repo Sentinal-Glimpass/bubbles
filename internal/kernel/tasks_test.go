@@ -338,3 +338,138 @@ func TestAlwaysOnReceiver(t *testing.T) {
 		t.Fatal("always-on receiver must be exempt from idle eviction")
 	}
 }
+
+// TestReapOrphanVerifiersIsPeriodicSafe pins the properties that let this run
+// on the supervisor's sweep goroutine every few minutes instead of only once at
+// boot. The orphan here is made the way a LIVE run makes one, not the way a
+// restart does: deleting a task's worker cancels the task via
+// Tasks.PurgeParticipant, which leaves the verifier bubble resident forever.
+func TestReapOrphanVerifiersIsPeriodicSafe(t *testing.T) {
+	k, boss, worker := taskKernel(t)
+	k.VerifierReap = func(a addr.Address) { k.DeleteBubble(a) }
+
+	id, err := k.AssignTask(boss, worker, "do x", []string{"item"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.SubmitTask(worker, id, "done"); err != nil {
+		t.Fatal(err)
+	}
+	tk, _ := k.Tasks.Get(id)
+	verifier := tk.Verifier
+	if verifier == "" {
+		t.Fatal("submission did not spawn a verifier")
+	}
+
+	// A reap while the task is still Checking must not touch the verifier: it
+	// is mid-verdict, the exact bubble a careless sweep would delete.
+	if n := k.ReapOrphanVerifiers(); n != 0 {
+		t.Fatalf("reaped %d verifiers of a live (checking) task, want 0", n)
+	}
+	if _, ok := k.Reg.Get(verifier); !ok {
+		t.Fatal("the verifier of a task awaiting a verdict was deleted")
+	}
+	// ...and it is still able to rule, i.e. nothing was disturbed.
+	if _, err := k.TaskVerdict(verifier, id, false, "not yet"); err != nil {
+		t.Fatalf("verifier could not rule after a reap pass: %v", err)
+	}
+
+	// Now orphan it the live way: delete the worker. PurgeParticipant cancels
+	// the task and leaves the verifier behind.
+	k.DeleteBubble(worker)
+	tk, _ = k.Tasks.Get(id)
+	if tk.State != tasks.Cancelled {
+		t.Fatalf("task state = %s, want cancelled", tk.State)
+	}
+	if _, ok := k.Reg.Get(verifier); !ok {
+		t.Fatal("test premise broken: the verifier was already gone")
+	}
+
+	if n := k.ReapOrphanVerifiers(); n != 1 {
+		t.Fatalf("reaped %d, want 1 (the orphaned verifier)", n)
+	}
+	if _, ok := k.Reg.Get(verifier); ok {
+		t.Fatal("orphaned verifier survived the reap")
+	}
+	// Idempotent: every later tick over the same state is a no-op.
+	for i := 0; i < 3; i++ {
+		if n := k.ReapOrphanVerifiers(); n != 0 {
+			t.Fatalf("repeat reap %d removed %d, want 0", i, n)
+		}
+	}
+	// The sweep must not have woken anything. The fake runner records launches.
+	if _, ok := k.Reg.Get(boss); !ok {
+		t.Fatal("the reap deleted an unrelated bubble")
+	}
+}
+
+// TestReapOrphanVerifiersConcurrentWithCompletion drives the reap alongside
+// live task completion under -race. The reap must never delete a verifier that
+// is at that instant being handed a verdict, and must never race the task store.
+func TestReapOrphanVerifiersConcurrentWithCompletion(t *testing.T) {
+	k, boss, worker := taskKernel(t)
+	k.VerifierReap = func(a addr.Address) { k.DeleteBubble(a) }
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				k.ReapOrphanVerifiers()
+			}
+		}
+	}()
+
+	for i := 0; i < 40; i++ {
+		id, err := k.AssignTask(boss, worker, "do x", []string{"item"}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := k.SubmitTask(worker, id, "done"); err != nil {
+			t.Fatal(err)
+		}
+		tk, _ := k.Tasks.Get(id)
+		// The verdict must land even with the reaper running flat out: a task
+		// in Checking is never a reap target, so its verifier is still there.
+		if _, err := k.TaskVerdict(tk.Verifier, id, true, "ok"); err != nil {
+			t.Fatalf("round %d: verdict lost to a concurrent reap: %v", i, err)
+		}
+	}
+	close(stop)
+	<-done
+}
+
+// TestReapExpiredMutesUsesKernelClock proves the sweep's entry point reaps via
+// the kernel's injectable clock and leaves live rules alone.
+func TestReapExpiredMutesUsesKernelClock(t *testing.T) {
+	k, boss, _ := taskKernel(t)
+	created := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	k.now = func() time.Time { return created }
+
+	if _, err := k.MuteBy(boss, "pump", "", "", "1m", "1h"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.MuteBy(boss, "other", "", "", "1m", ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := k.ReapExpiredMutes(); n != 0 {
+		t.Fatalf("reaped %d rules before any TTL elapsed, want 0", n)
+	}
+
+	k.now = func() time.Time { return created.Add(2 * time.Hour) }
+	if n := k.ReapExpiredMutes(); n != 1 {
+		t.Fatalf("reaped %d, want 1", n)
+	}
+	rules := k.Reg.MuteRules(boss)
+	if len(rules) != 1 || rules[0].Source != "other" {
+		t.Fatalf("survivors = %+v, want the TTL-less rule only", rules)
+	}
+	// Quota is genuinely freed: MuteBy rebuilds from the stored set.
+	if _, err := k.MuteBy(boss, "third", "", "", "1m", ""); err != nil {
+		t.Fatalf("adding a rule after a reap failed: %v", err)
+	}
+}

@@ -1,0 +1,256 @@
+// Package supervisor is a named, panic-safe registry of periodic checks.
+//
+// It is pure policy and scheduling: it imports nothing from the kernel or the
+// TUI and performs no I/O of its own. Callers supply plain
+// func(context.Context) error closures, and supply the time — there is no
+// time.Now() in this package, so behaviour is fully deterministic in tests.
+//
+// The reason this package exists: the process runs many background loops, and
+// an unrecovered panic in any one of them terminates the whole daemon. RunDue
+// recovers per check, so one check panicking neither propagates out of RunDue
+// nor prevents the other due checks from running in that same call. The panic
+// is never swallowed silently — it is recorded on the check's Status (with the
+// check name and the stack) and reported through Snapshot and Failing.
+package supervisor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"runtime"
+	"sort"
+	"sync"
+	"time"
+)
+
+// Check is one named periodic job. Fn must be safe to call concurrently with
+// nothing else in this package; the registry never calls the same Check twice
+// at once.
+type Check struct {
+	Name  string
+	Every time.Duration
+	Fn    func(context.Context) error
+}
+
+// Status is the observed outcome of a check's most recent run.
+type Status struct {
+	Name        string
+	LastRun     time.Time
+	LastErr     error // nil = last run succeeded
+	Consecutive int   // consecutive failures, 0 after a success
+	Panicked    bool  // last run panicked (recovered)
+	Runs        int64
+
+	// Every is the check's registered interval, copied here so a reader holding
+	// only a Status can judge RunningSince against it: "running for 3s" means
+	// nothing until you know whether the check runs every second or every ten
+	// minutes. Immutable after Register.
+	Every time.Duration
+
+	// RunningSince is when the in-flight run of this check was claimed, or the
+	// zero time if it is not currently running. It is what makes a WEDGED check
+	// visible: RunDue bounds a hung check's blast radius to itself, but without
+	// this the check would simply stop appearing to run, with nothing to
+	// distinguish "hung forever" from "idle between intervals".
+	RunningSince time.Time
+}
+
+// entry is a registered check plus its schedule and mutable status. All fields
+// are guarded by Registry.mu except Fn and the immutable name/interval, which
+// are written once at registration.
+type entry struct {
+	check   Check
+	nextDue time.Time
+	running bool // a RunDue call currently owns this check
+	status  Status
+}
+
+// Registry holds the registered checks and their statuses.
+type Registry struct {
+	mu     sync.Mutex
+	checks map[string]*entry
+	now    func() time.Time
+}
+
+// New returns an empty Registry. now supplies the registry's notion of the
+// current time and is used only to seed each check's first due time at
+// Register; every subsequent scheduling decision uses the at value passed to
+// RunDue. now must not be nil.
+func New(now func() time.Time) *Registry {
+	if now == nil {
+		panic("supervisor.New: now must not be nil")
+	}
+	return &Registry{checks: make(map[string]*entry), now: now}
+}
+
+// Register adds a check. It returns an error on an empty name, a duplicate
+// name, a nil Fn, or Every <= 0. The check first becomes due one Every after
+// the registry's current time.
+func (r *Registry) Register(c Check) error {
+	if c.Name == "" {
+		return errors.New("supervisor: check name must not be empty")
+	}
+	if c.Every <= 0 {
+		return fmt.Errorf("supervisor: check %q: Every must be > 0, got %v", c.Name, c.Every)
+	}
+	if c.Fn == nil {
+		return fmt.Errorf("supervisor: check %q: Fn must not be nil", c.Name)
+	}
+	// r.now() is read BEFORE the lock: it is a caller-supplied closure, and a
+	// test clock that reached back into the registry (to log via Snapshot, say)
+	// would self-deadlock if it ran under r.mu.
+	first := r.now().Add(c.Every)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, dup := r.checks[c.Name]; dup {
+		return fmt.Errorf("supervisor: check %q already registered", c.Name)
+	}
+	r.checks[c.Name] = &entry{
+		check:   c,
+		nextDue: first,
+		status:  Status{Name: c.Name, Every: c.Every},
+	}
+	return nil
+}
+
+// RunDue runs every check whose interval has elapsed as of at, each in its own
+// goroutine, and returns once they have all finished.
+//
+// The registry lock is released before any check's Fn is invoked: checks do
+// I/O and must never run under the lock. Each check runs under its own
+// recover, so a panic in one check is recorded and the remaining due checks
+// still run. RunDue itself never panics and never returns an error — the
+// report is the recorded Status.
+//
+// The batch runs CONCURRENTLY, and that is load-bearing, not an optimisation.
+// claimDue marks the whole due batch running before any of it executes, so if
+// the batch ran sequentially a check that blocked indefinitely would mean every
+// check behind it never reached runOne — record would never fire and their
+// running flag would stay set for the life of the process, silently and
+// PERMANENTLY removing them from the schedule while Snapshot still showed them
+// merely "running". Running each in its own goroutine means a hung check holds
+// only its own goroutine and only its own flag: its batch-mates finish and
+// clear theirs, and the next call re-claims everything except the one still in
+// flight. There is deliberately no per-check timeout — a check that
+// legitimately outruns its interval must be allowed to finish, and the running
+// flag already prevents pile-up.
+//
+// RunDue still waits for the batch, so it stays synchronous and deterministic
+// for callers that assert on Status immediately afterwards. A caller that must
+// not block behind a wedged check (the app's ticker driver) runs RunDue itself
+// in a goroutine per tick.
+//
+// RunDue is a no-op if ctx is already done, so a check is not re-run after
+// cancellation. A nil ctx is a caller bug, not a runtime condition, and panics
+// rather than silently running nothing forever — a sweep that quietly stops
+// sweeping is the exact failure this package exists to make visible.
+func (r *Registry) RunDue(ctx context.Context, at time.Time) {
+	if ctx == nil {
+		panic("supervisor: RunDue called with a nil context")
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, e := range r.claimDue(at) {
+		wg.Add(1)
+		go func(e *entry) {
+			defer wg.Done()
+			err, panicked := runOne(ctx, e.check)
+			r.record(e, at, err, panicked)
+		}(e)
+	}
+	wg.Wait()
+}
+
+// claimDue returns the due, not-currently-running checks in name order and
+// marks each as running so a concurrent RunDue cannot pick the same one up.
+func (r *Registry) claimDue(at time.Time) []*entry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var due []*entry
+	for _, e := range r.checks {
+		if e.running || at.Before(e.nextDue) {
+			continue
+		}
+		e.running = true
+		e.status.RunningSince = at
+		due = append(due, e)
+	}
+	sort.Slice(due, func(i, j int) bool { return due[i].check.Name < due[j].check.Name })
+	return due
+}
+
+// record stores the outcome of one run and re-arms the check's schedule.
+func (r *Registry) record(e *entry, at time.Time, err error, panicked bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e.running = false
+	e.status.RunningSince = time.Time{}
+	// Scheduled from the TICK time, not from when Fn returned: a check is due
+	// every Every, not Every-after-it-finishes. A check whose Fn outruns its own
+	// interval is therefore due again the moment it completes, which is right for
+	// a health poller — it should sample as often as it can, not drift.
+	e.nextDue = at.Add(e.check.Every)
+	e.status.LastRun = at
+	e.status.LastErr = err
+	e.status.Panicked = panicked
+	e.status.Runs++
+	if err != nil {
+		e.status.Consecutive++
+	} else {
+		e.status.Consecutive = 0
+	}
+}
+
+// runOne invokes a check's Fn, converting a panic into an error that carries
+// the check name and the stack of the panicking goroutine.
+func runOne(ctx context.Context, c Check) (err error, panicked bool) {
+	defer func() {
+		if v := recover(); v != nil {
+			panicked = true
+			err = fmt.Errorf("supervisor: check %q panicked: %v\n%s", c.Name, v, stack())
+		}
+	}()
+	return c.Fn(ctx), false
+}
+
+// stack renders the current goroutine's stack, growing the buffer as needed.
+func stack() []byte {
+	buf := make([]byte, 8<<10)
+	for {
+		n := runtime.Stack(buf, false)
+		if n < len(buf) {
+			return buf[:n]
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// Snapshot returns a copy of every check's status, sorted by name. It is safe
+// to call concurrently with RunDue (for instance from the TUI goroutine), and
+// mutating the returned slice or its elements cannot affect the registry.
+func (r *Registry) Snapshot() []Status {
+	r.mu.Lock()
+	out := make([]Status, 0, len(r.checks))
+	for _, e := range r.checks {
+		out = append(out, e.status)
+	}
+	r.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Failing reports how many checks' most recent run failed or panicked. Checks
+// that have never run are not counted.
+func (r *Registry) Failing() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, e := range r.checks {
+		if e.status.Runs > 0 && (e.status.LastErr != nil || e.status.Panicked) {
+			n++
+		}
+	}
+	return n
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/caps"
 	"github.com/Sentinal-Glimpass/bubbles/internal/costmeter"
 	"github.com/Sentinal-Glimpass/bubbles/internal/groups"
+	"github.com/Sentinal-Glimpass/bubbles/internal/health"
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
 	"github.com/Sentinal-Glimpass/bubbles/internal/paging"
@@ -73,6 +74,16 @@ type Kernel struct {
 	// survives before falling back to a fresh one (a doomed --resume exits fast).
 	// Tests set it to 0; real use gives claude a moment to fail.
 	RelaunchProbe time.Duration
+
+	// RelaunchBackoff is the suppression window after the FIRST failed relaunch;
+	// it doubles per consecutive failure up to RelaunchBackoffCap, and after
+	// relaunchGiveUpAfter consecutive failures the bubble stops being relaunched
+	// at all. A failed relaunch is not free — a bubble that comes up only to die
+	// has already re-paid its whole boot context — so retrying one on every
+	// sweep is the single most expensive way to be wrong. 0 => the package
+	// defaults; see internal/kernel/backoff.go.
+	RelaunchBackoff    time.Duration
+	RelaunchBackoffCap time.Duration
 
 	// CurrentSessionID, if set, returns the LIVE session id a bubble is on now
 	// (recorded by its session hook), which can differ from the launch id after an
@@ -138,6 +149,22 @@ type Kernel struct {
 	notifyMu  sync.Mutex
 	notified  map[addr.Address]int       // per bubble: >0 once its current backlog has been announced (nudge dedup)
 	lastNudge map[addr.Address]time.Time // when we last wrote a notice to it (for stale-notice recovery)
+
+	// now is the kernel's clock, defaulted to time.Now by New and replaced only
+	// by SetClock (tests, before the kernel is shared with any goroutine). It is
+	// a field rather than a method because a method cannot be stubbed, and the
+	// relaunch backoff is a decision about elapsed time that tests must be able
+	// to drive without sleeping.
+	now func() time.Time
+
+	// backoffMu guards relaunch, the crash-loop counter keyed by address. It is
+	// its own small mutex, held only for the counter read and the counter write
+	// and NEVER across a launch, a Kill or a probe sleep — the same discipline as
+	// HealthManager.pumpMu. See internal/kernel/backoff.go for why the state
+	// cannot live in internal/sessions and how the read/launch/write sequence is
+	// made safe against concurrent callers.
+	backoffMu sync.Mutex
+	relaunch  map[addr.Address]*relaunchState
 }
 
 func (k *Kernel) clearNudge(a addr.Address) {
@@ -273,6 +300,11 @@ func New(r runner.Runner) *Kernel {
 		notified:      map[addr.Address]int{},
 		lastNudge:     map[addr.Address]time.Time{},
 		Cost:          costmeter.New(),
+		now:           time.Now,
+
+		RelaunchBackoff:    defaultRelaunchBackoff,
+		RelaunchBackoffCap: defaultRelaunchBackoffCap,
+		relaunch:           map[addr.Address]*relaunchState{},
 	}
 	// The ceiling is constructed with the package defaults and has no bypass:
 	// it is the last line of defense against the 632fe95 flood, so nothing
@@ -335,6 +367,12 @@ func (k *Kernel) SetEnabled(a addr.Address, enabled bool) {
 		return
 	}
 	k.Reg.SetDisabled(a, !enabled)
+	if enabled {
+		// Re-enabling is the operator saying "I fixed it": a bubble the fleet had
+		// given up relaunching gets a clean slate, so park/un-park is the reset
+		// gesture for a crash loop as well as for a disabled bubble.
+		k.ClearRelaunchFailures(a)
+	}
 	if !enabled { // stop it now
 		s := k.sessions.Take(a)
 		if s != nil {
@@ -408,8 +446,56 @@ func (k *Kernel) SampleUsage() []Usage {
 	return out
 }
 
-// clockNow returns the wall clock (indirected so tests could stub it if needed).
-func (k *Kernel) clockNow() time.Time { return time.Now() }
+// StuckSamples snapshots every ALREADY-HOT worker session for the stuck-bubble
+// detector (internal/health). It is strictly an observation: it walks the live
+// session table, so a cold bubble is simply absent — nothing here launches,
+// resumes or writes to anything, and it must stay that way. Waking a bubble to
+// ask whether it is wedged would cost the prompt-cache rewarm the detector
+// exists to avoid.
+//
+// LastActivity/RecentOutput are read outside the session-table lock, exactly as
+// SampleUsage does, because they take the session's own mutex.
+func (k *Kernel) StuckSamples() []health.Sample {
+	live := k.sessions.Live()
+	out := make([]health.Sample, 0, len(live))
+	for _, e := range live {
+		// UnreadCount, not NotifiableCount. "Muted" means "never spend a notice
+		// on this" and is set both by a mute rule AND by inline delivery — and
+		// an inlined message is precisely work that was handed straight to the
+		// bubble. Counting only notifiable mail would therefore blind the
+		// detector to the commonest wedge: a bubble handed a body it never acted
+		// on. Read state is set only by Take, i.e. by the bubble's own inbox()
+		// call, so UnreadCount is exactly "work handed over and not consumed".
+		mail := 0
+		if k.Store != nil {
+			mail = k.Store.UnreadCount(e.Addr)
+		}
+		out = append(out, health.Sample{
+			Addr:         e.Addr,
+			LastActivity: e.Session.LastActivity(),
+			RecentOutput: e.Session.RecentOutput(),
+			UnreadMail:   mail,
+			Alive:        e.Session.Alive(),
+		})
+	}
+	return out
+}
+
+// clockNow returns the kernel's clock. It reads the injectable now field (set
+// to time.Now by New) rather than calling time.Now directly, so a test can hold
+// time still — the crash-loop backoff is a time-based decision and asserting on
+// it must not mean sleeping. A zero-value Kernel (not built by New) still gets
+// the wall clock rather than panicking.
+func (k *Kernel) clockNow() time.Time {
+	if k.now == nil {
+		return time.Now()
+	}
+	return k.now()
+}
+
+// SetClock replaces the kernel's clock (tests only). Passing nil restores the
+// wall clock.
+func (k *Kernel) SetClock(now func() time.Time) { k.now = now }
 
 func (k *Kernel) setSession(a addr.Address, s runner.Session) { k.sessions.Set(a, s) }
 
@@ -493,7 +579,7 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 		// here: a freshly-spawned worker awaiting its first task must start
 		// when a charter is delegated to it -- the "spawn a worker and message
 		// it a charter" flow.
-		if b, ok := k.Reg.Get(to); !ok || to.IsRoot() || b.SessionID != "" {
+		if sid, ok := k.Reg.SessionID(to); !ok || to.IsRoot() || sid != "" {
 			// Pooled for the periodic DrainInboxes rather than notified now --
 			// again a suppression, and again it must be counted.
 			k.Cost.Add(to, costmeter.FNoticesSuppressed, 1)
@@ -689,14 +775,46 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	if b.Disabled {
 		return nil // parked: refuse to launch until re-enabled
 	}
+	// Crash-loop gate. A bubble that has just failed to launch is left cold
+	// until its backoff window elapses, and one that has failed
+	// relaunchGiveUpAfter times in a row is not relaunched at all. This is read
+	// BEFORE the launch and the outcome written after it, under epoch, with the
+	// lock released across everything slow: see internal/kernel/backoff.go. A
+	// healthy bubble never has state here, so its path is a map lookup and is
+	// otherwise unchanged.
+	//
+	// The dead session is released BEFORE the gate, not after it. Reaching here
+	// means cur is not alive, so its PTY and fds are pure waste whether or not a
+	// relaunch follows; returning early without closing would leak them on every
+	// suppressed retry and leak them permanently on a give-up, since no later
+	// attempt gets past the gate. Closing unconditionally is also what the code
+	// did before the gate existed.
 	if cur != nil {
 		_ = cur.Close()
 	}
+	epoch, mayLaunch := k.relaunchAllowed(a)
+	if !mayLaunch {
+		// FRewarms is NOT touched: a relaunch that never happened rewarmed
+		// nothing. What is metered is the suppression itself — every suppression
+		// path in this repo increments a counter, so a refusal to act is as
+		// visible in the telemetry as an action.
+		if k.Cost != nil {
+			k.Cost.Add(a, costmeter.FRelaunchesSuppressed, 1)
+		}
+		return nil
+	}
+	// The session id is read into a LOCAL here and every use below is that local.
+	// It lives in the registry map, which SyncSessionIDs and other ensureAlive
+	// callers write concurrently; re-reading it at each site could hand the
+	// resume branch one id and the launch call another, resuming the wrong
+	// conversation or none. One read, one coherent decision.
+	sid, _ := k.Reg.SessionID(a)
 	// If the session switched conversations (/resume) while it was running, resume
 	// the one it's actually on now, not the id we launched with.
 	if k.CurrentSessionID != nil {
 		if cur := k.CurrentSessionID(a); cur != "" {
-			b.SessionID = cur
+			sid = cur
+			k.Reg.SetSessionID(a, cur)
 		}
 	}
 	// A stored SessionID means this bubble has run before, and we are here
@@ -707,16 +825,17 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	// would inflate the very metric this phase is judged by. Derived from the
 	// existing id rather than a new "was paged out" field, so no second source
 	// of truth can drift from the session table.
-	wasPagedOut := meterRewarm && b.SessionID != ""
+	wasPagedOut := meterRewarm && sid != ""
 	// Try to resume the existing conversation.
-	if b.SessionID != "" {
-		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
+	if sid != "" {
+		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Model: b.Model, SessionID: sid, Resume: true}); err == nil {
 			// A resume can fail two ways: the process exits (Alive false), or claude
 			// has no record of the id and prints "No conversation found" (e.g. the
 			// session was never persisted because the bubble stalled, or its working
 			// dir changed). Either way, fall through to a fresh session — which keeps
 			// the bubble's pending inbox messages (those live in our store).
 			if k.resumeHealthy(sess) {
+				k.noteRelaunchSuccess(a) // healthy again: counter, window and give-up all cleared
 				k.noteRewarm(a, wasPagedOut)
 				k.setSession(a, sess)
 				k.EnforceBudget() // page in -> may page out a colder bubble
@@ -726,18 +845,25 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 		}
 	}
 	// Fresh session with a new id, seeded with the persona and its charter/goal.
-	b.SessionID = newSessionID()
-	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Goal: b.Goal, Model: b.Model, SessionID: b.SessionID, Resume: false})
+	sid = newSessionID()
+	k.Reg.SetSessionID(a, sid)
+	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Goal: b.Goal, Model: b.Model, SessionID: sid, Resume: false})
 	if err != nil {
+		// A failed launch is metered as nothing (no FRewarms: nothing was warmed)
+		// but it IS counted as a crash-loop failure, which is what stops the next
+		// sweep from paying for the same attempt again.
+		k.noteRelaunchFailed(a, epoch)
 		return nil
 	}
 	if k.RelaunchProbe > 0 {
 		time.Sleep(k.RelaunchProbe) // a launch that dies at once (bad dir/args) shouldn't be handed back as a live PTY
 		if !sess.Alive() {
 			_ = sess.Close()
+			k.noteRelaunchFailed(a, epoch) // came up and died at once: the expensive kind of failure
 			return nil
 		}
 	}
+	k.noteRelaunchSuccess(a)
 	// NOT a rewarm. Reaching here means the resume did not happen: claude has no
 	// record of the session id, so this is a FRESH conversation with no context
 	// to re-pay. Nothing was rewarmed — the cache we would have been charged for
@@ -822,7 +948,7 @@ func (k *Kernel) SyncSessionIDs() {
 	}
 	for _, b := range k.Reg.All() {
 		if cur := k.CurrentSessionID(b.Addr); cur != "" {
-			b.SessionID = cur
+			k.Reg.SetSessionID(b.Addr, cur)
 		}
 	}
 }
@@ -1103,6 +1229,18 @@ func (k *Kernel) UnmuteBy(by addr.Address, id string) error {
 	return fmt.Errorf("kernel: no mute rule %s", id)
 }
 
+// ReapExpiredMutes removes every bubble's TTL-expired mute rules, returning how
+// many it dropped. It exists so the periodic sweep never has to read the clock
+// itself (and so a test can drive it through the kernel's injectable clock).
+//
+// It is pure bookkeeping: expired rules already stopped matching in
+// notify.Compiled.Match, so no message's fate changes. It takes only the
+// registry lock, briefly, and touches no session — no PTY write, no launch, no
+// EnsureAlive.
+func (k *Kernel) ReapExpiredMutes() int {
+	return k.Reg.ReapExpiredMuteRules(k.clockNow())
+}
+
 // MutesFor renders `by`'s own mute rules for display.
 func (k *Kernel) MutesFor(by addr.Address) []string {
 	rules := k.Reg.MuteRules(by)
@@ -1196,9 +1334,14 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 		return "", err
 	}
 	b := k.Reg.Add(parent, persona, dir)
-	b.Name = opts.Name
-	b.Model = opts.Model
-	b.Goal = opts.Goal
+	// Through the mutators, not the returned pointer: Add has ALREADY published
+	// the bubble into the registry map, so a concurrent All()/Children() sweep
+	// (the persist loop, the dashboard render) can be walking it while these
+	// three fields are set. Writing them raw is a data race on a bubble that is
+	// already visible to the fleet.
+	k.Reg.SetName(b.Addr, opts.Name)
+	k.Reg.SetModel(b.Addr, opts.Model)
+	k.Reg.SetGoal(b.Addr, opts.Goal)
 	// Lazy launch: NO session id and NO process yet. The bubble is a cold record
 	// (0 RAM) until first used — a dive, a message, or a loop trigger pages it in
 	// via EnsureAlive. So you can spawn hundreds and only the touched ones run.
@@ -1322,6 +1465,14 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 		k.Caps.Purge(v)             // drop it from EVERY bubble's contacts, so no ghost lingers
 		k.Sched.PurgeBubble(v)      // drop any wake schedules for/by it
 		k.Tasks.PurgeParticipant(v) // cancel its open tasks / degrade tasks it verified
+		// Crash-loop state is per-address and nothing else clears it for a bubble
+		// that is gone: SetEnabled and ClearRelaunchFailures are unreachable once
+		// the registry entry is removed, and no relaunch can ever succeed to clear
+		// it either. Left behind, the entry keeps RelaunchTroubles non-empty
+		// forever, which paints the TUI's fleet-health panel red for a bubble that
+		// no longer exists. Cleared for EVERY victim, not just the named address,
+		// because the whole subtree is what the delete removes.
+		k.ClearRelaunchFailures(v)
 	}
 	return victims
 }
@@ -1395,23 +1546,32 @@ func (k *Kernel) StartRoot(dir string) error {
 	if k.session(addr.Root) != nil {
 		return nil
 	}
-	b, ok := k.Reg.Get(addr.Root)
-	if !ok {
+	if _, ok := k.Reg.Get(addr.Root); !ok {
 		return nil
 	}
-	if b.Dir == "" {
-		b.Dir = dir
+	// One read into a local, then the local is what Launch gets: re-reading Dir
+	// after setting it could hand the runner a directory another writer replaced
+	// in between.
+	rootDir, _ := k.Reg.Dir(addr.Root)
+	if rootDir == "" {
+		rootDir = dir
+		k.Reg.SetDir(addr.Root, dir)
 	}
+	// One read into a local, as in ensureAlive: the resume flag and the id handed
+	// to Launch must describe the same conversation.
+	sid, _ := k.Reg.SessionID(addr.Root)
 	if k.CurrentSessionID != nil { // resume the conversation root is actually on now
 		if cur := k.CurrentSessionID(addr.Root); cur != "" {
-			b.SessionID = cur
+			sid = cur
+			k.Reg.SetSessionID(addr.Root, cur)
 		}
 	}
-	resume := b.SessionID != "" // set => restored, resume its conversation
-	if b.SessionID == "" {
-		b.SessionID = newSessionID()
+	resume := sid != "" // set => restored, resume its conversation
+	if sid == "" {
+		sid = newSessionID()
+		k.Reg.SetSessionID(addr.Root, sid)
 	}
-	sess, err := k.runner.Launch(addr.Root, b.Dir, runner.SpawnOpts{Persona: "root", SessionID: b.SessionID, Resume: resume})
+	sess, err := k.runner.Launch(addr.Root, rootDir, runner.SpawnOpts{Persona: "root", SessionID: sid, Resume: resume})
 	if err != nil {
 		return err
 	}

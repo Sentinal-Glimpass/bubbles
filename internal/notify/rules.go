@@ -127,8 +127,9 @@ func CompileRule(r Rule) (*Compiled, error) {
 // rebuilds a RuleSet by re-adding every STORED rule and then persists
 // rs.List(), so an Add that rejected expired rules would silently and
 // permanently delete them from the registry. Reaping is a separate, explicit
-// step (deferred to a later phase); matching is where the contract the
-// mute()/mutes() tools advertise has to hold.
+// step — RuleSet.ReapExpired / ReapExpiredRules, which drop exactly the rules
+// this check already refuses to honour and are therefore invisible here;
+// matching is where the contract the mute()/mutes() tools advertise has to hold.
 func (c *Compiled) Match(source, subject, body string, now time.Time) bool {
 	if c.Expired(now) {
 		return false
@@ -150,15 +151,83 @@ func (c *Compiled) Match(source, subject, body string, now time.Time) bool {
 	return true
 }
 
-// Expired reports whether c's TTL has elapsed by now. A zero TTL never
+// Expired reports whether r's TTL has elapsed by now. A zero TTL never
 // expires; a zero Created with a non-zero TTL is treated as expired rather
 // than immortal, so a rule that lost its creation stamp fails CLOSED (it stops
 // muting) instead of silently deafening the bubble forever.
-func (c *Compiled) Expired(now time.Time) bool {
-	if c.rule.TTL <= 0 {
+//
+// This is the SINGLE definition of expiry in the process. Both the match path
+// (Compiled.Expired -> Compiled.Match) and every reaper read it, so a reap can
+// never remove a rule that Match would still have honoured — that equivalence
+// is what makes reaping observationally invisible, and it is a property of
+// there being one predicate, not of two predicates agreeing today.
+func (r Rule) Expired(now time.Time) bool {
+	if r.TTL <= 0 {
 		return false
 	}
-	return now.Sub(c.rule.Created) > c.rule.TTL
+	return now.Sub(r.Created) > r.TTL
+}
+
+// Expired reports whether c's rule has expired by now. See Rule.Expired.
+func (c *Compiled) Expired(now time.Time) bool { return c.rule.Expired(now) }
+
+// ReapExpired drops every rule that has expired by now, returning how many it
+// removed. Remaining rules keep their relative order.
+//
+// This is the explicit reaping step Compiled.Match's comment defers to, and it
+// is deliberately the ONLY thing it does. It removes exactly the rules that
+// Match already refuses to honour, so for every input Match returns the same
+// answer before and after a call — the reap reclaims memory and frees MaxRules
+// quota, and can never change what gets muted. Anything more (renewing,
+// re-sorting, re-compiling) would break that equivalence, which is why the
+// expiry predicate lives in one place and this method just filters on it.
+func (rs *RuleSet) ReapExpired(now time.Time) int {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	kept := rs.rules[:0]
+	n := 0
+	for _, c := range rs.rules {
+		if c.Expired(now) {
+			n++
+			continue
+		}
+		kept = append(kept, c)
+	}
+	for i := len(kept); i < len(rs.rules); i++ {
+		rs.rules[i] = nil // let the dropped Compiled (and its regexes) go
+	}
+	rs.rules = kept
+	return n
+}
+
+// ReapExpiredRules filters a STORED rule slice, returning the survivors and how
+// many were dropped. It works on Rule values rather than a RuleSet on purpose:
+// the persisted form of a bubble's mute rules is []Rule, and rebuilding a
+// RuleSet from it just to reap would run every rule back through Add — which
+// silently skips anything that fails to compile, permanently deleting it on the
+// next persist. That is exactly the hazard rules.go's Match comment and
+// kernel.MuteBy warn about. Filtering the stored slice touches nothing but the
+// expired entries.
+//
+// rules is never mutated; the caller gets a fresh slice when anything was
+// dropped, and the original back (n == 0) when nothing was.
+func ReapExpiredRules(rules []Rule, now time.Time) ([]Rule, int) {
+	n := 0
+	for _, r := range rules {
+		if r.Expired(now) {
+			n++
+		}
+	}
+	if n == 0 {
+		return rules, 0
+	}
+	kept := make([]Rule, 0, len(rules)-n)
+	for _, r := range rules {
+		if !r.Expired(now) {
+			kept = append(kept, r)
+		}
+	}
+	return kept, n
 }
 
 // RuleSet is an ordered collection of compiled rules for one bubble. Order is

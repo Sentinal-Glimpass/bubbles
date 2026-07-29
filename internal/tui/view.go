@@ -77,6 +77,12 @@ func sevStyle(sev string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
 	case "high", "critical", "exceeded":
 		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")) // red
+	case "good":
+		// Reuses hrGood, the green already used for the headroom ON indicator, so
+		// the panel keeps one green rather than gaining a second. Only the fleet
+		// health block passes "good"; every existing caller's severity strings are
+		// untouched and still land on the default.
+		return hrGood
 	default:
 		return panelStyle
 	}
@@ -140,12 +146,103 @@ func headroomRows(h Headroom) []string {
 	return rows
 }
 
+// healthRowWidth is the widest the FLEET alert row is allowed to get. The panel
+// has no width cap of its own — overlayTopRight sizes it from the widest row
+// emitted and clips the TREE to fit around it — so an unbounded alert row would
+// silently eat the fleet tree. This is that bound.
+// It is sized to hold all five alert segments at once ("stuck 1 · crash 2 ·
+// ctx 3 · chk 4 · hung 5"), because a fleet in which all five are firing is
+// exactly the one whose operator must not have any of them hidden.
+const healthRowWidth = 44
+
+// healthBudget resolves the alert row's column budget for a terminal of the
+// given width. A width of 0 means "not known yet" (no WindowSizeMsg has
+// arrived), which is not a reason to render nothing — the fixed cap applies.
+// Otherwise the row never takes more than half the terminal, so the tree always
+// keeps a readable share of a narrow one.
+func healthBudget(width int) int {
+	if width <= 0 {
+		return healthRowWidth
+	}
+	if b := width / 2; b < healthRowWidth {
+		return b
+	}
+	return healthRowWidth
+}
+
+// healthSegments builds the Phase 4 alert segments in the spec's priority order,
+// which is also the drop order when the row doesn't fit, and the severity that
+// colors them.
+//
+// THE CENTRAL RULE: a metric whose source is unavailable (nil) is OMITTED. It is
+// never rendered as zero, because a zero on an operator panel reads as "verified
+// healthy" and here it would mean "not measured" — the exact failure this panel
+// exists to make impossible. A measured zero is also not rendered as a segment:
+// it is not an alert, it is the absence of one, and it earns the green summary
+// below instead of a column of noise.
+func healthSegments(h FleetHealth) (segs []string, sev string) {
+	add := func(n *int, label string) {
+		if n != nil && *n > 0 {
+			segs = append(segs, fmt.Sprintf("%s %d", label, *n))
+		}
+	}
+	add(h.Stuck, "stuck")
+	add(h.CrashLooping, "crash")
+	add(h.OverContext, "ctx")
+	add(h.FailingChecks, "chk")
+	add(h.WedgedChecks, "hung")
+
+	hot := func(n *int) bool { return n != nil && *n > 0 }
+	switch {
+	// Red: something is actually broken — a wedged bubble, a bubble the kernel
+	// is no longer able to relaunch, or a sweep that is dead or hung.
+	case hot(h.Stuck), hot(h.CrashLooping), hot(h.FailingChecks), hot(h.WedgedChecks):
+		sev = "critical"
+	// Amber: a cost warning, not a breakage. Context growth predicts the next
+	// expensive rewarm; a backlog means a bubble is behind on its mail.
+	case hot(h.OverContext), h.Backlog > 20:
+		sev = "warning"
+	// Green only on EVIDENCE. It requires both of the sources the spec names —
+	// "all checks pass and nothing is stuck" — to have actually reported. If
+	// either is nil there is nothing to be reassured by, so the row is dropped.
+	case h.Stuck != nil && h.FailingChecks != nil:
+		sev = "good"
+	default:
+		sev = "normal"
+	}
+	return segs, sev
+}
+
 // fleetHealthRows renders the cost/health summary: a header with the hot/total
-// count, a counters line (mute/cap/inline), and a backlog line when non-zero.
-// Metrics whose source doesn't exist yet (Phase 4: stuck/crash-loop/failing-check
-// counts) are simply not rendered — never shown as a misleading zero. Pure over
-// the struct so it's testable without a terminal.
-func fleetHealthRows(h FleetHealth) []string {
+// count, the Phase 4 alert row (stuck / crash loops / context / failing and
+// wedged checks), a counters line (mute/cap/inline), and a backlog line when
+// non-zero. Pure over the struct so it's testable without a terminal; width is
+// the terminal width, used only to bound the alert row.
+//
+// Styling is entirely panelHead / panelStyle / sevStyle: this is a new block in
+// an established panel, not a new visual language.
+func fleetHealthRows(h FleetHealth, width int) []string {
+	rows := []string{panelHead.Render(fmt.Sprintf("FLEET · %d/%d hot", h.Hot, h.Total))}
+
+	segs, hsev := healthSegments(h)
+	if len(segs) > 0 {
+		// Drop from the TAIL — lowest priority first — until the row fits. The
+		// highest-priority segment is never dropped: a row saying only "stuck 3"
+		// on a 20-column terminal is still the most important thing on screen,
+		// and dropping it to respect a budget would hide precisely the failure
+		// the budget exists to keep visible.
+		budget := healthBudget(width)
+		for len(segs) > 1 && lipgloss.Width(strings.Join(segs, " · ")) > budget {
+			segs = segs[:len(segs)-1]
+		}
+		rows = append(rows, sevStyle(hsev).Render(strings.Join(segs, " · ")))
+	} else if hsev == "good" {
+		rows = append(rows, sevStyle("good").Render("checks ok"))
+	}
+
+	// The counters line keeps its own severity, unchanged: it reports on INV-1,
+	// and a stuck bubble elsewhere in the fleet says nothing about whether the
+	// flood ceiling is firing.
 	sev := "normal"
 	switch {
 	case h.Capped > 0:
@@ -153,10 +250,7 @@ func fleetHealthRows(h FleetHealth) []string {
 	case h.Backlog > 20:
 		sev = "warning"
 	}
-	rows := []string{
-		panelHead.Render(fmt.Sprintf("FLEET · %d/%d hot", h.Hot, h.Total)),
-		sevStyle(sev).Render(fmt.Sprintf("mute %d · cap %d · inline %d", h.Suppressed, h.Capped, h.Inlined)),
-	}
+	rows = append(rows, sevStyle(sev).Render(fmt.Sprintf("mute %d · cap %d · inline %d", h.Suppressed, h.Capped, h.Inlined)))
 	if h.Backlog > 0 {
 		rows = append(rows, panelStyle.Render(fmt.Sprintf("backlog %d", h.Backlog)))
 	}
@@ -175,7 +269,7 @@ func usagePanel(u Model) []string {
 		panelHead.Render(fmt.Sprintf("RESOURCES · %d hot", u.usage.Hot)),
 		panelStyle.Render(fmt.Sprintf("RAM %s · CPU %.0f%%", humanBytes(u.usage.TotalMem), u.usage.TotalCPU)),
 	)
-	lines = append(lines, fleetHealthRows(u.health)...)
+	lines = append(lines, fleetHealthRows(u.health, u.width)...)
 	for _, r := range u.usage.Top {
 		name := r.Name
 		if len(name) > 12 {

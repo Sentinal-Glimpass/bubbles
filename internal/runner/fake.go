@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -133,6 +134,10 @@ func (s *FakeSession) Die() {
 	s.mu.Unlock()
 }
 
+// ErrFakeLaunch is what a FakeRunner with FailLaunch set returns from Launch —
+// the fake's stand-in for a bubble whose Dir does not exist.
+var ErrFakeLaunch = errors.New("runner: fake launch failed")
+
 // FakeLaunch records a Launch call (test introspection).
 type FakeLaunch struct {
 	Addr addr.Address
@@ -144,6 +149,7 @@ type FakeLaunch struct {
 type FakeRunner struct {
 	mu         sync.Mutex
 	sessions   map[addr.Address]*FakeSession
+	FailLaunch bool         // when true, EVERY Launch fails with ErrFakeLaunch (simulates a bad Dir/binary); the attempt is still recorded in Launches
 	FailResume bool         // when true, a Launch with Resume=true yields a dead session (simulates a missing session id)
 	LostResume bool         // when true, a Launch with Resume=true stays alive but reports "No conversation found" (claude has no record of the id)
 	Launches   []FakeLaunch // every Launch call, in order
@@ -157,6 +163,12 @@ func (r *FakeRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Launches = append(r.Launches, FakeLaunch{Addr: a, Dir: dir, Opts: opts})
+	// The attempt is recorded BEFORE the failure check on purpose: a test proving
+	// that a retry was suppressed needs the launch count to move only when a
+	// launch was genuinely attempted, failed ones included.
+	if r.FailLaunch {
+		return nil, ErrFakeLaunch
+	}
 	s := &FakeSession{lastAct: time.Now()} // fresh sessions look active until a test ages them
 	if opts.Resume && r.FailResume {
 		s.dead = true // the resumed conversation no longer exists -> process exits at once

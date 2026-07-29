@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/Sentinal-Glimpass/bubbles/internal/logcap"
 )
 
 // Headroom (github.com/headroomlabs-ai/headroom) is a local compression proxy
@@ -36,6 +38,14 @@ type headroomProc struct {
 	port     int
 	stopping atomic.Bool
 	proc     atomic.Pointer[os.Process]
+
+	// log is the size-capped sink for the proxy's output, opened once and shared
+	// across relaunches. It replaces the old "O_TRUNC on every launch" file,
+	// which was bounded across restarts but grew without limit within a single
+	// long-lived daemon run — and which threw away the crash output of the very
+	// proxy the supervisor was restarting. nil when the log could not be opened
+	// (the proxy then runs with its output discarded, exactly as before).
+	log *logcap.Writer
 }
 
 // headroomPort is the proxy's loopback port (BUBBLES_HEADROOM_PORT, default 8787).
@@ -76,6 +86,9 @@ func startHeadroom(baseDir string) *headroomProc {
 
 	logPath := filepath.Join(baseDir, ".bubbles", "headroom.log")
 	_ = os.MkdirAll(filepath.Dir(logPath), 0o755)
+	if w, err := logcap.Open(logPath, headroomLogCap); err == nil {
+		h.log = w
+	}
 
 	args := []string{"proxy", "--port", strconv.Itoa(port)}
 	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1" {
@@ -95,19 +108,23 @@ func startHeadroom(baseDir string) *headroomProc {
 		_ = os.Setenv("HEADROOM_OUTPUT_SHAPER", "1")
 	}
 
-	if !h.launch(bin, args, logPath) {
+	if !h.launch(bin, args) {
 		return nil
 	}
-	go h.supervise(bin, args, logPath)
+	go h.supervise(bin, args)
 	return h
 }
 
-// launch starts one proxy process, redirecting its output to logPath. Records
-// the process handle for supervision/shutdown. Returns false on spawn failure.
-func (h *headroomProc) launch(bin string, args []string, logPath string) bool {
+// launch starts one proxy process, redirecting its output to the shared capped
+// log. Records the process handle for supervision/shutdown. Returns false on
+// spawn failure.
+//
+// Both Stdout and Stderr get the same *logcap.Writer; exec copies each on its
+// own goroutine, which is why the writer is concurrency-safe.
+func (h *headroomProc) launch(bin string, args []string) bool {
 	cmd := exec.Command(bin, args...)
-	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
-		cmd.Stdout, cmd.Stderr = f, f
+	if h.log != nil {
+		cmd.Stdout, cmd.Stderr = h.log, h.log
 	}
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "bubbles: headroom proxy failed to start: %v (running WITHOUT compression)\n", err)
@@ -121,7 +138,7 @@ func (h *headroomProc) launch(bin string, args []string, logPath string) bool {
 // supervise relaunches the proxy if it exits unexpectedly, so the injected base
 // URL keeps resolving. Backs off and gives up after too many rapid failures
 // (fail-open: sessions then fall back to whatever the env last held).
-func (h *headroomProc) supervise(bin string, args []string, logPath string) {
+func (h *headroomProc) supervise(bin string, args []string) {
 	fails := 0
 	for !h.stopping.Load() {
 		time.Sleep(2 * time.Second)
@@ -143,7 +160,7 @@ func (h *headroomProc) supervise(bin string, args []string, logPath string) {
 			return
 		}
 		fmt.Fprintf(os.Stderr, "bubbles: headroom proxy exited, relaunching (attempt %d)\n", fails)
-		h.launch(bin, args, logPath)
+		h.launch(bin, args)
 	}
 }
 
@@ -201,5 +218,9 @@ func (h *headroomProc) stop() {
 	h.stopping.Store(true)
 	if p := h.proc.Load(); p != nil {
 		_ = p.Kill()
+	}
+	// Closed after the kill so the proxy's dying words still land in the log.
+	if h.log != nil {
+		_ = h.log.Close()
 	}
 }

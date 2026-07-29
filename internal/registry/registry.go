@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
@@ -194,6 +195,37 @@ func (r *Registry) MuteRules(a addr.Address) []notify.Rule {
 	return nil
 }
 
+// ReapExpiredMuteRules drops every bubble's TTL-expired mute rules and returns
+// how many rules it removed fleet-wide. Expired rules already stopped matching
+// (notify.Compiled.Match enforces the TTL), so this changes no behaviour: it
+// reclaims the memory and — the reason it matters — frees the notify.MaxRules
+// quota, which counted rules that can never match again and so could stop a
+// bubble from ever adding a new one.
+//
+// The read-modify-write happens inside ONE hold of r.mu, deliberately. Doing it
+// as MuteRules() then SetMuteRules() from a sweep goroutine would race a
+// concurrent mute() on the same bubble and silently discard the rule the bubble
+// had just been told was accepted. No lock is held across anything unbounded
+// here: filtering a slice of at most MaxRules values is pure computation.
+func (r *Registry) ReapExpiredMuteRules(now time.Time) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	total := 0
+	for _, b := range r.bubbles {
+		if len(b.MuteRules) == 0 {
+			continue
+		}
+		kept, n := notify.ReapExpiredRules(b.MuteRules, now)
+		if n == 0 {
+			continue
+		}
+		b.MuteRules = kept
+		total += n
+		r.version++
+	}
+	return total
+}
+
 // AlwaysOnAddrs returns every always-on receiver (for keep-alive sweeps).
 func (r *Registry) AlwaysOnAddrs() []addr.Address {
 	r.mu.Lock()
@@ -255,6 +287,66 @@ func (r *Registry) ByControlToken(tok string) (*Bubble, bool) {
 		}
 	}
 	return nil, false
+}
+
+// SetDir changes a bubble's working directory (used on its next launch).
+//
+// Unlike SetSessionID this DOES bump version, and the difference is deliberate.
+// Dir is durable fleet state the operator set: if it changes, fleet.json is
+// stale until it is re-saved. SessionID is refreshed by SyncSessionIDs on the
+// way INTO a save, so bumping there would mark the fleet dirty as a side effect
+// of saving it. Dir is never written from the persist path, so it has no such
+// feedback loop.
+func (r *Registry) SetDir(a addr.Address, dir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.Dir = dir
+		r.version++
+	}
+}
+
+// Dir returns a bubble's working directory and whether the bubble exists.
+// Callers that both test and use the directory must read it ONCE into a local,
+// for the same reason as SessionID below: two reads can straddle a write and
+// launch a bubble in a directory the registry no longer records.
+func (r *Registry) Dir(a addr.Address) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		return b.Dir, true
+	}
+	return "", false
+}
+
+// SetSessionID records the claude session id a bubble should resume from. This
+// field is written from the kernel's relaunch path (ensureAlive) and from the
+// pre-persist sweep (SyncSessionIDs), which can run concurrently for the same
+// address — so it must go through the mutex like every other mutator here.
+//
+// Deliberately does NOT bump version. SessionID is persisted, but it is
+// refreshed on the way INTO a save (SyncSessionIDs runs immediately before
+// saveFleet); bumping the version there would mark the fleet dirty as a side
+// effect of saving it and make the change-driven autosave re-save forever.
+func (r *Registry) SetSessionID(a addr.Address, id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.SessionID = id
+	}
+}
+
+// SessionID returns a bubble's stored session id and whether the bubble exists.
+// Callers that use the id more than once must read it ONCE into a local: the
+// value can change under them between two calls, and a launch decision made on
+// two different ids resumes the wrong conversation (or none).
+func (r *Registry) SessionID(a addr.Address) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		return b.SessionID, true
+	}
+	return "", false
 }
 
 // SetGoal changes a bubble's initial instruction (used on its next fresh launch).

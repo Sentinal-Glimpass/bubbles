@@ -59,21 +59,19 @@ func fetchHeadroom(url string) (savingsPct, savedUSD float64, tokensRemoved int6
 // runHeadroomStats keeps the dashboard's HEADROOM row live when --headroom is on.
 // It polls the local /stats endpoint every few seconds (cheap, loopback) and
 // pushes the result to the TUI. No-op when compression is disabled.
-func runHeadroomStats(curProg interface{ Load() *tea.Program }) {
+func headroomStatsStep(curProg interface{ Load() *tea.Program }) func() {
 	if os.Getenv("BUBBLES_HEADROOM") != "1" {
-		return
+		// Compression is off: the check stays registered as a no-op so the
+		// background inventory is identical whatever the flags say.
+		return func() {}
 	}
 	url := fmt.Sprintf("http://127.0.0.1:%d", headroomPort())
-	send := func() {
+	// No eager send here: the first tick does it, a few seconds later, without
+	// blocking boot on a proxy that may not be up yet.
+	return func() {
 		pct, usd, tokens, ready := fetchHeadroom(url)
 		if p := curProg.Load(); p != nil {
 			p.Send(tui.HeadroomMsg(tui.Headroom{On: true, Ready: ready, SavingsPct: pct, SavedUSD: usd, TokensSaved: tokens}))
 		}
-	}
-	send()
-	t := time.NewTicker(3 * time.Second)
-	defer t.Stop()
-	for range t.C {
-		send()
 	}
 }

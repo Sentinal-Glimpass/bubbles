@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"github.com/Sentinal-Glimpass/bubbles/internal/logcap"
 )
 
 const (
@@ -206,8 +208,13 @@ func startDaemon(self, baseDir string) error {
 	}
 	// Fallback: detached child. Works everywhere, but dies on session logout
 	// unless something else keeps the session alive.
-	logf, _ := os.OpenFile(filepath.Join(baseDir, ".bubbles", "daemon.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	//
+	// The log stays O_APPEND (never O_TRUNC) so a crash report survives the
+	// restart that follows it; the cap is applied here instead, before the new
+	// daemon inherits the descriptor. Without this the file simply grew forever.
+	logPath := daemonLogPath(baseDir)
+	_, _ = logcap.Rotate(logPath, daemonLogCap)
+	logf, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	cmd := exec.Command(self, "daemon")
 	cmd.Dir = baseDir
 	if logf != nil {

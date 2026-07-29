@@ -159,15 +159,6 @@ func NewHealthManager(k *kernel.Kernel) *HealthManager {
 	}
 }
 
-// Run sweeps on a ticker until the process exits.
-func (m *HealthManager) Run(interval time.Duration) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for range t.C {
-		m.Sweep()
-	}
-}
-
 // Sweep runs every health check once. Add checks here as they land.
 func (m *HealthManager) Sweep() {
 	m.beginSweep()
