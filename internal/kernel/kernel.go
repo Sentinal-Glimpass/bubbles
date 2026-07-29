@@ -543,7 +543,7 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 		// here: a freshly-spawned worker awaiting its first task must start
 		// when a charter is delegated to it -- the "spawn a worker and message
 		// it a charter" flow.
-		if b, ok := k.Reg.Get(to); !ok || to.IsRoot() || b.SessionID != "" {
+		if sid, ok := k.Reg.SessionID(to); !ok || to.IsRoot() || sid != "" {
 			// Pooled for the periodic DrainInboxes rather than notified now --
 			// again a suppression, and again it must be counted.
 			k.Cost.Add(to, costmeter.FNoticesSuppressed, 1)
@@ -754,11 +754,18 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	if cur != nil {
 		_ = cur.Close()
 	}
+	// The session id is read into a LOCAL here and every use below is that local.
+	// It lives in the registry map, which SyncSessionIDs and other ensureAlive
+	// callers write concurrently; re-reading it at each site could hand the
+	// resume branch one id and the launch call another, resuming the wrong
+	// conversation or none. One read, one coherent decision.
+	sid, _ := k.Reg.SessionID(a)
 	// If the session switched conversations (/resume) while it was running, resume
 	// the one it's actually on now, not the id we launched with.
 	if k.CurrentSessionID != nil {
 		if cur := k.CurrentSessionID(a); cur != "" {
-			b.SessionID = cur
+			sid = cur
+			k.Reg.SetSessionID(a, cur)
 		}
 	}
 	// A stored SessionID means this bubble has run before, and we are here
@@ -769,10 +776,10 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	// would inflate the very metric this phase is judged by. Derived from the
 	// existing id rather than a new "was paged out" field, so no second source
 	// of truth can drift from the session table.
-	wasPagedOut := meterRewarm && b.SessionID != ""
+	wasPagedOut := meterRewarm && sid != ""
 	// Try to resume the existing conversation.
-	if b.SessionID != "" {
-		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
+	if sid != "" {
+		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Model: b.Model, SessionID: sid, Resume: true}); err == nil {
 			// A resume can fail two ways: the process exits (Alive false), or claude
 			// has no record of the id and prints "No conversation found" (e.g. the
 			// session was never persisted because the bubble stalled, or its working
@@ -789,8 +796,9 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 		}
 	}
 	// Fresh session with a new id, seeded with the persona and its charter/goal.
-	b.SessionID = newSessionID()
-	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Goal: b.Goal, Model: b.Model, SessionID: b.SessionID, Resume: false})
+	sid = newSessionID()
+	k.Reg.SetSessionID(a, sid)
+	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Goal: b.Goal, Model: b.Model, SessionID: sid, Resume: false})
 	if err != nil {
 		// A failed launch is metered as nothing (no FRewarms: nothing was warmed)
 		// but it IS counted as a crash-loop failure, which is what stops the next
@@ -891,7 +899,7 @@ func (k *Kernel) SyncSessionIDs() {
 	}
 	for _, b := range k.Reg.All() {
 		if cur := k.CurrentSessionID(b.Addr); cur != "" {
-			b.SessionID = cur
+			k.Reg.SetSessionID(b.Addr, cur)
 		}
 	}
 }
@@ -1471,16 +1479,21 @@ func (k *Kernel) StartRoot(dir string) error {
 	if b.Dir == "" {
 		b.Dir = dir
 	}
+	// One read into a local, as in ensureAlive: the resume flag and the id handed
+	// to Launch must describe the same conversation.
+	sid, _ := k.Reg.SessionID(addr.Root)
 	if k.CurrentSessionID != nil { // resume the conversation root is actually on now
 		if cur := k.CurrentSessionID(addr.Root); cur != "" {
-			b.SessionID = cur
+			sid = cur
+			k.Reg.SetSessionID(addr.Root, cur)
 		}
 	}
-	resume := b.SessionID != "" // set => restored, resume its conversation
-	if b.SessionID == "" {
-		b.SessionID = newSessionID()
+	resume := sid != "" // set => restored, resume its conversation
+	if sid == "" {
+		sid = newSessionID()
+		k.Reg.SetSessionID(addr.Root, sid)
 	}
-	sess, err := k.runner.Launch(addr.Root, b.Dir, runner.SpawnOpts{Persona: "root", SessionID: b.SessionID, Resume: resume})
+	sess, err := k.runner.Launch(addr.Root, b.Dir, runner.SpawnOpts{Persona: "root", SessionID: sid, Resume: resume})
 	if err != nil {
 		return err
 	}

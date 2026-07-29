@@ -257,6 +257,36 @@ func (r *Registry) ByControlToken(tok string) (*Bubble, bool) {
 	return nil, false
 }
 
+// SetSessionID records the claude session id a bubble should resume from. This
+// field is written from the kernel's relaunch path (ensureAlive) and from the
+// pre-persist sweep (SyncSessionIDs), which can run concurrently for the same
+// address — so it must go through the mutex like every other mutator here.
+//
+// Deliberately does NOT bump version. SessionID is persisted, but it is
+// refreshed on the way INTO a save (SyncSessionIDs runs immediately before
+// saveFleet); bumping the version there would mark the fleet dirty as a side
+// effect of saving it and make the change-driven autosave re-save forever.
+func (r *Registry) SetSessionID(a addr.Address, id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.SessionID = id
+	}
+}
+
+// SessionID returns a bubble's stored session id and whether the bubble exists.
+// Callers that use the id more than once must read it ONCE into a local: the
+// value can change under them between two calls, and a launch decision made on
+// two different ids resumes the wrong conversation (or none).
+func (r *Registry) SessionID(a addr.Address) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		return b.SessionID, true
+	}
+	return "", false
+}
+
 // SetGoal changes a bubble's initial instruction (used on its next fresh launch).
 func (r *Registry) SetGoal(a addr.Address, goal string) {
 	r.mu.Lock()

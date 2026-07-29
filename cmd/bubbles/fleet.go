@@ -236,7 +236,8 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 	for _, r := range m.Bubbles { // registry first, so addresses exist
 		if addr.Address(r.Addr).IsRoot() { // root is pre-seeded; just restore its session info
 			if b, ok := k.Reg.Get(addr.Root); ok {
-				b.Dir, b.SessionID = r.Dir, r.SessionID
+				b.Dir = r.Dir // restore-time, before any concurrency starts
+				k.Reg.SetSessionID(addr.Root, r.SessionID)
 			}
 			continue
 		}
