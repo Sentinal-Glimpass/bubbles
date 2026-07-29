@@ -112,17 +112,34 @@ func runApp() {
 	lr.BrainDir = func(a addr.Address) string { return filepath.Join(k.BrainBase, a.String()) }
 	k.MemBudget = 45 << 30           // 45 GB total: sessions are packed by ACTUAL RAM; the cheapest to rewarm page out when the sum exceeds this
 	k.IdleTimeout = 30 * time.Minute // page out sessions silent (no output) this long; they resume on next use
-	// Assumed prompt-cache lifetime: 1h, the extended cache TTL claude sessions
-	// hold (the 5m default would make this setting nearly inert — revisit the
-	// number if that assumption changes). Evicting a session idle less than this
+	// Assumed prompt-cache lifetime. Evicting a session idle less than this
 	// throws away a LIVE cache, so the next use re-pays full uncached input for
 	// its whole context — an idle eviction inside the window is a pure loss.
-	// The two settings are deliberately left visible side by side: IdleTimeout
-	// (30m) is below CacheTTL (60m), which means idleness alone would otherwise
-	// discard warm caches for the whole half-hour between them. IdleTimeout's
-	// value is unchanged; CacheTTL is what now suppresses that wasteful window,
-	// and the operator can see the relationship instead of inferring it.
-	k.CacheTTL = 60 * time.Minute
+	//
+	// 5m is the provider's DEFAULT ephemeral cache TTL, and nothing in this repo
+	// opts into the 1-hour extended cache (no beta header, no cache_control TTL
+	// in internal/runner or here). Do not raise it on the assumption that we do.
+	//
+	// READ BEFORE CHANGING: idle eviction requires a session to be idle past
+	// BOTH bars, so the EFFECTIVE idle timeout is max(IdleTimeout, CacheTTL).
+	// Raising CacheTTL above IdleTimeout (30m) therefore extends how long every
+	// silent session stays RESIDENT — more RAM held for longer, and evictions
+	// pushed onto the MemBudget above instead. That is a fleet-memory change,
+	// not just a cache hint. Kept below IdleTimeout by default so it protects
+	// warm caches without moving the memory behaviour.
+	//
+	// BUBBLES_CACHE_TTL overrides it (any time.ParseDuration value, e.g. "1h")
+	// for an operator who HAS enabled extended caching; 0 disables the
+	// protection entirely, restoring plain idle-timeout eviction.
+	k.CacheTTL = 5 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("BUBBLES_CACHE_TTL")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			fmt.Fprintf(os.Stderr, "bubbles: ignoring BUBBLES_CACHE_TTL=%q (%v); using %s\n", v, err, k.CacheTTL)
+		} else {
+			k.CacheTTL = d
+		}
+	}
 	k.TypingWindow = 10 * time.Second                 // hold a focused bubble's messages while you're typing; deliver once you pause this long
 	inheritedMCP := resolveMCPServers(mcpAllowList()) // curated operator servers bubbles inherit (e.g. playwright)
 	lr.MCPConfig = func(a addr.Address) string {

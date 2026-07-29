@@ -216,3 +216,65 @@ func TestRewarmCountedOnlyForPagedOutBubbles(t *testing.T) {
 		t.Fatalf("rewarms after a no-op EnsureAlive = %d, want 1", got)
 	}
 }
+
+// TestIdlenessIsMeasuredByOutputNotDelivery pins the key eviction is sorted on.
+//
+// Idleness comes from the session's LastActivity (the process producing output),
+// NOT from when the kernel last delivered something to it. A bubble that was
+// just handed a message but has produced nothing since is still idle: the notice
+// sits in its terminal until it takes a turn, and a bubble that never takes that
+// turn must not be able to hold RAM forever by being messaged at. Both eviction
+// paths agree on this one definition — EvictIdle always used it, EnforceBudget
+// now does too (it previously used a logical last-USED stamp, since deleted).
+//
+// If you change this key, this test is where you find out.
+func TestIdlenessIsMeasuredByOutputNotDelivery(t *testing.T) {
+	fr, k, as := budgetKernel(t, 600, "silent", "working")
+	silent, working := as[0], as[1]
+	k.MemBudget = 1000 // 1200 resident: one must go
+	k.CacheTTL = 0     // pure coldest-first, so this test measures ONLY the key
+
+	fr.Session(silent).SetLastActivity(time.Now().Add(-time.Hour)) // messaged below, but never speaks
+	fr.Session(working).SetLastActivity(time.Now())                // actively producing output
+
+	if _, err := k.Send(addr.Root, silent, "ping", "you have work", 0, true); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	k.EnforceBudget()
+	if k.IsHot(silent) {
+		t.Fatal("a bubble that has produced no output is idle however recently it was messaged")
+	}
+	if !k.IsHot(working) {
+		t.Fatal("the session actually producing output should have been kept")
+	}
+}
+
+// TestRelaunchSessionIsNotARewarm: a config bounce discards the cache too, but
+// its rate tracks operator edits, not the paging policy. Counting it would give
+// FRewarms a floor of noise independent of eviction — and FRewarms is the number
+// the paging policy is judged by.
+func TestRelaunchSessionIsNotARewarm(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	k.EnsureAlive(a) // first launch: bubble now has a stored SessionID
+
+	k.RelaunchSession(a)
+	if !k.IsHot(a) {
+		t.Fatal("precondition: RelaunchSession should leave the bubble hot")
+	}
+	if got := k.Cost.Snapshot()[a].Rewarms; got != 0 {
+		t.Fatalf("rewarms after a deliberate config bounce = %d, want 0", got)
+	}
+
+	// A paging-induced wake through EnsureAlive still counts, so the opt-out is
+	// narrow rather than a hole in the metric.
+	fr.Session(a).Die()
+	k.EnsureAlive(a)
+	if got := k.Cost.Snapshot()[a].Rewarms; got != 1 {
+		t.Fatalf("rewarms after paging back in = %d, want 1", got)
+	}
+}

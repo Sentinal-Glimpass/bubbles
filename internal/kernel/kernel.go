@@ -109,8 +109,6 @@ type Kernel struct {
 	runner   runner.Runner
 	smu      sync.Mutex
 	sessions map[addr.Address]runner.Session
-	lastUsed map[addr.Address]int64 // logical-clock LRU stamp per bubble
-	clock    int64
 
 	// TypingWindow is how long after a keystroke the operator counts as "actively
 	// typing" in the focused bubble (messages held so they don't submit a
@@ -257,7 +255,6 @@ func New(r runner.Runner) *Kernel {
 		RelaunchProbe: 800 * time.Millisecond,
 		runner:        r,
 		sessions:      map[addr.Address]runner.Session{},
-		lastUsed:      map[addr.Address]int64{},
 		notified:      map[addr.Address]int{},
 		lastNudge:     map[addr.Address]time.Time{},
 		Cost:          costmeter.New(),
@@ -267,14 +264,6 @@ func New(r runner.Runner) *Kernel {
 	// above it (rule, capability, config) can raise or disable it.
 	k.Notify = notify.NewPolicy(k.muteRules, notify.NewCeiling(notify.DefaultCeilingPerMinute, notify.DefaultCeilingBurst))
 	return k
-}
-
-// touch stamps a as most-recently-used (for LRU eviction).
-func (k *Kernel) touch(a addr.Address) {
-	k.smu.Lock()
-	k.clock++
-	k.lastUsed[a] = k.clock
-	k.smu.Unlock()
 }
 
 // IsHot reports whether a has a live (resident) session.
@@ -315,10 +304,16 @@ func (k *Kernel) RelaunchSession(a addr.Address) {
 	}
 	k.smu.Lock()
 	delete(k.sessions, a)
-	delete(k.lastUsed, a)
 	k.smu.Unlock()
 	_ = k.runner.Kill(a)
-	k.EnsureAlive(a) // relaunch with current config (resumes the conversation)
+	// NOT metered as a rewarm. The cache really is discarded here, but this
+	// bounce is triggered by an operator editing a model/capability — its rate
+	// is a function of config churn, not of the paging policy. Counting it would
+	// give FRewarms a floor of noise independent of eviction, and FRewarms is the
+	// number Phase 3 will be judged by. Crash-restarts (KeepAlive) and cold mail
+	// wakes (RecoverUnread) go through EnsureAlive and DO count: those are
+	// genuinely rewarms the fleet paid for because the bubble was not resident.
+	k.ensureAlive(a, false) // relaunch with current config (resumes the conversation)
 }
 
 // SetEnabled parks or un-parks a bubble. Disabling hides it from every bubble's
@@ -335,7 +330,6 @@ func (k *Kernel) SetEnabled(a addr.Address, enabled bool) {
 		k.smu.Lock()
 		s := k.sessions[a]
 		delete(k.sessions, a)
-		delete(k.lastUsed, a)
 		k.smu.Unlock()
 		if s != nil {
 			_ = s.Close()
@@ -558,7 +552,6 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 			wrote = k.writeNotice(to, k.EnsureAlive(to), d)
 		}
 	case hot:
-		k.touch(to)
 		wrote = k.writeNotice(to, k.session(to), d)
 	default:
 		// First launch: pre-flight above already established this is a
@@ -688,13 +681,17 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 // session id no longer exists (the resumed process exits at once), it starts a
 // fresh session seeded with the persona. Root is never auto-launched here (it is
 // managed via StartRoot / dive-in). Returns nil if a has no launchable session.
-func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
+func (k *Kernel) EnsureAlive(a addr.Address) runner.Session { return k.ensureAlive(a, true) }
+
+// ensureAlive is EnsureAlive with control over the rewarm metric. meterRewarm
+// is false for the ONE caller whose relaunch is not paging-induced
+// (RelaunchSession, a deliberate config bounce): see the note there.
+func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	cur := k.session(a)
 	if a.IsRoot() {
 		return cur
 	}
 	if cur != nil && cur.Alive() {
-		k.touch(a) // used -> most-recently-used
 		return cur
 	}
 	b, ok := k.Reg.Get(a)
@@ -722,7 +719,7 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	// would inflate the very metric this phase is judged by. Derived from the
 	// existing id rather than a new "was paged out" field, so no second source
 	// of truth can drift from the session table.
-	wasPagedOut := b.SessionID != ""
+	wasPagedOut := meterRewarm && b.SessionID != ""
 	// Try to resume the existing conversation.
 	if b.SessionID != "" {
 		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
@@ -734,7 +731,6 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 			if k.resumeHealthy(sess) {
 				k.noteRewarm(a, wasPagedOut)
 				k.setSession(a, sess)
-				k.touch(a)
 				k.EnforceBudget() // page in -> may page out a colder bubble
 				return sess
 			}
@@ -758,7 +754,6 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 	// relaunch of a bubble that was paged out, and the operator pays for it.
 	k.noteRewarm(a, wasPagedOut)
 	k.setSession(a, sess)
-	k.touch(a)
 	k.EnforceBudget()
 	return sess
 }
@@ -1333,7 +1328,6 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 		k.Reg.Remove(v)
 		k.smu.Lock()
 		delete(k.sessions, v)
-		delete(k.lastUsed, v)
 		k.smu.Unlock()
 		k.Groups.PurgeMember(v)
 		k.Caps.Purge(v)             // drop it from EVERY bubble's contacts, so no ghost lingers
