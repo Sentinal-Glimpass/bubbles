@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
@@ -74,6 +75,25 @@ func (f *pumpFixture) writeContext(t *testing.T, tokens int64) {
 	if err := os.WriteFile(p, []byte(line+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// agePump backdates every throttle window for the bubble, so throttle EXPIRY
+// can be exercised without a 30-minute sleep.
+func (f *pumpFixture) agePump(t *testing.T, d time.Duration) {
+	t.Helper()
+	f.m.pumpMu.Lock()
+	defer f.m.pumpMu.Unlock()
+	w, ok := f.m.lastPump[f.a]
+	if !ok {
+		t.Fatal("agePump: no throttle window recorded -- nothing was pumped")
+	}
+	if !w.nudge.IsZero() {
+		w.nudge = w.nudge.Add(-d)
+	}
+	if !w.force.IsZero() {
+		w.force = w.force.Add(-d)
+	}
+	f.m.lastPump[f.a] = w
 }
 
 func (f *pumpFixture) contextGauge() int64 {
@@ -171,6 +191,91 @@ func TestContextPumpThrottlesForcedCompaction(t *testing.T) {
 
 	if n := strings.Count(s.Written(), "/compact"); n != 1 {
 		t.Fatalf("/compact written %d times, want exactly 1 -- forcing must be rate-limited too", n)
+	}
+}
+
+// TestContextPumpEscalatesToForceInsideTheNudgeWindow: the 800k tier is the
+// hard backstop, and the bubble it exists to catch is precisely the one that
+// did NOT act on the polite nudge. If the nudge's throttle window also gated
+// forcing, that bubble would be unforceable for up to 30 minutes -- the polite
+// tier suppressing the backstop written to cover its failure.
+func TestContextPumpEscalatesToForceInsideTheNudgeWindow(t *testing.T) {
+	f := newPumpFixture(t)
+	s := f.hot(t)
+
+	f.writeContext(t, 600_000)
+	f.m.pumpContext()
+	if !strings.Contains(s.Written(), "compact()") {
+		t.Fatalf("setup: expected a nudge at 600k, got %q", s.Written())
+	}
+
+	// Same bubble climbs past the force threshold, well inside the 30m window.
+	f.writeContext(t, 900_000)
+	f.m.pumpContext()
+
+	if !strings.Contains(s.Written(), "/compact") {
+		t.Fatalf("crossing into the force tier must compact immediately, not wait out the nudge window; got %q", s.Written())
+	}
+	if got := f.contextGauge(); got != 900_000 {
+		t.Fatalf("FContextTokens = %d, want 900000", got)
+	}
+}
+
+// TestContextPumpForceTierStaysRateLimitedAfterEscalation: escalation must not
+// turn the force tier into a once-per-sweep /compact, which is the more
+// expensive flood.
+func TestContextPumpForceTierStaysRateLimitedAfterEscalation(t *testing.T) {
+	f := newPumpFixture(t)
+	s := f.hot(t)
+
+	f.writeContext(t, 600_000)
+	f.m.pumpContext() // nudge
+	f.writeContext(t, 900_000)
+	f.m.pumpContext() // escalate: force
+	f.m.pumpContext() // next sweep, still above force
+	f.m.pumpContext()
+
+	if n := strings.Count(s.Written(), "/compact"); n != 1 {
+		t.Fatalf("/compact written %d times, want exactly 1 -- the force tier keeps its own window", n)
+	}
+}
+
+// TestContextPumpNudgesAgainAfterTheThrottleExpires pins the OTHER side of the
+// throttle. Without it, a throttle that is permanent -- nudge once, ever --
+// passes every other test in this file, since they all pump back to back. The
+// window must suppress inside 30 minutes AND allow after it.
+func TestContextPumpNudgesAgainAfterTheThrottleExpires(t *testing.T) {
+	f := newPumpFixture(t)
+	s := f.hot(t)
+	f.writeContext(t, transcript.ContextNudgeTokens+10_000)
+
+	f.m.pumpContext()
+	if n := strings.Count(s.Written(), "compact()"); n != 1 {
+		t.Fatalf("setup: nudges = %d, want 1", n)
+	}
+
+	// Age the window past the throttle instead of sleeping 30 minutes.
+	f.agePump(t, contextPumpThrottle+time.Minute)
+	f.m.pumpContext()
+
+	if n := strings.Count(s.Written(), "compact()"); n != 2 {
+		t.Fatalf("nudges = %d, want 2 -- a bubble still oversized after the throttle expires must be nudged again, or the pump asks once and gives up forever", n)
+	}
+}
+
+// TestContextPumpForcesAgainAfterTheThrottleExpires: same two-sided guarantee
+// for the hard tier.
+func TestContextPumpForcesAgainAfterTheThrottleExpires(t *testing.T) {
+	f := newPumpFixture(t)
+	s := f.hot(t)
+	f.writeContext(t, transcript.ContextForceTokens+50_000)
+
+	f.m.pumpContext()
+	f.agePump(t, contextPumpThrottle+time.Minute)
+	f.m.pumpContext()
+
+	if n := strings.Count(s.Written(), "/compact"); n != 2 {
+		t.Fatalf("/compact written %d times, want 2 after the force window expired", n)
 	}
 }
 

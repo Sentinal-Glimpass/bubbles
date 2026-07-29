@@ -298,6 +298,14 @@ func (k *Kernel) writeNotice(to addr.Address, s runner.Session, d notify.Decisio
 		onWritten()
 		return true
 	}
+	// NOTE the strength of this `true`: it means "accepted for delivery", not
+	// "written". deliverWhenReadyThen can still time out or find a dead session
+	// and return without writing, in which case onWritten never runs. That is
+	// correct for the counters (FNoticesWritten records only real writes) but
+	// callers that treat a true return as proof of delivery are claiming more
+	// than this reports -- see the "claimed only on success" caveat on
+	// cmd/bubbles/contextpump.go's markPumped, whose throttle window can be
+	// spent on this branch for a notice that never landed.
 	go k.deliverWhenReadyThen(to, line, onWritten)
 	return true
 }

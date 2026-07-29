@@ -26,13 +26,13 @@ type HealthManager struct {
 	// cadence, not of the bubble: the kernel's own ceiling bounds what a bubble
 	// can receive, while this bounds how often the pump asks.
 	pumpMu   sync.Mutex
-	lastPump map[addr.Address]time.Time
+	lastPump map[addr.Address]pumpWindows
 }
 
 // NewHealthManager builds the manager over a kernel.
 func NewHealthManager(k *kernel.Kernel) *HealthManager {
 	home, _ := os.UserHomeDir()
-	return &HealthManager{k: k, home: home, lastPump: map[addr.Address]time.Time{}}
+	return &HealthManager{k: k, home: home, lastPump: map[addr.Address]pumpWindows{}}
 }
 
 // Run sweeps on a ticker until the process exits.
