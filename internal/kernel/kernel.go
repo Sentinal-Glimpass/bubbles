@@ -93,6 +93,17 @@ type Kernel struct {
 	// wakes on next use. 0 = never page out on idleness alone (budget only).
 	IdleTimeout time.Duration
 
+	// CacheTTL is how long a bubble's prompt cache is assumed to stay alive after
+	// its last activity. Evicting inside this window is not free: killing the
+	// process throws the cache away, so the next use re-pays full uncached input
+	// for the ENTIRE context — a free wake becomes a paid one, and for a large
+	// context that one rewarm can cost more than the reclaimed RAM was worth.
+	// Idle eviction therefore spares a session still inside this window; memory
+	// pressure still evicts (a blown budget is not optional), but prefers the
+	// bubbles that are cheapest to rewarm. 0 = protection off, i.e. exactly the
+	// pre-Phase-3 behaviour.
+	CacheTTL time.Duration
+
 	runner   runner.Runner
 	smu      sync.Mutex
 	sessions map[addr.Address]runner.Session
@@ -405,9 +416,17 @@ func (k *Kernel) EvictIdle() {
 		if k.isAlwaysOn(a) {
 			continue // always-on receivers stay hot for instant delivery
 		}
-		if s.LastActivity().Before(cutoff) {
-			idle = append(idle, a)
+		if !s.LastActivity().Before(cutoff) {
+			continue
 		}
+		// Idle alone is not a reason to kill a live prompt cache: nothing is
+		// asking for this RAM, so the eviction buys nothing and costs a full
+		// uncached rewarm on next use. Budget pressure (EnforceBudget) still
+		// evicts these; idleness on its own does not.
+		if k.CacheTTL > 0 && s.LastActivity().After(k.clockNow().Add(-k.CacheTTL)) {
+			continue
+		}
+		idle = append(idle, a)
 	}
 	for _, a := range idle {
 		delete(k.sessions, a)
