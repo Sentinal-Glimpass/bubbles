@@ -289,8 +289,7 @@ func (k *Kernel) EnforceBudget() {
 	// see internal/kernel/paging.go for why each of those lives where it does.
 	// WHICH bubbles go is the pure policy's call (cheapest to rewarm first, not
 	// blindly coldest); how many go is still whatever the budget demands.
-	cand, total := k.candidates(k.gatherLive())
-	k.pageOut(paging.Victims(k.pagingConfig(), cand, total))
+	k.pageOut(paging.Victims(k.pagingConfig(), k.candidates(k.gatherLive(), true)))
 }
 
 // RelaunchSession bounces a HOT bubble's session so config that is baked in at
@@ -368,7 +367,10 @@ func (k *Kernel) EvictIdle() {
 	// session whose prompt cache is still alive is spared (nothing is asking for
 	// its RAM, so killing it would buy nothing and cost a full uncached rewarm).
 	// Always-on receivers stay hot for instant delivery; root is never touched.
-	cand, _ := k.candidates(k.gatherLive())
+	// measureMem is false: IdleVictims sorts on IdleFor alone and never reads
+	// MemBytes, so probing every live session's cgroup on the 60s sweep would buy
+	// nothing.
+	cand := k.candidates(k.gatherLive(), false)
 	k.pageOut(paging.IdleVictims(k.pagingConfig(), k.IdleTimeout, cand))
 }
 
@@ -726,9 +728,12 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 			return nil
 		}
 	}
-	// Counted here too: a resume that claude could not honour still ends in a
-	// relaunch of a bubble that was paged out, and the operator pays for it.
-	k.noteRewarm(a, wasPagedOut)
+	// NOT a rewarm. Reaching here means the resume did not happen: claude has no
+	// record of the session id, so this is a FRESH conversation with no context
+	// to re-pay. Nothing was rewarmed — the cache we would have been charged for
+	// re-establishing does not exist on the other side. Counting it would put a
+	// floor of noise under FRewarms that no paging policy can move, and FRewarms
+	// is the number this phase is judged by.
 	k.setSession(a, sess)
 	k.EnforceBudget()
 	return sess

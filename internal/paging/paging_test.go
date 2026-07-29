@@ -9,14 +9,6 @@ import (
 
 const gb = uint64(1) << 30
 
-func totalOf(cs []Candidate) uint64 {
-	var t uint64
-	for _, c := range cs {
-		t += c.MemBytes
-	}
-	return t
-}
-
 func eq(got, want []addr.Address) bool {
 	if len(got) != len(want) {
 		return false
@@ -139,7 +131,7 @@ func TestVictims(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Victims(tt.cfg, tt.live, totalOf(tt.live))
+			got := Victims(tt.cfg, tt.live)
 			if !eq(got, tt.want) {
 				t.Fatalf("Victims = %v, want %v", got, tt.want)
 			}
@@ -223,5 +215,21 @@ func TestIdleVictims(t *testing.T) {
 				t.Fatalf("IdleVictims = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestVictimsSumsItsOwnTotal: the resident total is summed inside Victims over
+// the candidates it may actually evict, so RAM that is never evictable (root,
+// always-on) can no longer be charged against the budget by a caller. Before
+// this, a caller passing a total that included that RAM would drain every
+// worker and still read as over budget.
+func TestVictimsSumsItsOwnTotal(t *testing.T) {
+	live := []Candidate{
+		{Addr: addr.Root, MemBytes: 40 * gb, ContextTokens: 10, IdleFor: time.Hour},
+		{Addr: "0.1", MemBytes: 40 * gb, ContextTokens: 10, IdleFor: time.Hour, AlwaysOn: true},
+		{Addr: "0.2", MemBytes: 1 * gb, ContextTokens: 10, IdleFor: time.Hour},
+	}
+	if got := Victims(Config{MemBudget: int64(2 * gb), CacheTTL: time.Minute}, live); got != nil {
+		t.Fatalf("Victims = %v, want none: the workers (1 GB) fit the 2 GB budget; root and always-on RAM is not budgeted against them", got)
 	}
 }

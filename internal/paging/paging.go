@@ -81,16 +81,29 @@ func evictable(live []Candidate) []Candidate {
 	return out
 }
 
-// Victims returns, in eviction order, who to page out so that totalMem fits
-// within c.MemBudget. Ordering is cost-aware (see waste), but the budget is
-// never blown to protect an expensive bubble: cost decides WHO goes, not HOW
-// MANY. If everything left is expensive, the cheapest of the expensive ones is
-// still evicted rather than exceeding the budget.
-func Victims(c Config, live []Candidate, totalMem uint64) []addr.Address {
-	if c.MemBudget <= 0 || int64(totalMem) <= c.MemBudget {
+// Victims returns, in eviction order, who to page out so that the evictable
+// live set fits within c.MemBudget. Ordering is cost-aware (see waste), but the
+// budget is never blown to protect an expensive bubble: cost decides WHO goes,
+// not HOW MANY. If everything left is expensive, the cheapest of the expensive
+// ones is still evicted rather than exceeding the budget.
+//
+// The resident total is summed HERE, over the very same candidates that can be
+// victims, so no caller can pass a total covering a different set. That is not
+// tidiness: the drain loop subtracts each victim's MemBytes from an unsigned
+// running total, so a total that included never-evictable RAM (root, always-on)
+// would drain every candidate and still read as over budget.
+func Victims(c Config, live []Candidate) []addr.Address {
+	if c.MemBudget <= 0 {
 		return nil
 	}
 	cand := evictable(live)
+	var totalMem uint64
+	for _, x := range cand {
+		totalMem += x.MemBytes
+	}
+	if int64(totalMem) <= c.MemBudget {
+		return nil
+	}
 	neutral := neutralTokens(cand)
 	scores := make(map[addr.Address]float64, len(cand))
 	for _, x := range cand {

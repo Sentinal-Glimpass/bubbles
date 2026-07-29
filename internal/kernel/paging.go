@@ -18,48 +18,54 @@ import (
 // registry both take their own locks and must never nest inside it.
 func (k *Kernel) gatherLive() []sessions.Live { return k.sessions.Live() }
 
-// candidates measures the gathered sessions and builds the policy's view of
-// them, returning the candidates and the resident total OF THE EVICTABLE ONES.
+// candidates builds the policy's view of the gathered sessions. The resident
+// total is no longer computed here: paging.Victims sums it internally, over the
+// very candidates it may evict, so no caller can hand it a total covering a
+// different set of sessions.
 //
-// The total is summed HERE, over the very same slice that is handed to
-// paging.Victims, from this one measurement pass. That is not tidiness: Victims
-// subtracts each victim's MemBytes from an unsigned running total, so a total
-// sourced from a different pass (or covering a different set of sessions) could
-// underflow and wrap to ~1.8e19, which would read as "still over budget" and
-// evict the entire fleet. Always-on sessions are counted in neither the total
-// nor the victims — their RAM has never been budgeted against the workers.
+// measureMem controls whether each session's MemBytes is probed. The probe
+// shells out to the OS (cgroup/proc) once per live session, so the callers that
+// feed a policy which ignores MemBytes — IdleVictims — pass false and skip the
+// syscalls entirely rather than duplicating this function.
 //
 // ContextTokens comes from the cost meter, where the context pump publishes it
 // each sweep. A bubble it has not reached yet is left at 0 on purpose: the
 // policy reads 0 as "unknown" and scores it as the average of the known, which
 // neither shields an unmeasured bubble nor makes every fresh one the first to die.
-func (k *Kernel) candidates(live []sessions.Live) ([]paging.Candidate, uint64) {
+func (k *Kernel) candidates(live []sessions.Live, measureMem bool) []paging.Candidate {
 	var tokens map[addr.Address]costmeter.Counters
 	if k.Cost != nil {
 		tokens = k.Cost.Snapshot()
 	}
 	now := k.clockNow()
 	out := make([]paging.Candidate, 0, len(live))
-	var total uint64
 	for _, e := range live {
-		mem := e.Session.MemBytes()
+		var mem uint64
+		if measureMem {
+			mem = e.Session.MemBytes()
+		}
 		idle := now.Sub(e.Session.LastActivity())
 		if idle < 0 {
-			idle = 0 // a clock skew must not read as a maximally warm cache
+			// Backwards clock skew (or a LastActivity stamped in the future)
+			// clamps to zero idleness, i.e. the bubble reads as maximally WARM:
+			// last to be idle-evicted, and — under the waste score — last in the
+			// budget ordering too. That is deliberately the safe direction. The
+			// clamp bounds the distortion to one sweep's worth of skew instead of
+			// letting a negative duration produce a nonsense score, and being
+			// read as warm can only reorder WHO is evicted; it can never exempt
+			// the fleet from the budget, which drains candidates until the
+			// resident total fits no matter how each one scores.
+			idle = 0
 		}
-		c := paging.Candidate{
+		out = append(out, paging.Candidate{
 			Addr:          e.Addr,
 			MemBytes:      mem,
 			ContextTokens: tokens[e.Addr].ContextTokens,
 			IdleFor:       idle,
 			AlwaysOn:      k.isAlwaysOn(e.Addr),
-		}
-		if !c.AlwaysOn {
-			total += mem
-		}
-		out = append(out, c)
+		})
 	}
-	return out, total
+	return out
 }
 
 // pageOut drops each victim from the session table (under the table lock) and

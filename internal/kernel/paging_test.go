@@ -278,3 +278,31 @@ func TestRelaunchSessionIsNotARewarm(t *testing.T) {
 		t.Fatalf("rewarms after paging back in = %d, want 1", got)
 	}
 }
+
+// TestFailedResumeIsNotARewarm: when claude has no record of the session id the
+// resume does not happen — the bubble comes up as a FRESH conversation with no
+// context to re-pay. Nothing was rewarmed, so nothing may be counted, or
+// FRewarms carries a floor of noise that no paging policy can move.
+func TestFailedResumeIsNotARewarm(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	k.IdleTimeout = 10 * time.Minute
+
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	k.EnsureAlive(a) // first launch: the bubble now has a stored SessionID
+	fr.Session(a).SetLastActivity(time.Now().Add(-time.Hour))
+	k.EvictIdle()
+	if k.IsHot(a) {
+		t.Fatal("precondition: the bubble should have paged out")
+	}
+
+	fr.LostResume = true // claude has no record of the id: the resume is lost
+	k.EnsureAlive(a)
+	if !k.IsHot(a) {
+		t.Fatal("precondition: a lost resume should still heal to a fresh session")
+	}
+	if got := k.Cost.Snapshot()[a].Rewarms; got != 0 {
+		t.Fatalf("rewarms after a lost resume = %d, want 0: the fresh conversation has no context to re-pay", got)
+	}
+}
