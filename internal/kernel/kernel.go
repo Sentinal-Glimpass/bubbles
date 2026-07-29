@@ -138,6 +138,13 @@ type Kernel struct {
 	notifyMu  sync.Mutex
 	notified  map[addr.Address]int       // per bubble: >0 once its current backlog has been announced (nudge dedup)
 	lastNudge map[addr.Address]time.Time // when we last wrote a notice to it (for stale-notice recovery)
+
+	// now is the kernel's clock, defaulted to time.Now by New and replaced only
+	// by SetClock (tests, before the kernel is shared with any goroutine). It is
+	// a field rather than a method because a method cannot be stubbed, and the
+	// relaunch backoff is a decision about elapsed time that tests must be able
+	// to drive without sleeping.
+	now func() time.Time
 }
 
 func (k *Kernel) clearNudge(a addr.Address) {
@@ -273,6 +280,7 @@ func New(r runner.Runner) *Kernel {
 		notified:      map[addr.Address]int{},
 		lastNudge:     map[addr.Address]time.Time{},
 		Cost:          costmeter.New(),
+		now:           time.Now,
 	}
 	// The ceiling is constructed with the package defaults and has no bypass:
 	// it is the last line of defense against the 632fe95 flood, so nothing
@@ -408,8 +416,21 @@ func (k *Kernel) SampleUsage() []Usage {
 	return out
 }
 
-// clockNow returns the wall clock (indirected so tests could stub it if needed).
-func (k *Kernel) clockNow() time.Time { return time.Now() }
+// clockNow returns the kernel's clock. It reads the injectable now field (set
+// to time.Now by New) rather than calling time.Now directly, so a test can hold
+// time still — the crash-loop backoff is a time-based decision and asserting on
+// it must not mean sleeping. A zero-value Kernel (not built by New) still gets
+// the wall clock rather than panicking.
+func (k *Kernel) clockNow() time.Time {
+	if k.now == nil {
+		return time.Now()
+	}
+	return k.now()
+}
+
+// SetClock replaces the kernel's clock (tests only). Passing nil restores the
+// wall clock.
+func (k *Kernel) SetClock(now func() time.Time) { k.now = now }
 
 func (k *Kernel) setSession(a addr.Address, s runner.Session) { k.sessions.Set(a, s) }
 

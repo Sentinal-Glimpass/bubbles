@@ -1,6 +1,9 @@
 package runner
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestFakeRunnerRecordsWrites(t *testing.T) {
 	r := NewFake()
@@ -24,5 +27,38 @@ func TestFakeRunnerKillCloses(t *testing.T) {
 	}
 	if !r.Session("0.1").Closed() {
 		t.Fatal("session not closed after Kill")
+	}
+}
+
+func TestFakeRunnerLaunchSucceedsByDefault(t *testing.T) {
+	r := NewFake()
+	// FailLaunch is additive: the ~100 tests that never touch it must keep
+	// seeing a nil error and a live session.
+	sess, err := r.Launch("0.1", "/tmp/x", SpawnOpts{})
+	if err != nil {
+		t.Fatalf("default Launch returned %v, want nil", err)
+	}
+	if sess == nil || !sess.Alive() {
+		t.Fatal("default Launch must yield a live session")
+	}
+}
+
+func TestFakeRunnerFailLaunch(t *testing.T) {
+	r := NewFake()
+	r.FailLaunch = true
+	sess, err := r.Launch("0.1", "/nonexistent", SpawnOpts{})
+	if !errors.Is(err, ErrFakeLaunch) {
+		t.Fatalf("err = %v want ErrFakeLaunch", err)
+	}
+	if sess != nil {
+		t.Fatalf("failed Launch must yield no session, got %v", sess)
+	}
+	// The attempt is still recorded, so a test can tell a failed launch from a
+	// suppressed one.
+	if len(r.Launches) != 1 {
+		t.Fatalf("Launches = %d want 1", len(r.Launches))
+	}
+	if r.Session("0.1") != nil {
+		t.Fatal("failed Launch must not enter the session table")
 	}
 }
