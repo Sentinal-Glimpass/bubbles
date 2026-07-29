@@ -87,7 +87,7 @@ func (k *Kernel) pageOut(victims []addr.Address) {
 
 // pagingConfig is the policy tuning the kernel currently runs under.
 func (k *Kernel) pagingConfig() paging.Config {
-	return paging.Config{MemBudget: k.MemBudget, CacheTTL: k.CacheTTL}
+	return paging.Config{MemBudget: k.MemBudget, CacheTTL: k.CacheTTL, Grace: k.Grace}
 }
 
 // noteRewarm records that a paged-out bubble has just been relaunched, paying

@@ -31,6 +31,31 @@ type Candidate struct {
 type Config struct {
 	MemBudget int64         // resident bytes the live set must fit within; <= 0 disables
 	CacheTTL  time.Duration // prompt-cache lifetime; below this an eviction throws away a live cache
+	// Grace is the recency floor. A candidate idle for less than Grace has just
+	// been woken — it has already paid one rewarm — and must not be made to pay
+	// another on the very next sweep. It is a preference in ORDER, never an
+	// exemption: see tier.
+	Grace time.Duration
+}
+
+// tier splits candidates into the two eviction bands that make the ordering
+// converge. Band 0 (idle for at least Grace) is ordered entirely ahead of band 1
+// (idle for less than Grace), so a just-woken bubble is only ever a victim once
+// everything that has settled has already been taken.
+//
+// Without this the waste score alone decides, and waste is dominated by context
+// size: a freshly woken SMALL bubble scores ~tokens*1.0, still far below a large
+// bubble idle a single minute, so the small one is re-evicted on every sweep and
+// pays a rewarm each time while the large one never yields. The tier makes the
+// fleet make progress: the expensive bubble is evicted ONCE instead.
+//
+// Grace == 0 puts every candidate in band 0 (IdleFor >= 0 always), which is
+// exactly the single-tier ordering that came before.
+func tier(c Candidate, grace time.Duration) int {
+	if c.IdleFor >= grace {
+		return 0
+	}
+	return 1
 }
 
 // waste is the scoring rule, and the one sentence a future reader needs:
@@ -82,10 +107,11 @@ func evictable(live []Candidate) []Candidate {
 }
 
 // Victims returns, in eviction order, who to page out so that the evictable
-// live set fits within c.MemBudget. Ordering is cost-aware (see waste), but the
-// budget is never blown to protect an expensive bubble: cost decides WHO goes,
-// not HOW MANY. If everything left is expensive, the cheapest of the expensive
-// ones is still evicted rather than exceeding the budget.
+// live set fits within c.MemBudget. Ordering is cost-aware (see waste) and
+// recency-aware (see tier), but the budget is never blown to protect an
+// expensive or a recently woken bubble: those decide WHO goes, not HOW MANY. If
+// draining the whole non-grace tier still leaves the fleet over budget, the
+// grace tier is drained too rather than exceed the budget.
 //
 // The resident total is summed HERE, over the very same candidates that can be
 // victims, so no caller can pass a total covering a different set. That is not
@@ -114,6 +140,9 @@ func Victims(c Config, live []Candidate) []addr.Address {
 		scores[x.Addr] = waste(x, tokens, c.CacheTTL)
 	}
 	sort.SliceStable(cand, func(i, j int) bool {
+		if ti, tj := tier(cand[i], c.Grace), tier(cand[j], c.Grace); ti != tj {
+			return ti < tj // settled bubbles are all ordered ahead of just-woken ones
+		}
 		si, sj := scores[cand[i].Addr], scores[cand[j].Addr]
 		if si != sj {
 			return si < sj // least wasteful to evict goes first

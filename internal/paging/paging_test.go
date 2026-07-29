@@ -218,6 +218,108 @@ func TestIdleVictims(t *testing.T) {
 	}
 }
 
+// TestVictimsGraceTier pins the recency floor: a candidate idle for less than
+// Grace has just paid a rewarm and is ordered BEHIND every settled candidate,
+// but the floor is an ordering preference and never an exemption from the
+// budget.
+func TestVictimsGraceTier(t *testing.T) {
+	ttl := 30 * time.Minute
+	grace := 5 * time.Minute
+	tests := []struct {
+		name string
+		cfg  Config
+		live []Candidate
+		want []addr.Address
+	}{
+		{
+			// The reviewer's scenario, as one ordering decision: the small
+			// just-woken bubble is the cheapest to rewarm and would go first on
+			// waste alone, which is what made it thrash. The settled bubble goes
+			// instead, however expensive, because it has not just paid.
+			name: "a just-woken bubble is ordered behind a settled one, whatever the waste says",
+			cfg:  Config{MemBudget: int64(1 * gb), CacheTTL: ttl, Grace: grace},
+			live: []Candidate{
+				{Addr: "0.1", MemBytes: 1 * gb, ContextTokens: 500_000, IdleFor: 10 * time.Minute},
+				{Addr: "0.2", MemBytes: 1 * gb, ContextTokens: 1_000, IdleFor: 0},
+			},
+			want: []addr.Address{"0.1"},
+		},
+		{
+			// THE invariant: grace reorders WHO, never HOW MANY. Draining every
+			// settled candidate is not enough here, so the policy must continue
+			// into the grace tier rather than leave the fleet over budget.
+			name: "the budget wins: the grace tier is drained too when the settled tier is not enough",
+			cfg:  Config{MemBudget: int64(1 * gb), CacheTTL: ttl, Grace: grace},
+			live: []Candidate{
+				{Addr: "0.1", MemBytes: 1 * gb, ContextTokens: 500_000, IdleFor: time.Hour},
+				{Addr: "0.2", MemBytes: 1 * gb, ContextTokens: 900_000, IdleFor: 2 * time.Second},
+				{Addr: "0.3", MemBytes: 1 * gb, ContextTokens: 10_000, IdleFor: time.Second},
+			},
+			// settled tier first (0.1), then inside the grace tier the existing
+			// waste ordering still decides: the cheapest to rewarm (0.3).
+			want: []addr.Address{"0.1", "0.3"},
+		},
+		{
+			// Everything is inside the grace window and the fleet is still over
+			// budget: grace cannot spare anyone, and the ordering inside the tier
+			// is exactly the pre-grace waste ordering.
+			name: "grace never exempts: all candidates inside the window still page out to fit",
+			cfg:  Config{MemBudget: int64(1 * gb), CacheTTL: ttl, Grace: grace},
+			live: []Candidate{
+				{Addr: "0.1", MemBytes: 1 * gb, ContextTokens: 900_000, IdleFor: time.Second},
+				{Addr: "0.2", MemBytes: 1 * gb, ContextTokens: 10_000, IdleFor: time.Second},
+				{Addr: "0.3", MemBytes: 1 * gb, ContextTokens: 20_000, IdleFor: time.Second},
+			},
+			want: []addr.Address{"0.2", "0.3"},
+		},
+		{
+			// Grace == 0 must be today's single-tier behaviour exactly: the same
+			// fleet as the first case, where the floor would have changed the
+			// answer, resolves on waste alone.
+			name: "Grace zero reproduces the single-tier waste ordering exactly",
+			cfg:  Config{MemBudget: int64(1 * gb), CacheTTL: ttl, Grace: 0},
+			live: []Candidate{
+				{Addr: "0.1", MemBytes: 1 * gb, ContextTokens: 500_000, IdleFor: 10 * time.Minute},
+				{Addr: "0.2", MemBytes: 1 * gb, ContextTokens: 1_000, IdleFor: 0},
+			},
+			want: []addr.Address{"0.2"},
+		},
+		{
+			// And with the cache protection off too, Grace == 0 is still plain
+			// coldest-first LRU, the pre-Phase-3 behaviour.
+			name: "Grace zero and CacheTTL zero is still plain coldest-first LRU",
+			cfg:  Config{MemBudget: int64(1 * gb), CacheTTL: 0, Grace: 0},
+			live: []Candidate{
+				{Addr: "0.1", MemBytes: 1 * gb, ContextTokens: 500_000, IdleFor: 10 * time.Minute},
+				{Addr: "0.2", MemBytes: 1 * gb, ContextTokens: 1_000, IdleFor: 0},
+			},
+			want: []addr.Address{"0.1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Victims(tt.cfg, tt.live)
+			if !eq(got, tt.want) {
+				t.Fatalf("Victims = %v, want %v", got, tt.want)
+			}
+			// Whatever the ordering chose, the budget must actually be met.
+			var left uint64
+			evicted := map[addr.Address]bool{}
+			for _, v := range got {
+				evicted[v] = true
+			}
+			for _, c := range tt.live {
+				if !c.Addr.IsRoot() && !c.AlwaysOn && !evicted[c.Addr] {
+					left += c.MemBytes
+				}
+			}
+			if int64(left) > tt.cfg.MemBudget {
+				t.Fatalf("after evicting %v the evictable set is %d bytes, over the %d budget", got, left, tt.cfg.MemBudget)
+			}
+		})
+	}
+}
+
 // TestVictimsSumsItsOwnTotal: the resident total is summed inside Victims over
 // the candidates it may actually evict, so RAM that is never evictable (root,
 // always-on) can no longer be charged against the budget by a caller. Before

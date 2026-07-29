@@ -140,6 +140,20 @@ func runApp() {
 			k.CacheTTL = d
 		}
 	}
+	// Recency floor for budget eviction. A bubble idle less than this has just
+	// been woken and already paid a rewarm, so it is ordered behind every settled
+	// bubble as a victim.
+	//
+	// The concrete failure this prevents: the budget sweep runs every 5s, and the
+	// cost ordering is dominated by context size. Without a floor, a small-context
+	// bubble that was just woken still scores cheaper than a large bubble idle a
+	// single minute, so it is evicted again on the very NEXT sweep, woken again,
+	// evicted again — a rewarm per sweep, forever (~720/hour), while the large
+	// bubble never yields. With the floor the fleet evicts the large bubble once
+	// and makes progress. This is an ordering preference only: if draining every
+	// settled bubble still leaves the fleet over MemBudget, bubbles inside their
+	// grace window page out too. The budget is never exceeded to honour it.
+	k.Grace = 5 * time.Minute
 	k.TypingWindow = 10 * time.Second               // hold a focused bubble's messages while you're typing; deliver once you pause this long
 	inheritedMCP := resolveMCPServers(mcpAllowList()) // curated operator servers bubbles inherit (e.g. playwright)
 	lr.MCPConfig = func(a addr.Address) string {

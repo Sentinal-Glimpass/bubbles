@@ -279,6 +279,105 @@ func TestRelaunchSessionIsNotARewarm(t *testing.T) {
 	}
 }
 
+// TestEnforceBudgetRewarmsConverge is the test whose absence let the rewarm
+// loop through: every other budget test enforces ONCE, and the bug only shows
+// up on the SECOND sweep.
+//
+// The reviewer's scenario, run for real. Two 600-byte bubbles, a 1000-byte
+// budget, CacheTTL 30m: `rich` holds 500k tokens and has gone quiet, `poor`
+// holds 1k and is the one actually being used. On waste alone `poor` is always
+// the cheapest to rewarm, so it is evicted on every sweep, woken on every use,
+// and pays a rewarm every single time — at the app's 5s sweep cadence, ~720
+// rewarms an hour — while `rich` never yields and the fleet never makes
+// progress. The recency floor evicts `rich` ONCE instead, and the rewarm count
+// stops growing.
+func TestEnforceBudgetRewarmsConverge(t *testing.T) {
+	fr, k, as := budgetKernel(t, 600, "rich", "poor")
+	rich, poor := as[0], as[1]
+	k.MemBudget = 1000 // 1200 resident: one of the two must go
+	k.CacheTTL = 30 * time.Minute
+	k.Grace = 5 * time.Minute
+	k.Cost.Set(rich, costmeter.FContextTokens, 500_000)
+	k.Cost.Set(poor, costmeter.FContextTokens, 1_000)
+
+	var early int64
+	const rounds = 20
+	for i := 0; i < rounds; i++ {
+		// `rich` has settled: it has been quiet well past the grace window.
+		// `poor` is the bubble in use, so it is always freshly active.
+		if s := fr.Session(rich); s != nil && k.IsHot(rich) {
+			s.SetMem(600)
+			s.SetLastActivity(time.Now().Add(-10 * time.Minute))
+		}
+		if s := fr.Session(poor); s != nil && k.IsHot(poor) {
+			s.SetMem(600)
+			s.SetLastActivity(time.Now())
+		}
+		k.EnforceBudget()
+		if !k.IsHot(poor) {
+			k.EnsureAlive(poor) // it is being used, so it wakes again — paying a rewarm
+		}
+		if i == 4 {
+			early = k.Cost.Snapshot()[poor].Rewarms
+		}
+	}
+
+	late := k.Cost.Snapshot()[poor].Rewarms
+	if late != early {
+		t.Fatalf("rewarms of the small in-use bubble grew from %d (round 5) to %d (round %d): it is being re-evicted on every sweep and paying a rewarm each time, instead of the fleet evicting the expensive idle bubble once", early, late, rounds)
+	}
+	if late > 1 {
+		t.Fatalf("rewarms of the small in-use bubble = %d, want at most 1: it should be spared once it has just woken", late)
+	}
+	if k.IsHot(rich) {
+		t.Fatal("the settled bubble should have yielded once so the fleet could make progress")
+	}
+}
+
+// TestEnforceBudgetGraceIsNotAnExemption: the recency floor reorders WHO is
+// evicted, never HOW MANY. When every live bubble is inside its grace window
+// and the fleet is still over budget, the budget still wins.
+func TestEnforceBudgetGraceIsNotAnExemption(t *testing.T) {
+	_, k, as := budgetKernel(t, 600, "a", "b", "c") // 1800 resident, all just active
+	k.MemBudget = 1000                              // two of the three must go
+	k.CacheTTL = 30 * time.Minute
+	k.Grace = time.Hour // wide enough that every bubble is inside it
+
+	k.EnforceBudget()
+	hot := 0
+	for _, a := range as {
+		if k.IsHot(a) {
+			hot++
+		}
+	}
+	if hot != 1 {
+		t.Fatalf("hot sessions = %d, want 1: grace is a preference in eviction ORDER and must never let the fleet sit over budget", hot)
+	}
+}
+
+// TestEnforceBudgetGraceZeroKeepsTodaysOrdering: Grace == 0 must be exactly the
+// single-tier cost ordering, so the floor is opt-in and cannot silently move
+// the behaviour of a fleet that has not configured it.
+func TestEnforceBudgetGraceZeroKeepsTodaysOrdering(t *testing.T) {
+	fr, k, as := budgetKernel(t, 600, "rich", "poor")
+	rich, poor := as[0], as[1]
+	k.MemBudget = 1000
+	k.CacheTTL = 30 * time.Minute
+	k.Grace = 0
+	k.Cost.Set(rich, costmeter.FContextTokens, 500_000)
+	k.Cost.Set(poor, costmeter.FContextTokens, 1_000)
+	fr.Session(rich).SetLastActivity(time.Now().Add(-10 * time.Minute)) // settled
+	fr.Session(poor).SetLastActivity(time.Now())                        // just woken
+
+	k.EnforceBudget()
+	if k.IsHot(poor) {
+		t.Fatal("with Grace == 0 the waste score alone decides, so the cheapest-to-rewarm bubble goes first — exactly as before")
+	}
+	if !k.IsHot(rich) {
+		t.Fatal("with Grace == 0 the expensive-to-rewarm bubble is still spared")
+	}
+}
+
 // TestFailedResumeIsNotARewarm: when claude has no record of the session id the
 // resume does not happen — the bubble comes up as a FRESH conversation with no
 // context to re-pay. Nothing was rewarmed, so nothing may be counted, or

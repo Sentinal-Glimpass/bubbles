@@ -107,6 +107,16 @@ type Kernel struct {
 	// pre-Phase-3 behaviour.
 	CacheTTL time.Duration
 
+	// Grace is the recency floor under budget pressure: a bubble idle for less
+	// than this has just been woken and has already paid one rewarm, so it is
+	// ordered BEHIND every settled bubble as an eviction candidate. Without it
+	// the cost ordering alone re-evicts a just-woken small-context bubble on the
+	// very next sweep — a rewarm every sweep, forever, while a large idle bubble
+	// never yields. It reorders WHO is evicted, never HOW MANY: if draining every
+	// settled bubble still leaves the fleet over MemBudget, bubbles inside their
+	// grace window are evicted too. 0 = no floor, i.e. the cost ordering alone.
+	Grace time.Duration
+
 	runner runner.Runner
 
 	// sessions is the live session table (internal/sessions): which bubbles
