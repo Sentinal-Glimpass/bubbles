@@ -83,6 +83,10 @@ func (r *Registry) Register(c Check) error {
 	if c.Fn == nil {
 		return fmt.Errorf("supervisor: check %q: Fn must not be nil", c.Name)
 	}
+	// r.now() is read BEFORE the lock: it is a caller-supplied closure, and a
+	// test clock that reached back into the registry (to log via Snapshot, say)
+	// would self-deadlock if it ran under r.mu.
+	first := r.now().Add(c.Every)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, dup := r.checks[c.Name]; dup {
@@ -90,7 +94,7 @@ func (r *Registry) Register(c Check) error {
 	}
 	r.checks[c.Name] = &entry{
 		check:   c,
-		nextDue: r.now().Add(c.Every),
+		nextDue: first,
 		status:  Status{Name: c.Name},
 	}
 	return nil
@@ -105,9 +109,14 @@ func (r *Registry) Register(c Check) error {
 // report is the recorded Status.
 //
 // RunDue is a no-op if ctx is already done, so a check is not re-run after
-// cancellation.
+// cancellation. A nil ctx is a caller bug, not a runtime condition, and panics
+// rather than silently running nothing forever — a sweep that quietly stops
+// sweeping is the exact failure this package exists to make visible.
 func (r *Registry) RunDue(ctx context.Context, at time.Time) {
-	if ctx == nil || ctx.Err() != nil {
+	if ctx == nil {
+		panic("supervisor: RunDue called with a nil context")
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	for _, e := range r.claimDue(at) {
@@ -138,6 +147,10 @@ func (r *Registry) record(e *entry, at time.Time, err error, panicked bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e.running = false
+	// Scheduled from the TICK time, not from when Fn returned: a check is due
+	// every Every, not Every-after-it-finishes. A check whose Fn outruns its own
+	// interval is therefore due again the moment it completes, which is right for
+	// a health poller — it should sample as often as it can, not drift.
 	e.nextDue = at.Add(e.check.Every)
 	e.status.LastRun = at
 	e.status.LastErr = err
