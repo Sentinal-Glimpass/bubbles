@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
+	"github.com/Sentinal-Glimpass/bubbles/internal/costmeter"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/transcript"
 )
@@ -27,12 +28,24 @@ type HealthManager struct {
 	// can receive, while this bounds how often the pump asks.
 	pumpMu   sync.Mutex
 	lastPump map[addr.Address]pumpWindows
+
+	// Throttle state for the never-compacted-oversized-transcript stderr
+	// warning (see reportOversizedTranscript). Separate from pumpMu/lastPump:
+	// this is a report, not an action, and shares no correctness property with
+	// the pump's escalation tiers.
+	reportMu            sync.Mutex
+	lastOversizedReport map[addr.Address]time.Time
 }
 
 // NewHealthManager builds the manager over a kernel.
 func NewHealthManager(k *kernel.Kernel) *HealthManager {
 	home, _ := os.UserHomeDir()
-	return &HealthManager{k: k, home: home, lastPump: map[addr.Address]pumpWindows{}}
+	return &HealthManager{
+		k:                   k,
+		home:                home,
+		lastPump:            map[addr.Address]pumpWindows{},
+		lastOversizedReport: map[addr.Address]time.Time{},
+	}
 }
 
 // Run sweeps on a ticker until the process exits.
@@ -55,6 +68,25 @@ func (m *HealthManager) Sweep() {
 // history the model already summarized away.
 const transcriptKeepBeforeCompact = 10
 
+// transcriptOversizedBytes is the byte ceiling past which a COLD, NEVER
+// compacted transcript is reported (see reportOversizedTranscript) instead of
+// silently ignored. 4 MiB is chosen well above the size a transcript can reach
+// before Task 3's pump (contextpump.go) forces /compact at ContextForceTokens
+// (800k tokens, roughly a few MiB of JSONL for typical entry shapes) — so a
+// file crossing this ceiling with no compaction marker anywhere in it means
+// the pump has not yet had a chance to act (the bubble just went cold, or the
+// force throttle window hasn't closed), not that trimming was skipped by
+// mistake.
+const transcriptOversizedBytes = 4 * 1024 * 1024
+
+// oversizedReportThrottle bounds how often the stderr warning fires for the
+// same bubble. Sweep runs every 2 minutes; without a throttle a bubble parked
+// above the ceiling (which it stays until the pump forces a compaction that
+// creates a boundary — see below) would log ~30 lines an hour for a condition
+// that has not changed, the same flood contextPumpThrottle exists to prevent
+// on the action side.
+const oversizedReportThrottle = 30 * time.Minute
+
 // trimTranscripts clears stale context from every COLD bubble's conversation
 // transcript, keeping the file (and session id) intact so the bubble keeps
 // writing to it on resume. It runs only on cold bubbles: claude appends to the
@@ -72,9 +104,61 @@ func (m *HealthManager) trimTranscripts() {
 			continue // never rewrite a transcript claude currently holds open
 		}
 		path := convPath(m.home, b.Dir, b.SessionID)
+
+		// Read-only check BEFORE the trim attempt, reusing transcript.Read so
+		// there is one definition of "has a compaction boundary" (the same one
+		// trimTranscript's own scan and the pump in contextpump.go both answer
+		// to). transcript.Read still returns valid Stats alongside
+		// ErrNoUsage (a transcript with no usage-bearing entry yet, e.g. a huge
+		// backlog of tool-only turns, is exactly a case worth reporting) — only
+		// a hard I/O error (missing file, unreadable line) yields no usable
+		// Stats and is skipped here; trimTranscript below performs its own read
+		// and handles os.IsNotExist the normal way.
+		if st, err := transcript.Read(path); (err == nil || err == transcript.ErrNoUsage) && !st.HasCompaction && st.Bytes > transcriptOversizedBytes {
+			m.reportOversizedTranscript(b.Addr, st.Bytes)
+		}
+
 		if err := trimTranscript(path, transcriptKeepBeforeCompact); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "bubbles: transcript trim %s: %v\n", b.Addr, err)
 		}
+	}
+}
+
+// reportOversizedTranscript records that a's transcript has grown past
+// transcriptOversizedBytes with no compaction boundary anywhere in it.
+//
+// DELIBERATELY NOT A TRUNCATION SITE. trimTranscript only ever cuts BEFORE the
+// latest transcript.CompactMarker because everything after that marker is a
+// self-contained conversation tree rooted at a parentUuid:null entry — the cut
+// can never break a parentUuid chain a surviving entry depends on. A
+// never-compacted file has no such boundary anywhere in it, so there is no
+// byte or line offset that is safe to cut at: every surviving entry's
+// parentUuid chain would run back through the discarded prefix, and severing
+// it risks corrupting the conversation on --resume. Trading a token cost for a
+// data-loss bug is strictly worse than the cost itself, so this function only
+// ever counts and warns.
+//
+// The actual remedy already exists and runs elsewhere: Task 3's pump
+// (contextpump.go, pumpContext) forces /compact once a HOT bubble's context
+// crosses transcript.ContextForceTokens, which is what CREATES the compaction
+// boundary this function is waiting for. Once that boundary exists, the next
+// sweep's ordinary trimTranscript call reclaims the space safely. A bubble
+// that stays cold and oversized indefinitely (no HOT window in which the pump
+// could act) is exactly the case this function exists to surface, not silently
+// swallow.
+func (m *HealthManager) reportOversizedTranscript(a addr.Address, bytes int64) {
+	m.k.Cost.Add(a, costmeter.FOversizedTranscripts, 1)
+
+	m.reportMu.Lock()
+	last, seen := m.lastOversizedReport[a]
+	due := !seen || time.Since(last) >= oversizedReportThrottle
+	if due {
+		m.lastOversizedReport[a] = time.Now()
+	}
+	m.reportMu.Unlock()
+
+	if due {
+		fmt.Fprintf(os.Stderr, "bubbles: %s transcript is %d bytes with no compaction boundary — cannot safely trim (see reportOversizedTranscript); waiting for Task 3's pump to force /compact\n", a, bytes)
 	}
 }
 
