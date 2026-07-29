@@ -83,15 +83,24 @@ func sweepTempConfigs(dir string, pid int, keep map[string]bool) int {
 }
 
 // liveTempConfigs returns the base filenames of the temp configs belonging to
-// sessions this runner currently holds. Anything in this set is off-limits to
-// the sweep: the claude process launched from it is still around.
+// sessions this runner currently holds, PLUS those of any launch in flight.
+// Anything in this set is off-limits to the sweep: the claude process launched
+// from it is still around, or is about to be.
+//
+// The in-flight half is not optional. Launch writes its config files before
+// pty.Start and registers the session only after it, so an address in that
+// window is absent from r.sessions; a sweep that snapshotted only the map would
+// delete a live launch's config and boot the bubble with no MCP server.
 func (r *LocalRunner) liveTempConfigs() map[string]bool {
 	pid := os.Getpid()
 	dir := os.TempDir()
 	keep := map[string]bool{}
 	r.mu.Lock()
-	addrs := make([]addr.Address, 0, len(r.sessions))
+	addrs := make([]addr.Address, 0, len(r.sessions)+len(r.launching))
 	for a := range r.sessions {
+		addrs = append(addrs, a)
+	}
+	for a := range r.launching {
 		addrs = append(addrs, a)
 	}
 	r.mu.Unlock()
@@ -102,9 +111,10 @@ func (r *LocalRunner) liveTempConfigs() map[string]bool {
 	return keep
 }
 
-// removeTempConfigs deletes the temp configs for a. Called from Kill, once the
-// address has already been dropped from the session map, so no live session can
-// be holding them.
+// removeTempConfigs deletes the temp configs for a. Called from Kill with r.mu
+// held, after the address has been dropped from the session map and only when
+// no launch of a is in flight — so neither a live session nor a launch that is
+// mid-flight can be holding them.
 func (r *LocalRunner) removeTempConfigs(a addr.Address) {
 	pid, dir := os.Getpid(), os.TempDir()
 	_ = os.Remove(mcpConfigPath(dir, pid, a))

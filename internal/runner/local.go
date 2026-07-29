@@ -72,6 +72,40 @@ type LocalRunner struct {
 
 	mu       sync.Mutex
 	sessions map[addr.Address]*ptySession
+	// launching counts the in-flight Launch calls per address. A launch writes
+	// its temp configs BEFORE pty.Start and only registers in sessions AFTER it,
+	// so between those two points the address is invisible to anything that
+	// decides which config files are live. Both deleters consult this: Kill skips
+	// the removal while a launch holds the address, and the sweep keeps its files.
+	// Without it, a Kill racing a relaunch (EvictIdle vs a request-path
+	// EnsureAlive) or a sweep landing mid-launch deletes the NEW config, and the
+	// bubble boots with no MCP server or fails outright into the crash-loop count.
+	launching map[addr.Address]int
+}
+
+// beginLaunch marks a launch of a as in flight. Called before the first temp
+// config is written; balanced by endLaunch once the session is registered (or
+// the launch has failed). Counted rather than a bare flag so two overlapping
+// launches of the same address cannot have the first one to finish unmark the
+// second.
+func (r *LocalRunner) beginLaunch(a addr.Address) {
+	r.mu.Lock()
+	if r.launching == nil {
+		r.launching = map[addr.Address]int{}
+	}
+	r.launching[a]++
+	r.mu.Unlock()
+}
+
+// endLaunch drops the in-flight mark taken by beginLaunch.
+func (r *LocalRunner) endLaunch(a addr.Address) {
+	r.mu.Lock()
+	if n := r.launching[a] - 1; n > 0 {
+		r.launching[a] = n
+	} else {
+		delete(r.launching, a)
+	}
+	r.mu.Unlock()
 }
 
 // writeSettings generates a claude --settings file wiring a hook (on several
@@ -169,6 +203,12 @@ const opusOneM = "claude-opus-5[1m]"
 
 // Launch starts claude in a PTY in dir, seeded with the persona/goal.
 func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session, error) {
+	// Claim the address for the whole window in which this launch's temp configs
+	// exist but no session entry does. The deferred release runs after the
+	// sessions map has been written, so the address is never unprotected: it is
+	// either in flight here or live in the map. No lock is held across pty.Start.
+	r.beginLaunch(a)
+	defer r.endLaunch(a)
 	var args []string
 	// --mcp-config is variadic in claude (it consumes following values), so it
 	// must NOT sit right before the positional prompt or the prompt gets eaten
@@ -269,16 +309,22 @@ func (r *LocalRunner) Kill(a addr.Address) error {
 	r.mu.Lock()
 	s, ok := r.sessions[a]
 	delete(r.sessions, a)
+	// The temp configs are removed HERE, under the same lock that drops the
+	// session, and only when no launch of a is in flight. Dropping the map entry
+	// first is exactly what frees a concurrent ensureAlive(a) to relaunch, so
+	// removing afterwards (outside the lock) would delete the config that
+	// relaunch had just written. These are two unlinks of small files, not
+	// unbounded I/O, and the lock is released before s.Close(). When a launch IS
+	// in flight the files belong to it and are left alone; anything genuinely
+	// orphaned is collected by the periodic sweep.
+	if ok && r.launching[a] == 0 {
+		r.removeTempConfigs(a)
+	}
 	r.mu.Unlock()
 	if !ok {
 		return nil
 	}
-	err := s.Close()
-	// Only now, with a gone from the map, is it safe to delete its temp configs:
-	// the names are per-(pid, address), so a relaunch that raced ahead of this
-	// Kill would otherwise have its live config pulled out from under it.
-	r.removeTempConfigs(a)
-	return err
+	return s.Close()
 }
 
 // CitizenPromptFor composes the capability-gated citizen prompt: the base
