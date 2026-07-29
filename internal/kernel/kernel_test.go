@@ -1500,9 +1500,7 @@ func TestMechmagnetNoiseNeverRewarmsColdBubble(t *testing.T) {
 	// Open the mute window, then make the bubble cold (kill/remove its session).
 	k.WebhookDeliver(a, "mechmagnet-event-pump", "opt_out", "event", true)
 	_ = k.runner.Kill(a)
-	k.smu.Lock()
-	delete(k.sessions, a)
-	k.smu.Unlock()
+	k.sessions.Delete(a)
 	if k.IsHot(a) {
 		t.Fatal("precondition: bubble should be cold after kill")
 	}

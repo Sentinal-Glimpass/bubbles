@@ -19,9 +19,11 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/groups"
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
+	"github.com/Sentinal-Glimpass/bubbles/internal/paging"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
+	"github.com/Sentinal-Glimpass/bubbles/internal/sessions"
 	"github.com/Sentinal-Glimpass/bubbles/internal/tasks"
 )
 
@@ -79,8 +81,9 @@ type Kernel struct {
 
 	// MemBudget is the total resident-RAM budget (bytes) for live worker
 	// sessions. Sessions are packed by their ACTUAL memory — a 200 MB session
-	// costs 200 MB, not a fixed slot — and when the sum exceeds the budget the
-	// least-recently-used bubbles page out until it fits. 0 = unlimited.
+	// costs 200 MB, not a fixed slot — and when the sum exceeds the budget
+	// bubbles page out until it fits, cheapest-to-rewarm first (see CacheTTL and
+	// internal/paging). 0 = unlimited.
 	MemBudget int64
 
 	// WebhookBase is the advertised base URL of the daemon's incoming-webhook
@@ -93,11 +96,34 @@ type Kernel struct {
 	// wakes on next use. 0 = never page out on idleness alone (budget only).
 	IdleTimeout time.Duration
 
-	runner   runner.Runner
-	smu      sync.Mutex
-	sessions map[addr.Address]runner.Session
-	lastUsed map[addr.Address]int64 // logical-clock LRU stamp per bubble
-	clock    int64
+	// CacheTTL is how long a bubble's prompt cache is assumed to stay alive after
+	// its last activity. Evicting inside this window is not free: killing the
+	// process throws the cache away, so the next use re-pays full uncached input
+	// for the ENTIRE context — a free wake becomes a paid one, and for a large
+	// context that one rewarm can cost more than the reclaimed RAM was worth.
+	// Idle eviction therefore spares a session still inside this window; memory
+	// pressure still evicts (a blown budget is not optional), but prefers the
+	// bubbles that are cheapest to rewarm. 0 = protection off, i.e. exactly the
+	// pre-Phase-3 behaviour.
+	CacheTTL time.Duration
+
+	// Grace is the recency floor under budget pressure: a bubble idle for less
+	// than this has just been woken and has already paid one rewarm, so it is
+	// ordered BEHIND every settled bubble as an eviction candidate. Without it
+	// the cost ordering alone re-evicts a just-woken small-context bubble on the
+	// very next sweep — a rewarm every sweep, forever, while a large idle bubble
+	// never yields. It reorders WHO is evicted, never HOW MANY: if draining every
+	// settled bubble still leaves the fleet over MemBudget, bubbles inside their
+	// grace window are evicted too. 0 = no floor, i.e. the cost ordering alone.
+	Grace time.Duration
+
+	runner runner.Runner
+
+	// sessions is the live session table (internal/sessions): which bubbles
+	// currently have a running process. The kernel keeps the orchestration —
+	// launching, killing, measuring — and delegates the table itself, so no lock
+	// is ever held across a PTY write or a MemBytes probe.
+	sessions *sessions.Table
 
 	// TypingWindow is how long after a keystroke the operator counts as "actively
 	// typing" in the focused bubble (messages held so they don't submit a
@@ -243,8 +269,7 @@ func New(r runner.Runner) *Kernel {
 		Tasks:         tasks.New(),
 		RelaunchProbe: 800 * time.Millisecond,
 		runner:        r,
-		sessions:      map[addr.Address]runner.Session{},
-		lastUsed:      map[addr.Address]int64{},
+		sessions:      sessions.New(),
 		notified:      map[addr.Address]int{},
 		lastNudge:     map[addr.Address]time.Time{},
 		Cost:          costmeter.New(),
@@ -256,21 +281,11 @@ func New(r runner.Runner) *Kernel {
 	return k
 }
 
-// touch stamps a as most-recently-used (for LRU eviction).
-func (k *Kernel) touch(a addr.Address) {
-	k.smu.Lock()
-	k.clock++
-	k.lastUsed[a] = k.clock
-	k.smu.Unlock()
-}
-
 // IsHot reports whether a has a live (resident) session.
-func (k *Kernel) IsHot(a addr.Address) bool {
-	s := k.session(a)
-	return s != nil && s.Alive()
-}
+func (k *Kernel) IsHot(a addr.Address) bool { return k.sessions.IsHot(a) }
 
-// EnforceBudget pages out the least-recently-used worker sessions until the sum
+// EnforceBudget pages out worker sessions — the ones cheapest to rewarm, which
+// under CacheTTL == 0 is plain coldest-first LRU — until the sum
 // of live sessions' ACTUAL resident memory fits within MemBudget (root is always
 // resident and never counts). Paging out = kill the process; the registry entry,
 // inbox, and session id persist, so the bubble resumes on next use. Called after
@@ -280,48 +295,11 @@ func (k *Kernel) EnforceBudget() {
 	if k.MemBudget <= 0 {
 		return
 	}
-	k.smu.Lock()
-	type ent struct {
-		a    addr.Address
-		s    runner.Session
-		used int64
-	}
-	var live []ent
-	for a, s := range k.sessions {
-		if a == addr.Root || s == nil || !s.Alive() || k.isAlwaysOn(a) {
-			continue // always-on receivers are never paged out for budget
-		}
-		live = append(live, ent{a, s, k.lastUsed[a]})
-	}
-	k.smu.Unlock()
-
-	var total uint64
-	mem := make(map[addr.Address]uint64, len(live))
-	for _, e := range live {
-		m := e.s.MemBytes()
-		mem[e.a] = m
-		total += m
-	}
-	if int64(total) <= k.MemBudget {
-		return
-	}
-	sort.Slice(live, func(i, j int) bool { return live[i].used < live[j].used }) // coldest first
-	var victims []addr.Address
-	for _, e := range live {
-		if int64(total) <= k.MemBudget {
-			break
-		}
-		victims = append(victims, e.a)
-		total -= mem[e.a]
-	}
-	k.smu.Lock()
-	for _, v := range victims {
-		delete(k.sessions, v)
-	}
-	k.smu.Unlock()
-	for _, v := range victims {
-		_ = k.runner.Kill(v) // page out
-	}
+	// Gather under the lock, measure outside it, decide, then mutate and kill —
+	// see internal/kernel/paging.go for why each of those lives where it does.
+	// WHICH bubbles go is the pure policy's call (cheapest to rewarm first, not
+	// blindly coldest); how many go is still whatever the budget demands.
+	k.pageOut(paging.Victims(k.pagingConfig(), k.candidates(k.gatherLive(), true)))
 }
 
 // RelaunchSession bounces a HOT bubble's session so config that is baked in at
@@ -335,12 +313,16 @@ func (k *Kernel) RelaunchSession(a addr.Address) {
 	if a.IsRoot() || !k.IsHot(a) {
 		return
 	}
-	k.smu.Lock()
-	delete(k.sessions, a)
-	delete(k.lastUsed, a)
-	k.smu.Unlock()
+	k.sessions.Delete(a)
 	_ = k.runner.Kill(a)
-	k.EnsureAlive(a) // relaunch with current config (resumes the conversation)
+	// NOT metered as a rewarm. The cache really is discarded here, but this
+	// bounce is triggered by an operator editing a model/capability — its rate
+	// is a function of config churn, not of the paging policy. Counting it would
+	// give FRewarms a floor of noise independent of eviction, and FRewarms is the
+	// number Phase 3 will be judged by. Crash-restarts (KeepAlive) and cold mail
+	// wakes (RecoverUnread) go through EnsureAlive and DO count: those are
+	// genuinely rewarms the fleet paid for because the bubble was not resident.
+	k.ensureAlive(a, false) // relaunch with current config (resumes the conversation)
 }
 
 // SetEnabled parks or un-parks a bubble. Disabling hides it from every bubble's
@@ -354,11 +336,7 @@ func (k *Kernel) SetEnabled(a addr.Address, enabled bool) {
 	}
 	k.Reg.SetDisabled(a, !enabled)
 	if !enabled { // stop it now
-		k.smu.Lock()
-		s := k.sessions[a]
-		delete(k.sessions, a)
-		delete(k.lastUsed, a)
-		k.smu.Unlock()
+		s := k.sessions.Take(a)
 		if s != nil {
 			_ = s.Close()
 		}
@@ -395,27 +373,15 @@ func (k *Kernel) EvictIdle() {
 	if k.IdleTimeout <= 0 {
 		return
 	}
-	cutoff := k.clockNow().Add(-k.IdleTimeout)
-	k.smu.Lock()
-	var idle []addr.Address
-	for a, s := range k.sessions {
-		if a == addr.Root || s == nil || !s.Alive() {
-			continue
-		}
-		if k.isAlwaysOn(a) {
-			continue // always-on receivers stay hot for instant delivery
-		}
-		if s.LastActivity().Before(cutoff) {
-			idle = append(idle, a)
-		}
-	}
-	for _, a := range idle {
-		delete(k.sessions, a)
-	}
-	k.smu.Unlock()
-	for _, a := range idle {
-		_ = k.runner.Kill(a) // page out; registry + session id persist -> resumes on use
-	}
+	// The policy applies both bars: past IdleTimeout AND past CacheTTL, so a
+	// session whose prompt cache is still alive is spared (nothing is asking for
+	// its RAM, so killing it would buy nothing and cost a full uncached rewarm).
+	// Always-on receivers stay hot for instant delivery; root is never touched.
+	// measureMem is false: IdleVictims sorts on IdleFor alone and never reads
+	// MemBytes, so probing every live session's cgroup on the 60s sweep would buy
+	// nothing.
+	cand := k.candidates(k.gatherLive(), false)
+	k.pageOut(paging.IdleVictims(k.pagingConfig(), k.IdleTimeout, cand))
 }
 
 // Usage is a per-session resource snapshot for the dashboard.
@@ -430,27 +396,14 @@ type Usage struct {
 // excluded). CPU is cumulative; the caller diffs successive samples over wall
 // time to get a percentage. Measuring is done outside the session lock.
 func (k *Kernel) SampleUsage() []Usage {
-	k.smu.Lock()
-	type ent struct {
-		a addr.Address
-		s runner.Session
-	}
-	var live []ent
-	for a, s := range k.sessions {
-		if a == addr.Root || s == nil || !s.Alive() {
-			continue
-		}
-		live = append(live, ent{a, s})
-	}
-	k.smu.Unlock()
-
+	live := k.sessions.Live()
 	out := make([]Usage, 0, len(live))
 	for _, e := range live {
-		name := e.a.String()
-		if b, ok := k.Reg.Get(e.a); ok {
+		name := e.Addr.String()
+		if b, ok := k.Reg.Get(e.Addr); ok {
 			name = b.Label()
 		}
-		out = append(out, Usage{Addr: e.a, Name: name, Mem: e.s.MemBytes(), CPU: e.s.CPUTime()})
+		out = append(out, Usage{Addr: e.Addr, Name: name, Mem: e.Session.MemBytes(), CPU: e.Session.CPUTime()})
 	}
 	return out
 }
@@ -458,17 +411,9 @@ func (k *Kernel) SampleUsage() []Usage {
 // clockNow returns the wall clock (indirected so tests could stub it if needed).
 func (k *Kernel) clockNow() time.Time { return time.Now() }
 
-func (k *Kernel) setSession(a addr.Address, s runner.Session) {
-	k.smu.Lock()
-	k.sessions[a] = s
-	k.smu.Unlock()
-}
+func (k *Kernel) setSession(a addr.Address, s runner.Session) { k.sessions.Set(a, s) }
 
-func (k *Kernel) session(a addr.Address) runner.Session {
-	k.smu.Lock()
-	defer k.smu.Unlock()
-	return k.sessions[a]
-}
+func (k *Kernel) session(a addr.Address) runner.Session { return k.sessions.Get(a) }
 
 // Send files a message in the recipient's inbox. The recipient is then notified
 // without interruption: a short "you have mail" line is queued into its session
@@ -595,7 +540,6 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 			wrote = k.writeNotice(to, k.EnsureAlive(to), d)
 		}
 	case hot:
-		k.touch(to)
 		wrote = k.writeNotice(to, k.session(to), d)
 	default:
 		// First launch: pre-flight above already established this is a
@@ -725,13 +669,17 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 // session id no longer exists (the resumed process exits at once), it starts a
 // fresh session seeded with the persona. Root is never auto-launched here (it is
 // managed via StartRoot / dive-in). Returns nil if a has no launchable session.
-func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
+func (k *Kernel) EnsureAlive(a addr.Address) runner.Session { return k.ensureAlive(a, true) }
+
+// ensureAlive is EnsureAlive with control over the rewarm metric. meterRewarm
+// is false for the ONE caller whose relaunch is not paging-induced
+// (RelaunchSession, a deliberate config bounce): see the note there.
+func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	cur := k.session(a)
 	if a.IsRoot() {
 		return cur
 	}
 	if cur != nil && cur.Alive() {
-		k.touch(a) // used -> most-recently-used
 		return cur
 	}
 	b, ok := k.Reg.Get(a)
@@ -751,6 +699,15 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 			b.SessionID = cur
 		}
 	}
+	// A stored SessionID means this bubble has run before, and we are here
+	// because it is no longer live — i.e. it was paged out (budget, idleness, a
+	// relaunch, or a crash). Relaunching it re-pays full uncached input for the
+	// whole conversation, and that is what a REWARM is. A bubble with no stored
+	// id is a first-ever launch: it had no prompt cache to lose, so counting it
+	// would inflate the very metric this phase is judged by. Derived from the
+	// existing id rather than a new "was paged out" field, so no second source
+	// of truth can drift from the session table.
+	wasPagedOut := meterRewarm && b.SessionID != ""
 	// Try to resume the existing conversation.
 	if b.SessionID != "" {
 		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
@@ -760,8 +717,8 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 			// dir changed). Either way, fall through to a fresh session — which keeps
 			// the bubble's pending inbox messages (those live in our store).
 			if k.resumeHealthy(sess) {
+				k.noteRewarm(a, wasPagedOut)
 				k.setSession(a, sess)
-				k.touch(a)
 				k.EnforceBudget() // page in -> may page out a colder bubble
 				return sess
 			}
@@ -781,8 +738,13 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 			return nil
 		}
 	}
+	// NOT a rewarm. Reaching here means the resume did not happen: claude has no
+	// record of the session id, so this is a FRESH conversation with no context
+	// to re-pay. Nothing was rewarmed — the cache we would have been charged for
+	// re-establishing does not exist on the other side. Counting it would put a
+	// floor of noise under FRewarms that no paging policy can move, and FRewarms
+	// is the number this phase is judged by.
 	k.setSession(a, sess)
-	k.touch(a)
 	k.EnforceBudget()
 	return sess
 }
@@ -1355,10 +1317,7 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 	for _, v := range victims {
 		_ = k.runner.Kill(v)
 		k.Reg.Remove(v)
-		k.smu.Lock()
-		delete(k.sessions, v)
-		delete(k.lastUsed, v)
-		k.smu.Unlock()
+		k.sessions.Delete(v)
 		k.Groups.PurgeMember(v)
 		k.Caps.Purge(v)             // drop it from EVERY bubble's contacts, so no ghost lingers
 		k.Sched.PurgeBubble(v)      // drop any wake schedules for/by it
@@ -1425,9 +1384,7 @@ func (k *Kernel) DeleteGroup(name string, deleteMembers bool) {
 	if ok && g.Session != "" {
 		_ = k.runner.Kill(g.Session)
 		k.Reg.Remove(g.Session)
-		k.smu.Lock()
-		delete(k.sessions, g.Session)
-		k.smu.Unlock()
+		k.sessions.Delete(g.Session)
 	}
 	k.Groups.Delete(name)
 }

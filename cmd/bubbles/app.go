@@ -110,8 +110,64 @@ func runApp() {
 	k.BrainBase = filepath.Join(baseDir, ".bubbles", "brains")
 	k.DecisionsPath = filepath.Join(baseDir, ".bubbles", "memory", "decisions.md")
 	lr.BrainDir = func(a addr.Address) string { return filepath.Join(k.BrainBase, a.String()) }
-	k.MemBudget = 45 << 30                            // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
-	k.IdleTimeout = 30 * time.Minute                  // page out sessions silent (no output) this long; they resume on next use
+	k.MemBudget = 45 << 30           // 45 GB total: sessions are packed by ACTUAL RAM; the cheapest to rewarm page out when the sum exceeds this
+	k.IdleTimeout = 30 * time.Minute // page out sessions silent (no output) this long; they resume on next use
+	// Assumed prompt-cache lifetime. Evicting a session idle less than this
+	// throws away a LIVE cache, so the next use re-pays full uncached input for
+	// its whole context — an idle eviction inside the window is a pure loss.
+	//
+	// 5m is the provider's DEFAULT ephemeral cache TTL, and nothing in this repo
+	// opts into the 1-hour extended cache (no beta header, no cache_control TTL
+	// in internal/runner or here). Do not raise it on the assumption that we do.
+	//
+	// READ BEFORE CHANGING: idle eviction requires a session to be idle past
+	// BOTH bars, so the EFFECTIVE idle timeout is max(IdleTimeout, CacheTTL).
+	// Raising CacheTTL above IdleTimeout (30m) therefore extends how long every
+	// silent session stays RESIDENT — more RAM held for longer, and evictions
+	// pushed onto the MemBudget above instead. That is a fleet-memory change,
+	// not just a cache hint. Kept below IdleTimeout by default so it protects
+	// warm caches without moving the memory behaviour.
+	//
+	// BUBBLES_CACHE_TTL overrides it (any time.ParseDuration value, e.g. "1h")
+	// for an operator who HAS enabled extended caching; 0 disables the
+	// protection entirely, restoring plain idle-timeout eviction.
+	k.CacheTTL = 5 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("BUBBLES_CACHE_TTL")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			fmt.Fprintf(os.Stderr, "bubbles: ignoring BUBBLES_CACHE_TTL=%q (%s); using %s\n", v, durErr(err), k.CacheTTL)
+		} else {
+			k.CacheTTL = d
+		}
+	}
+	// Recency floor for budget eviction. A bubble idle less than this has just
+	// been woken and already paid a rewarm, so it is ordered behind every settled
+	// bubble as a victim.
+	//
+	// The concrete failure this prevents: the budget sweep runs every 5s, and the
+	// cost ordering is dominated by context size. Without a floor, a small-context
+	// bubble that was just woken still scores cheaper than a large bubble idle a
+	// single minute, so it is evicted again on the very NEXT sweep, woken again,
+	// evicted again — a rewarm per sweep, forever (~720/hour), while the large
+	// bubble never yields. With the floor the fleet evicts the large bubble once
+	// and makes progress. This is an ordering preference only: if draining every
+	// settled bubble still leaves the fleet over MemBudget, bubbles inside their
+	// grace window page out too. The budget is never exceeded to honour it.
+	//
+	// BUBBLES_PAGING_GRACE overrides it; 0 removes the floor. An operator who
+	// raises BUBBLES_CACHE_TTL should raise this alongside it — the floor only
+	// has to outlast a sweep or two, so it is deliberately NOT derived from
+	// CacheTTL, but leaving it at 5m under a 1h cache simply makes it weaker,
+	// never a budget risk.
+	k.Grace = 5 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("BUBBLES_PAGING_GRACE")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			fmt.Fprintf(os.Stderr, "bubbles: ignoring BUBBLES_PAGING_GRACE=%q (%s); using %s\n", v, durErr(err), k.Grace)
+		} else {
+			k.Grace = d
+		}
+	}
 	k.TypingWindow = 10 * time.Second                 // hold a focused bubble's messages while you're typing; deliver once you pause this long
 	inheritedMCP := resolveMCPServers(mcpAllowList()) // curated operator servers bubbles inherit (e.g. playwright)
 	lr.MCPConfig = func(a addr.Address) string {
@@ -1001,4 +1057,15 @@ func defaultWorkspace() string {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "bubbles:", err)
 	os.Exit(1)
+}
+
+// durErr explains why a duration env var was rejected. Both callers reject on
+// `err != nil || d < 0`, so on the negative-but-parseable branch err is nil and
+// printing it verbatim yields "%!v(<nil>)" — useless to the operator staring at
+// the line that tells them their setting was ignored.
+func durErr(err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return "must not be negative"
 }

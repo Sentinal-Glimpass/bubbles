@@ -27,9 +27,7 @@ func TestMutedUrgentMessageDoesNotWakeColdBubble(t *testing.T) {
 	// Open the window with one delivery, then let it go cold.
 	k.WebhookDeliver(a, "pump", "opt_out", "e1", true)
 	_ = k.runner.Kill(a)
-	k.smu.Lock()
-	delete(k.sessions, a)
-	k.smu.Unlock()
+	k.sessions.Delete(a)
 
 	// Second event inside the window must not page the bubble back in.
 	k.WebhookDeliver(a, "pump", "opt_out", "e2", true)
@@ -183,9 +181,7 @@ func TestDrainCoalescedNeverWakesColdBubble(t *testing.T) {
 	k.Send(addr.Root, a, "follow", "batched", 0, false)
 
 	_ = k.runner.Kill(a)
-	k.smu.Lock()
-	delete(k.sessions, a)
-	k.smu.Unlock()
+	k.sessions.Delete(a)
 
 	time.Sleep(notify.CoalesceWindow + 200*time.Millisecond)
 	k.DrainCoalesced()
@@ -389,9 +385,7 @@ func TestSweepDoesNotWakeForMutedOnlyBacklog(t *testing.T) {
 	// swallowed. Then the bubble goes cold.
 	k.WebhookDeliver(a, "pump", "noise", "e0", true)
 	_ = k.runner.Kill(a)
-	k.smu.Lock()
-	delete(k.sessions, a)
-	k.smu.Unlock()
+	k.sessions.Delete(a)
 	for i := 1; i < 4; i++ {
 		k.WebhookDeliver(a, "pump", "noise", fmt.Sprintf("e%d", i), true)
 	}
