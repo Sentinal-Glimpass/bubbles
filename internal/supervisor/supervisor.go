@@ -100,13 +100,32 @@ func (r *Registry) Register(c Check) error {
 	return nil
 }
 
-// RunDue runs every check whose interval has elapsed as of at, in name order.
+// RunDue runs every check whose interval has elapsed as of at, each in its own
+// goroutine, and returns once they have all finished.
 //
 // The registry lock is released before any check's Fn is invoked: checks do
 // I/O and must never run under the lock. Each check runs under its own
 // recover, so a panic in one check is recorded and the remaining due checks
 // still run. RunDue itself never panics and never returns an error — the
 // report is the recorded Status.
+//
+// The batch runs CONCURRENTLY, and that is load-bearing, not an optimisation.
+// claimDue marks the whole due batch running before any of it executes, so if
+// the batch ran sequentially a check that blocked indefinitely would mean every
+// check behind it never reached runOne — record would never fire and their
+// running flag would stay set for the life of the process, silently and
+// PERMANENTLY removing them from the schedule while Snapshot still showed them
+// merely "running". Running each in its own goroutine means a hung check holds
+// only its own goroutine and only its own flag: its batch-mates finish and
+// clear theirs, and the next call re-claims everything except the one still in
+// flight. There is deliberately no per-check timeout — a check that
+// legitimately outruns its interval must be allowed to finish, and the running
+// flag already prevents pile-up.
+//
+// RunDue still waits for the batch, so it stays synchronous and deterministic
+// for callers that assert on Status immediately afterwards. A caller that must
+// not block behind a wedged check (the app's ticker driver) runs RunDue itself
+// in a goroutine per tick.
 //
 // RunDue is a no-op if ctx is already done, so a check is not re-run after
 // cancellation. A nil ctx is a caller bug, not a runtime condition, and panics
@@ -119,10 +138,16 @@ func (r *Registry) RunDue(ctx context.Context, at time.Time) {
 	if ctx.Err() != nil {
 		return
 	}
+	var wg sync.WaitGroup
 	for _, e := range r.claimDue(at) {
-		err, panicked := runOne(ctx, e.check)
-		r.record(e, at, err, panicked)
+		wg.Add(1)
+		go func(e *entry) {
+			defer wg.Done()
+			err, panicked := runOne(ctx, e.check)
+			r.record(e, at, err, panicked)
+		}(e)
 	}
+	wg.Wait()
 }
 
 // claimDue returns the due, not-currently-running checks in name order and

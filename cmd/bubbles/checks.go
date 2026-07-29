@@ -141,18 +141,20 @@ const supervisorTick = 1 * time.Second
 
 // runChecks drives the registry until ctx is cancelled.
 //
-// Each tick's sweep runs in ITS OWN goroutine, deliberately. RunDue runs due
-// checks sequentially, so if the driver called it inline a single check blocked
-// on I/O — a hung HTTP fetch, a stalled PTY — would hold up every other check
-// behind it indefinitely. Today each loop has its own goroutine and can only
-// delay itself; that property must survive the migration.
+// Each tick's sweep runs in ITS OWN goroutine, deliberately: RunDue waits for
+// the whole batch it claimed, and the driver must not stall behind a check
+// blocked on I/O — a hung HTTP fetch, a stalled PTY. Per-check isolation within
+// a batch is RunDue's job (it runs each claimed check in its own goroutine);
+// this goroutine is what keeps the TICKER itself free. Together they preserve
+// the property the old one-goroutine-per-loop code had: a wedged sweep delays
+// only itself.
 //
-// Spawning per tick is safe precisely because claimDue marks a check running
-// inside the same critical section in which it tests dueness: a check whose
-// previous run is still in flight is simply not claimed again, so a wedged
-// check cannot pile up, and the next tick's goroutine skips it and runs
-// everything else. That is also why there is no per-check timeout here — a
-// check that legitimately outruns its interval must be allowed to finish.
+// Spawning per tick is safe because claimDue marks a check running inside the
+// same critical section in which it tests dueness: a check whose previous run
+// is still in flight is simply not claimed again, so a wedged check cannot pile
+// up and the next tick runs everything else. That is also why there is no
+// per-check timeout here — a check that legitimately outruns its interval must
+// be allowed to finish.
 //
 // The driver itself cannot die: RunDue never panics (it recovers per check)
 // and never returns an error, and the goroutine holds no state to corrupt.

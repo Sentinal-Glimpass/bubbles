@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -398,5 +399,102 @@ func TestConcurrentRunDueDoesNotDoubleRun(t *testing.T) {
 	defer mu.Unlock()
 	if maxInFlight > 1 {
 		t.Errorf("same check ran %d times concurrently, want at most 1", maxInFlight)
+	}
+}
+
+// TestBlockingCheckDoesNotStrandItsBatch is the regression test for the failure
+// mode that made RunDue concurrent.
+//
+// claimDue marks the WHOLE due batch running before any of it executes. When
+// RunDue then ran the batch sequentially, a check that blocked forever meant
+// every later-sorted member of that batch never reached runOne, so record never
+// fired and their running flag stayed set permanently -- every future claimDue
+// skipped them, for the life of the process, while Snapshot still showed them
+// merely "running". In the real fleet that is one hung poller silently and
+// permanently killing held-message delivery, coalesced batches and every saver.
+//
+// The loop below mirrors the app's driver: one goroutine per tick. The victim's
+// run count must keep GROWING; "non-zero once" would not catch this.
+func TestBlockingCheckDoesNotStrandItsBatch(t *testing.T) {
+	r := New(fixed())
+	release := make(chan struct{})
+	defer close(release) // unblock the hung goroutines so the test leaks nothing
+	var victim atomic.Int64
+
+	// Sorts FIRST, so a sequential RunDue reaches it before the victim.
+	mustRegister(t, r, Check{Name: "a-hang", Every: time.Second, Fn: func(context.Context) error {
+		<-release
+		return nil
+	}})
+	mustRegister(t, r, Check{Name: "b-victim", Every: time.Second, Fn: func(context.Context) error {
+		victim.Add(1)
+		return nil
+	}})
+
+	var last int64
+	for tick := 1; tick <= 20; tick++ {
+		go r.RunDue(context.Background(), base.Add(time.Duration(tick)*time.Second))
+		deadline := time.Now().Add(2 * time.Second)
+		for victim.Load() <= last && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		got := victim.Load()
+		if got <= last {
+			t.Fatalf("b-victim ran %d times and stopped growing at tick %d: a blocking check permanently stranded its tick-batch", got, tick)
+		}
+		last = got
+	}
+}
+
+// TestHungCheckIsNotReclaimedWhileInFlight pins the other half of the contract:
+// making RunDue concurrent must NOT let a check that is still running be
+// started again by a later tick. The running flag is what prevents pile-up, and
+// it is also why no per-check timeout is needed.
+func TestHungCheckIsNotReclaimedWhileInFlight(t *testing.T) {
+	r := New(fixed())
+	release := make(chan struct{})
+	defer close(release)
+	var starts atomic.Int64
+	mustRegister(t, r, Check{Name: "hang", Every: time.Second, Fn: func(context.Context) error {
+		starts.Add(1)
+		<-release
+		return nil
+	}})
+
+	for tick := 1; tick <= 10; tick++ {
+		go r.RunDue(context.Background(), base.Add(time.Duration(tick)*time.Second))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for starts.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	// Give every other tick a generous chance to wrongly re-claim it.
+	time.Sleep(200 * time.Millisecond)
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("hung check was started %d times, want 1 -- an in-flight check must never be re-claimed", got)
+	}
+}
+
+// TestRunDueWaitsForEveryCheckItClaimed keeps RunDue synchronous: it returns
+// only once every check it claimed has finished, which is what lets the rest of
+// this file assert on statuses immediately after the call.
+func TestRunDueWaitsForEveryCheckItClaimed(t *testing.T) {
+	r := New(fixed())
+	var done atomic.Int64
+	for _, n := range []string{"one", "two", "three"} {
+		mustRegister(t, r, Check{Name: n, Every: time.Second, Fn: func(context.Context) error {
+			time.Sleep(10 * time.Millisecond)
+			done.Add(1)
+			return nil
+		}})
+	}
+	r.RunDue(context.Background(), base.Add(time.Second))
+	if got := done.Load(); got != 3 {
+		t.Fatalf("RunDue returned with %d/3 checks finished: it must wait for the batch", got)
+	}
+	for _, s := range r.Snapshot() {
+		if s.Runs != 1 {
+			t.Errorf("check %q Runs = %d, want 1", s.Name, s.Runs)
+		}
 	}
 }
