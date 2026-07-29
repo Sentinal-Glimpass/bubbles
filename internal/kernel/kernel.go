@@ -1216,6 +1216,18 @@ func (k *Kernel) UnmuteBy(by addr.Address, id string) error {
 	return fmt.Errorf("kernel: no mute rule %s", id)
 }
 
+// ReapExpiredMutes removes every bubble's TTL-expired mute rules, returning how
+// many it dropped. It exists so the periodic sweep never has to read the clock
+// itself (and so a test can drive it through the kernel's injectable clock).
+//
+// It is pure bookkeeping: expired rules already stopped matching in
+// notify.Compiled.Match, so no message's fate changes. It takes only the
+// registry lock, briefly, and touches no session — no PTY write, no launch, no
+// EnsureAlive.
+func (k *Kernel) ReapExpiredMutes() int {
+	return k.Reg.ReapExpiredMuteRules(k.clockNow())
+}
+
 // MutesFor renders `by`'s own mute rules for display.
 func (k *Kernel) MutesFor(by addr.Address) []string {
 	rules := k.Reg.MuteRules(by)

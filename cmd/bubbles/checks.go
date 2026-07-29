@@ -131,6 +131,28 @@ func backgroundChecks(d checkDeps) []bgCheck {
 		// because deleting another live daemon's config would be an outage in a
 		// fleet we do not own.
 		{Check: supervisor.Check{Name: "temp-config-sweep", Every: 10 * time.Minute, Fn: plain(d.tempSweep)}, phase: phaseBoot},
+		// periodic reaps. Both are pure memory/quota reclamation of state that is
+		// ALREADY inert: neither changes what any bubble sees, neither wakes
+		// anything, and neither calls EnsureAlive. Their cadences are slow because
+		// nothing is incorrect while they wait — only wasteful.
+		//
+		// verifier-reap deletes verifier bubbles for tasks that already finished.
+		// The boot call (app.go) catches leftovers from a previous run; this
+		// catches the ones a LIVE run makes, which the boot-only call could not:
+		// Tasks.PurgeParticipant cancels a task when its assigner or worker bubble
+		// is deleted and leaves the verifier resident until restart. See
+		// ReapOrphanVerifiers' comment for why it is safe on this goroutine.
+		{Check: supervisor.Check{Name: "verifier-reap", Every: 5 * time.Minute, Fn: plain(func() {
+			if n := k.ReapOrphanVerifiers(); n > 0 {
+				fmt.Fprintf(os.Stderr, "bubbles: reaped %d orphaned task verifier(s)\n", n)
+			}
+		})}, phase: phaseAfterLoad},
+		// mute-reap drops TTL-expired mute rules. Expiry is enforced at match
+		// time (notify.Compiled.Match) and stays there, so behaviour is already
+		// correct today; what was missing is removal, so the stored rule set grew
+		// forever and notify.MaxRules counted rules that can never match again —
+		// a bubble whose quota was spent on expired rules could not add a new one.
+		{Check: supervisor.Check{Name: "mute-reap", Every: 10 * time.Minute, Fn: plain(func() { k.ReapExpiredMutes() })}, phase: phaseAfterLoad},
 		// fleet-health manager: background upkeep (transcript trimming and the
 		// context pump today). Off the request path, on its own slow cadence.
 		{Check: supervisor.Check{Name: "health-sweep", Every: 2 * time.Minute, Fn: plain(d.health.Sweep)}, phase: phaseAfterLoad},

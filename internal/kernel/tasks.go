@@ -18,7 +18,41 @@ import (
 // ReapOrphanVerifiers deletes verifier bubbles for tasks that are already
 // done/cancelled — they're leftovers from a daemon restart that happened before
 // the old delayed-reap fired, and they show as "deleted chat" ghosts in the TUI.
-// Call once after boot (loadTasks + restoreFleet).
+//
+// Called once after boot (loadTasks + restoreFleet) AND periodically thereafter
+// (cmd/bubbles/checks.go, "verifier-reap"), because boot is not the only source
+// of orphans: Store.PurgeParticipant cancels a task when its assigner or worker
+// bubble is deleted, and that path never deletes the task's verifier. Left to
+// the next restart, every such verifier stays resident holding RAM.
+//
+// SAFE TO CALL REPEATEDLY, ON A SWEEP GOROUTINE:
+//
+//   - Idempotent. The Reg.Get guard means a second pass over unchanged state
+//     deletes nothing and returns 0; the count is deletions performed by THIS
+//     call, so a caller logging on n > 0 speaks only of genuinely new orphans.
+//
+//   - Locking. It holds no lock of its own. Tasks.All() returns VALUE copies
+//     under the task-store lock and releases it before the loop, so nothing is
+//     held across DeleteBubble — which kills a session, exactly the unbounded
+//     operation internal/sessions forbids holding a mutex across. It never
+//     touches notifyMu or Policy.mu, so it cannot invert the
+//     notifyMu -> Policy.mu -> registry.mu order.
+//
+//   - It cannot race a task completing mid-reap. Both states it acts on are
+//     TERMINAL: Done is set only by completeTask, Cancelled only by CancelTask
+//     and PurgeParticipant, and every transition INTO Open or Checking
+//     (SubmitTask, Reject) requires a non-terminal current state. So a task
+//     observed Done/Cancelled in the snapshot can never be handed a verdict
+//     afterwards, and SetVerifier (SubmitTask, first submission only) can never
+//     fire for it — the verifier being deleted is provably finished. A task that
+//     completes AFTER the snapshot is simply missed and reaped next tick.
+//     Addresses are never recycled either (Registry.Add only ever increments
+//     nextSeq), so a stale Verifier address cannot resolve to some live
+//     unrelated bubble.
+//
+//   - It never calls EnsureAlive and never wakes a cold bubble; DeleteBubble
+//     only kills. It also touches no inbox, so no mail is discarded and
+//     Store.UnreadCount stays truthful.
 func (k *Kernel) ReapOrphanVerifiers() int {
 	n := 0
 	for _, t := range k.Tasks.All() {
