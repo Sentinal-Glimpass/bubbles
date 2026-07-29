@@ -50,6 +50,8 @@ type checkDeps struct {
 	health    *HealthManager
 	inboxPoll time.Duration // messagePollMinutes() minutes, resolved by the caller
 
+	stuck *stuckTracker // hot-but-wedged detector; keeps the previous sample set
+
 	sampler       func() // resource sampler -> TUI usage + fleet-health panel
 	claudeUsage   func() // account /usage -> TUI (no-op when not logged in)
 	headroomStats func() // compression savings -> TUI (no-op unless --headroom)
@@ -105,6 +107,10 @@ func backgroundChecks(d checkDeps) []bgCheck {
 		{Check: supervisor.Check{Name: "sampler", Every: 2 * time.Second, Fn: plain(d.sampler)}, phase: phaseBoot},
 		{Check: supervisor.Check{Name: "claude-usage", Every: 1 * time.Second, Fn: plain(d.claudeUsage)}, phase: phaseBoot},
 		{Check: supervisor.Check{Name: "headroom-stats", Every: 3 * time.Second, Fn: plain(d.headroomStats)}, phase: phaseBoot},
+		// stuck-bubble scan: sample the already-hot bubbles and record which look
+		// hot-but-wedged (unread mail, no new output). Observation only — it
+		// never wakes, nudges or kills anything; the list feeds the TUI panel.
+		{Check: supervisor.Check{Name: "stuck-scan", Every: stuckEvery, Fn: plain(d.stuck.Step)}, phase: phaseBoot},
 		// fleet-health manager: background upkeep (transcript trimming and the
 		// context pump today). Off the request path, on its own slow cadence.
 		{Check: supervisor.Check{Name: "health-sweep", Every: 2 * time.Minute, Fn: plain(d.health.Sweep)}, phase: phaseAfterLoad},

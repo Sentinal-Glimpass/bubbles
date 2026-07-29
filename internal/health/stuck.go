@@ -23,8 +23,11 @@ type Sample struct {
 	// RecentOutput is the session's whole capped scrollback ring, not a tail.
 	// It is compared, never parsed.
 	RecentOutput string
-	// UnreadMail is how many notifiable messages are waiting for this bubble —
-	// i.e. work it has been handed and has not consumed.
+	// UnreadMail is how many messages are waiting for this bubble that it has
+	// not consumed — work it has been handed and has not picked up. The caller
+	// decides how to count it (see kernel.StuckSamples, which uses unread
+	// rather than notifiable, because an inlined message is muted yet is
+	// exactly the kind of unconsumed work this detector cares about).
 	UnreadMail int
 	// Alive is whether the underlying process is still running.
 	Alive bool
@@ -52,7 +55,7 @@ type Config struct {
 // A bubble is reported only when ALL of the following hold:
 //
 //  1. it is Alive — a dead session is the relaunch path's business, not ours;
-//  2. it has pending notifiable mail — a quiet bubble with an empty inbox is
+//  2. it has pending unconsumed mail — a quiet bubble with an empty inbox is
 //     merely idle, which is EvictIdle's business, not ours;
 //  3. it appeared in the PREVIOUS sample set too — a single observation can
 //     never establish "unchanged";

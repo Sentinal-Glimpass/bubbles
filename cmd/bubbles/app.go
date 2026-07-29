@@ -203,6 +203,7 @@ func runApp() {
 		baseDir:       baseDir,
 		health:        NewHealthManager(k),
 		inboxPoll:     time.Duration(messagePollMinutes()) * time.Minute,
+		stuck:         newStuckTracker(k), // hot-but-wedged detector (reports only; Task 7 renders it)
 		sampler:       samplerStep(k, &curProg),
 		claudeUsage:   claudeUsageStep(&curProg),   // account /usage in the dashboard, polled directly (no claude session)
 		headroomStats: headroomStatsStep(&curProg), // token-compression savings in the dashboard (no-op unless --headroom)

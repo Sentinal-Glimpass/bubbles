@@ -17,6 +17,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/caps"
 	"github.com/Sentinal-Glimpass/bubbles/internal/costmeter"
 	"github.com/Sentinal-Glimpass/bubbles/internal/groups"
+	"github.com/Sentinal-Glimpass/bubbles/internal/health"
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
 	"github.com/Sentinal-Glimpass/bubbles/internal/paging"
@@ -441,6 +442,41 @@ func (k *Kernel) SampleUsage() []Usage {
 			name = b.Label()
 		}
 		out = append(out, Usage{Addr: e.Addr, Name: name, Mem: e.Session.MemBytes(), CPU: e.Session.CPUTime()})
+	}
+	return out
+}
+
+// StuckSamples snapshots every ALREADY-HOT worker session for the stuck-bubble
+// detector (internal/health). It is strictly an observation: it walks the live
+// session table, so a cold bubble is simply absent — nothing here launches,
+// resumes or writes to anything, and it must stay that way. Waking a bubble to
+// ask whether it is wedged would cost the prompt-cache rewarm the detector
+// exists to avoid.
+//
+// LastActivity/RecentOutput are read outside the session-table lock, exactly as
+// SampleUsage does, because they take the session's own mutex.
+func (k *Kernel) StuckSamples() []health.Sample {
+	live := k.sessions.Live()
+	out := make([]health.Sample, 0, len(live))
+	for _, e := range live {
+		// UnreadCount, not NotifiableCount. "Muted" means "never spend a notice
+		// on this" and is set both by a mute rule AND by inline delivery — and
+		// an inlined message is precisely work that was handed straight to the
+		// bubble. Counting only notifiable mail would therefore blind the
+		// detector to the commonest wedge: a bubble handed a body it never acted
+		// on. Read state is set only by Take, i.e. by the bubble's own inbox()
+		// call, so UnreadCount is exactly "work handed over and not consumed".
+		mail := 0
+		if k.Store != nil {
+			mail = k.Store.UnreadCount(e.Addr)
+		}
+		out = append(out, health.Sample{
+			Addr:         e.Addr,
+			LastActivity: e.Session.LastActivity(),
+			RecentOutput: e.Session.RecentOutput(),
+			UnreadMail:   mail,
+			Alive:        e.Session.Alive(),
+		})
 	}
 	return out
 }
