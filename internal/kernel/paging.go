@@ -4,7 +4,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/costmeter"
 	"github.com/Sentinal-Glimpass/bubbles/internal/paging"
-	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
+	"github.com/Sentinal-Glimpass/bubbles/internal/sessions"
 )
 
 // This file holds the kernel side of paging: it turns the live session table
@@ -12,29 +12,11 @@ import (
 // policy owns WHO is evicted and in what order; the kernel owns the process
 // table, the locking, and the killing.
 
-// liveSession is one resident session, captured under smu so nothing else is
-// done while the table is held.
-type liveSession struct {
-	a addr.Address
-	s runner.Session
-}
-
 // gatherLive snapshots every live non-root worker session. Only the map read
-// happens under smu: measuring a session (MemBytes shells out to the OS) and
-// consulting the registry both take their own locks and must never nest inside
-// the session lock.
-func (k *Kernel) gatherLive() []liveSession {
-	k.smu.Lock()
-	defer k.smu.Unlock()
-	live := make([]liveSession, 0, len(k.sessions))
-	for a, s := range k.sessions {
-		if a == addr.Root || s == nil || !s.Alive() {
-			continue
-		}
-		live = append(live, liveSession{a, s})
-	}
-	return live
-}
+// happens under the table lock: measuring a session (MemBytes shells out to the
+// OS) and consulting the registry both take their own locks and must never nest
+// inside the session lock.
+func (k *Kernel) gatherLive() []sessions.Live { return k.sessions.Live() }
 
 // candidates measures the gathered sessions and builds the policy's view of
 // them, returning the candidates and the resident total OF THE EVICTABLE ONES.
@@ -51,7 +33,7 @@ func (k *Kernel) gatherLive() []liveSession {
 // each sweep. A bubble it has not reached yet is left at 0 on purpose: the
 // policy reads 0 as "unknown" and scores it as the average of the known, which
 // neither shields an unmeasured bubble nor makes every fresh one the first to die.
-func (k *Kernel) candidates(live []liveSession) ([]paging.Candidate, uint64) {
+func (k *Kernel) candidates(live []sessions.Live) ([]paging.Candidate, uint64) {
 	var tokens map[addr.Address]costmeter.Counters
 	if k.Cost != nil {
 		tokens = k.Cost.Snapshot()
@@ -60,17 +42,17 @@ func (k *Kernel) candidates(live []liveSession) ([]paging.Candidate, uint64) {
 	out := make([]paging.Candidate, 0, len(live))
 	var total uint64
 	for _, e := range live {
-		mem := e.s.MemBytes()
-		idle := now.Sub(e.s.LastActivity())
+		mem := e.Session.MemBytes()
+		idle := now.Sub(e.Session.LastActivity())
 		if idle < 0 {
 			idle = 0 // a clock skew must not read as a maximally warm cache
 		}
 		c := paging.Candidate{
-			Addr:          e.a,
+			Addr:          e.Addr,
 			MemBytes:      mem,
-			ContextTokens: tokens[e.a].ContextTokens,
+			ContextTokens: tokens[e.Addr].ContextTokens,
 			IdleFor:       idle,
-			AlwaysOn:      k.isAlwaysOn(e.a),
+			AlwaysOn:      k.isAlwaysOn(e.Addr),
 		}
 		if !c.AlwaysOn {
 			total += mem
@@ -80,19 +62,15 @@ func (k *Kernel) candidates(live []liveSession) ([]paging.Candidate, uint64) {
 	return out, total
 }
 
-// pageOut drops each victim from the session table (under smu) and then kills
-// its process (outside it — a Kill can block, and no lock is ever held across
-// one). Every page-out is metered: the whole point of a paging policy change is
+// pageOut drops each victim from the session table (under the table lock) and
+// then kills its process (outside it — a Kill can block, and no lock is ever
+// held across one). Every page-out is metered: the whole point of a paging policy change is
 // that evictions and rewarms can be compared before and after.
 func (k *Kernel) pageOut(victims []addr.Address) {
 	if len(victims) == 0 {
 		return
 	}
-	k.smu.Lock()
-	for _, v := range victims {
-		delete(k.sessions, v)
-	}
-	k.smu.Unlock()
+	k.sessions.DeleteAll(victims)
 	for _, v := range victims {
 		_ = k.runner.Kill(v) // page out; registry + session id persist -> resumes on use
 		if k.Cost != nil {

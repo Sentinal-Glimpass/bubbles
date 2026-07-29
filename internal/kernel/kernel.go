@@ -23,6 +23,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
+	"github.com/Sentinal-Glimpass/bubbles/internal/sessions"
 	"github.com/Sentinal-Glimpass/bubbles/internal/tasks"
 )
 
@@ -106,9 +107,13 @@ type Kernel struct {
 	// pre-Phase-3 behaviour.
 	CacheTTL time.Duration
 
-	runner   runner.Runner
-	smu      sync.Mutex
-	sessions map[addr.Address]runner.Session
+	runner runner.Runner
+
+	// sessions is the live session table (internal/sessions): which bubbles
+	// currently have a running process. The kernel keeps the orchestration —
+	// launching, killing, measuring — and delegates the table itself, so no lock
+	// is ever held across a PTY write or a MemBytes probe.
+	sessions *sessions.Table
 
 	// TypingWindow is how long after a keystroke the operator counts as "actively
 	// typing" in the focused bubble (messages held so they don't submit a
@@ -254,7 +259,7 @@ func New(r runner.Runner) *Kernel {
 		Tasks:         tasks.New(),
 		RelaunchProbe: 800 * time.Millisecond,
 		runner:        r,
-		sessions:      map[addr.Address]runner.Session{},
+		sessions:      sessions.New(),
 		notified:      map[addr.Address]int{},
 		lastNudge:     map[addr.Address]time.Time{},
 		Cost:          costmeter.New(),
@@ -267,10 +272,7 @@ func New(r runner.Runner) *Kernel {
 }
 
 // IsHot reports whether a has a live (resident) session.
-func (k *Kernel) IsHot(a addr.Address) bool {
-	s := k.session(a)
-	return s != nil && s.Alive()
-}
+func (k *Kernel) IsHot(a addr.Address) bool { return k.sessions.IsHot(a) }
 
 // EnforceBudget pages out worker sessions — the ones cheapest to rewarm, which
 // under CacheTTL == 0 is plain coldest-first LRU — until the sum
@@ -302,9 +304,7 @@ func (k *Kernel) RelaunchSession(a addr.Address) {
 	if a.IsRoot() || !k.IsHot(a) {
 		return
 	}
-	k.smu.Lock()
-	delete(k.sessions, a)
-	k.smu.Unlock()
+	k.sessions.Delete(a)
 	_ = k.runner.Kill(a)
 	// NOT metered as a rewarm. The cache really is discarded here, but this
 	// bounce is triggered by an operator editing a model/capability — its rate
@@ -327,10 +327,7 @@ func (k *Kernel) SetEnabled(a addr.Address, enabled bool) {
 	}
 	k.Reg.SetDisabled(a, !enabled)
 	if !enabled { // stop it now
-		k.smu.Lock()
-		s := k.sessions[a]
-		delete(k.sessions, a)
-		k.smu.Unlock()
+		s := k.sessions.Take(a)
 		if s != nil {
 			_ = s.Close()
 		}
@@ -387,27 +384,14 @@ type Usage struct {
 // excluded). CPU is cumulative; the caller diffs successive samples over wall
 // time to get a percentage. Measuring is done outside the session lock.
 func (k *Kernel) SampleUsage() []Usage {
-	k.smu.Lock()
-	type ent struct {
-		a addr.Address
-		s runner.Session
-	}
-	var live []ent
-	for a, s := range k.sessions {
-		if a == addr.Root || s == nil || !s.Alive() {
-			continue
-		}
-		live = append(live, ent{a, s})
-	}
-	k.smu.Unlock()
-
+	live := k.sessions.Live()
 	out := make([]Usage, 0, len(live))
 	for _, e := range live {
-		name := e.a.String()
-		if b, ok := k.Reg.Get(e.a); ok {
+		name := e.Addr.String()
+		if b, ok := k.Reg.Get(e.Addr); ok {
 			name = b.Label()
 		}
-		out = append(out, Usage{Addr: e.a, Name: name, Mem: e.s.MemBytes(), CPU: e.s.CPUTime()})
+		out = append(out, Usage{Addr: e.Addr, Name: name, Mem: e.Session.MemBytes(), CPU: e.Session.CPUTime()})
 	}
 	return out
 }
@@ -415,17 +399,9 @@ func (k *Kernel) SampleUsage() []Usage {
 // clockNow returns the wall clock (indirected so tests could stub it if needed).
 func (k *Kernel) clockNow() time.Time { return time.Now() }
 
-func (k *Kernel) setSession(a addr.Address, s runner.Session) {
-	k.smu.Lock()
-	k.sessions[a] = s
-	k.smu.Unlock()
-}
+func (k *Kernel) setSession(a addr.Address, s runner.Session) { k.sessions.Set(a, s) }
 
-func (k *Kernel) session(a addr.Address) runner.Session {
-	k.smu.Lock()
-	defer k.smu.Unlock()
-	return k.sessions[a]
-}
+func (k *Kernel) session(a addr.Address) runner.Session { return k.sessions.Get(a) }
 
 // Send files a message in the recipient's inbox. The recipient is then notified
 // without interruption: a short "you have mail" line is queued into its session
@@ -1326,9 +1302,7 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 	for _, v := range victims {
 		_ = k.runner.Kill(v)
 		k.Reg.Remove(v)
-		k.smu.Lock()
-		delete(k.sessions, v)
-		k.smu.Unlock()
+		k.sessions.Delete(v)
 		k.Groups.PurgeMember(v)
 		k.Caps.Purge(v)             // drop it from EVERY bubble's contacts, so no ghost lingers
 		k.Sched.PurgeBubble(v)      // drop any wake schedules for/by it
@@ -1395,9 +1369,7 @@ func (k *Kernel) DeleteGroup(name string, deleteMembers bool) {
 	if ok && g.Session != "" {
 		_ = k.runner.Kill(g.Session)
 		k.Reg.Remove(g.Session)
-		k.smu.Lock()
-		delete(k.sessions, g.Session)
-		k.smu.Unlock()
+		k.sessions.Delete(g.Session)
 	}
 	k.Groups.Delete(name)
 }
