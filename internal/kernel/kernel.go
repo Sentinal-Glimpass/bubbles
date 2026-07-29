@@ -1273,9 +1273,14 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 		return "", err
 	}
 	b := k.Reg.Add(parent, persona, dir)
-	b.Name = opts.Name
-	b.Model = opts.Model
-	b.Goal = opts.Goal
+	// Through the mutators, not the returned pointer: Add has ALREADY published
+	// the bubble into the registry map, so a concurrent All()/Children() sweep
+	// (the persist loop, the dashboard render) can be walking it while these
+	// three fields are set. Writing them raw is a data race on a bubble that is
+	// already visible to the fleet.
+	k.Reg.SetName(b.Addr, opts.Name)
+	k.Reg.SetModel(b.Addr, opts.Model)
+	k.Reg.SetGoal(b.Addr, opts.Goal)
 	// Lazy launch: NO session id and NO process yet. The bubble is a cold record
 	// (0 RAM) until first used — a dive, a message, or a loop trigger pages it in
 	// via EnsureAlive. So you can spawn hundreds and only the touched ones run.
@@ -1472,12 +1477,16 @@ func (k *Kernel) StartRoot(dir string) error {
 	if k.session(addr.Root) != nil {
 		return nil
 	}
-	b, ok := k.Reg.Get(addr.Root)
-	if !ok {
+	if _, ok := k.Reg.Get(addr.Root); !ok {
 		return nil
 	}
-	if b.Dir == "" {
-		b.Dir = dir
+	// One read into a local, then the local is what Launch gets: re-reading Dir
+	// after setting it could hand the runner a directory another writer replaced
+	// in between.
+	rootDir, _ := k.Reg.Dir(addr.Root)
+	if rootDir == "" {
+		rootDir = dir
+		k.Reg.SetDir(addr.Root, dir)
 	}
 	// One read into a local, as in ensureAlive: the resume flag and the id handed
 	// to Launch must describe the same conversation.
@@ -1493,7 +1502,7 @@ func (k *Kernel) StartRoot(dir string) error {
 		sid = newSessionID()
 		k.Reg.SetSessionID(addr.Root, sid)
 	}
-	sess, err := k.runner.Launch(addr.Root, b.Dir, runner.SpawnOpts{Persona: "root", SessionID: sid, Resume: resume})
+	sess, err := k.runner.Launch(addr.Root, rootDir, runner.SpawnOpts{Persona: "root", SessionID: sid, Resume: resume})
 	if err != nil {
 		return err
 	}

@@ -163,3 +163,123 @@ func TestSetSessionIDDoesNotBumpVersion(t *testing.T) {
 		t.Fatal("SessionID reported a missing bubble as present")
 	}
 }
+
+// TestBubbleFieldWritesAreLocked covers the rest of the same defect: fields
+// written through a registry-returned *Bubble rather than through a mutator.
+//
+// Two writers that must not collide:
+//   - SpawnUnder sets Name/Model/Goal on a bubble Add has ALREADY published into
+//     the map, so it races any concurrent mutator on that bubble.
+//   - StartRoot sets root's Dir, racing any concurrent SetDir.
+//
+// The reader side deliberately uses only LOCKED accessors (All/Children for the
+// map, then the Set*/Dir/SessionID accessors), never a deref of a returned
+// pointer -- unlocked reads through Get are a separate, known issue that needs
+// Registry.Get to stop handing out raw pointers.
+func TestBubbleFieldWritesAreLocked(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	dir := t.TempDir()
+
+	var wg sync.WaitGroup
+	spawned := make(chan struct{})
+
+	wg.Add(1)
+	go func() { // A: spawns, i.e. Name/Model/Goal writes on a published bubble
+		defer wg.Done()
+		defer close(spawned)
+		for i := 0; i < 200; i++ {
+			if _, err := k.SpawnUnder(addr.Root, addr.Root, "worker", dir,
+				runner.SpawnOpts{Name: "n", Model: "m", Goal: "g"}); err != nil {
+				return
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() { // B: locked mutators over every child the spawner has published
+		defer wg.Done()
+		for {
+			select {
+			case <-spawned:
+				return
+			default:
+			}
+			for _, b := range k.Reg.Children(addr.Root) {
+				k.Reg.SetName(b.Addr, "x")
+				k.Reg.SetModel(b.Addr, "y")
+				k.Reg.SetGoal(b.Addr, "z")
+				k.Reg.SetDir(b.Addr, dir)
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() { // C: StartRoot's Dir write
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			k.sessions.Delete(addr.Root) // page root out so StartRoot runs again
+			k.Reg.SetDir(addr.Root, "")  // ...and takes the "Dir unset" branch
+			_ = k.StartRoot(dir)
+		}
+	}()
+
+	wg.Add(1)
+	go func() { // D: a concurrent SetDir on root, the partner for C's write
+		defer wg.Done()
+		for {
+			select {
+			case <-spawned:
+				return
+			default:
+			}
+			k.Reg.SetDir(addr.Root, dir)
+		}
+	}()
+	wg.Wait()
+
+	// Spawned bubbles survived intact and are reachable through locked reads.
+	if n := len(k.Reg.Children(addr.Root)); n == 0 {
+		t.Fatal("no children survived the concurrent spawn")
+	}
+}
+
+// TestSpawnFieldsGoThroughMutators pins that a spawn's Name/Model/Goal actually
+// land -- routing them through the mutators must not silently drop them.
+func TestSpawnFieldsGoThroughMutators(t *testing.T) {
+	k := New(runner.NewFake())
+	a, err := k.SpawnUnder(addr.Root, addr.Root, "worker", "/tmp/w",
+		runner.SpawnOpts{Name: "scout", Model: "opus", Goal: "find bugs"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	b, ok := k.Reg.Get(a)
+	if !ok {
+		t.Fatal("spawned bubble missing")
+	}
+	if b.Name != "scout" || b.Model != "opus" || b.Goal != "find bugs" || b.Persona != "worker" {
+		t.Fatalf("spawn fields = %+v", b)
+	}
+	if d, _ := k.Reg.Dir(a); d != "/tmp/w" {
+		t.Fatalf("dir = %q want /tmp/w", d)
+	}
+}
+
+// TestSetDirBumpsVersion is the counterpart to TestSetSessionIDDoesNotBumpVersion:
+// Dir is durable operator-set state, so a change must re-save fleet.json.
+func TestSetDirBumpsVersion(t *testing.T) {
+	r := registry.New()
+	b := r.Add(addr.Root, "worker", "/tmp/w")
+	v0 := r.Version()
+	r.SetDir(b.Addr, "/tmp/other")
+	if r.Version() == v0 {
+		t.Fatal("SetDir must bump version so fleet.json is re-saved")
+	}
+	if d, ok := r.Dir(b.Addr); !ok || d != "/tmp/other" {
+		t.Fatalf("Dir = %q ok=%v want /tmp/other", d, ok)
+	}
+	if _, ok := r.Dir(addr.Address("9.9")); ok {
+		t.Fatal("Dir reported a missing bubble as present")
+	}
+}

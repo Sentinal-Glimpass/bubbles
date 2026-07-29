@@ -257,6 +257,36 @@ func (r *Registry) ByControlToken(tok string) (*Bubble, bool) {
 	return nil, false
 }
 
+// SetDir changes a bubble's working directory (used on its next launch).
+//
+// Unlike SetSessionID this DOES bump version, and the difference is deliberate.
+// Dir is durable fleet state the operator set: if it changes, fleet.json is
+// stale until it is re-saved. SessionID is refreshed by SyncSessionIDs on the
+// way INTO a save, so bumping there would mark the fleet dirty as a side effect
+// of saving it. Dir is never written from the persist path, so it has no such
+// feedback loop.
+func (r *Registry) SetDir(a addr.Address, dir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		b.Dir = dir
+		r.version++
+	}
+}
+
+// Dir returns a bubble's working directory and whether the bubble exists.
+// Callers that both test and use the directory must read it ONCE into a local,
+// for the same reason as SessionID below: two reads can straddle a write and
+// launch a bubble in a directory the registry no longer records.
+func (r *Registry) Dir(a addr.Address) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b, ok := r.bubbles[a]; ok {
+		return b.Dir, true
+	}
+	return "", false
+}
+
 // SetSessionID records the claude session id a bubble should resume from. This
 // field is written from the kernel's relaunch path (ensureAlive) and from the
 // pre-persist sweep (SyncSessionIDs), which can run concurrently for the same
