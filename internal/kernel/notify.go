@@ -77,6 +77,98 @@ func (k *Kernel) flushHeldBacklog(a addr.Address) {
 	}
 }
 
+// SystemNotice types a kernel-originated instruction into a's live session --
+// a direct terminal line addressed to the bubble itself, NOT inbox mail. It
+// reports whether the notice is on its way.
+//
+// Filing this as a message would be the wrong shape twice over: the recipient
+// would have to spend an inbox() tool call to read a one-line instruction, and
+// the instruction would be queued behind (and deduped against) its actual mail
+// by INV-2. The content is not correspondence; it is the kernel telling a
+// bubble something about itself.
+//
+// It is a method rather than a raw s.Write because every constraint that makes
+// notifications affordable lives on this path and nowhere else:
+//
+//   - INV-1, so a caller on a ticker can never flood a bubble no matter how
+//     badly it throttles itself;
+//   - FNoticesWritten, recorded by writeNotice only after a write succeeds, so
+//     the cost is visible in the same ledger as every other notice;
+//   - the operator typing-hold, so a line is never submitted into a half-typed
+//     prompt in the bubble the operator is currently dived into;
+//   - InputReady/deliverWhenReadyThen, so a session still on the resume menu
+//     doesn't swallow the line unsubmitted.
+//
+// It uses k.session, NEVER EnsureAlive: a cold bubble is left cold. Waking one
+// to hand it a system instruction pays the full prompt-cache rewarm, which for
+// the context pump in particular would cost more than the problem it reports.
+func (k *Kernel) SystemNotice(a addr.Address, text string) bool {
+	if a == "" || a.IsRoot() || text == "" {
+		return false
+	}
+	if k.isFocused(a) && k.typingActive() {
+		return false // don't submit the operator's half-typed line
+	}
+	s := k.session(a)
+	if s == nil || !s.Alive() {
+		return false // cold or dead: not worth a rewarm, and nothing to write to
+	}
+	d := k.Notify.System(a, text, time.Now())
+	if d.Action == notify.Suppress {
+		// A suppression no counter records is indistinguishable from a lost
+		// write, so the ceiling's denial is metered like every other one.
+		if d.Capped {
+			k.Cost.Add(a, costmeter.FNoticesCapped, 1)
+		}
+		return false
+	}
+	// No announced level is claimed and none is unclaimed on failure: this
+	// decision carries Announce 0 because it announces no backlog.
+	return k.writeNotice(a, s, d)
+}
+
+// SystemCompact is the AUTOMATED compaction path: it types `/compact` into a's
+// live session on the pump's behalf, under the same input-safety discipline as
+// SystemNotice. It reports whether the command was actually written.
+//
+// It exists as a sibling of SystemNotice rather than as a flag on Compact
+// because the two callers want opposite things and the guards are exactly the
+// difference:
+//
+//   - the operator typing-hold, so a 2-minute background ticker can never
+//     submit `/compact` into the half-typed prompt of the bubble the operator
+//     is dived into. Compact's own callers are interactive (the operator's
+//     command, a bubble's compact() tool call); adding this check in there
+//     would turn a deliberate human request into a silent no-op;
+//   - InputReady, so a session still booting or sitting on the resume menu does
+//     not swallow the line unsubmitted.
+//
+// UNLIKE writeNotice it does NOT hand a not-yet-ready session's line to
+// deliverWhenReadyThen, and that is deliberate: this returns "written", not
+// "accepted for delivery", because the caller spends a 30-minute throttle
+// window on a true. A deferred write that later finds a dead session would burn
+// that window on a compaction that never happened. Returning false costs at
+// most one sweep (2 minutes) of delay, and the pump retries.
+//
+// It uses k.session, NEVER EnsureAlive: a cold bubble is left cold.
+func (k *Kernel) SystemCompact(a addr.Address, focus string) bool {
+	if a == "" || a.IsRoot() {
+		return false
+	}
+	if k.isFocused(a) && k.typingActive() {
+		return false // don't submit the operator's half-typed line
+	}
+	s := k.session(a)
+	if s == nil || !s.Alive() {
+		return false // cold or dead: never worth a rewarm to compact
+	}
+	if !s.InputReady() {
+		return false // still booting / resume menu: it would swallow the line
+	}
+	_, err := s.Write([]byte(compactCommand(focus))) // Write appends Enter
+	return err == nil
+}
+
 // decide runs the notification policy for a freshly-filed message, records the
 // announcement, and records the cost of whatever it decides. It returns the
 // decision, the announced level it replaced (so a delivery that turns out to
@@ -248,6 +340,14 @@ func (k *Kernel) writeNotice(to addr.Address, s runner.Session, d notify.Decisio
 		onWritten()
 		return true
 	}
+	// NOTE the strength of this `true`: it means "accepted for delivery", not
+	// "written". deliverWhenReadyThen can still time out or find a dead session
+	// and return without writing, in which case onWritten never runs. That is
+	// correct for the counters (FNoticesWritten records only real writes) but
+	// callers that treat a true return as proof of delivery are claiming more
+	// than this reports -- see the "claimed only on success" caveat on
+	// cmd/bubbles/contextpump.go's markPumped, whose throttle window can be
+	// spent on this branch for a notice that never landed.
 	go k.deliverWhenReadyThen(to, line, onWritten)
 	return true
 }

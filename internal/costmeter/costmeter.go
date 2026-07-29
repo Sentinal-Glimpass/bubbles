@@ -15,11 +15,16 @@ import (
 // callers don't need a separate method per counter.
 type Field int
 
-// The nine counters tracked per bubble. Written/Suppressed/Capped describe
+// The ten counters tracked per bubble. Written/Suppressed/Capped describe
 // notice production; Inline/ViaTool describe how a delivered notice reached the
 // model; TurnsTriggered counts turns a notice caused to run; Evictions/Rewarms
 // describe context-window churn; ContextTokens is a live gauge, not a running
-// total (see Set).
+// total (see Set); OversizedTranscripts counts REPORTS of a COLD bubble's
+// never-compacted transcript over the byte ceiling (see cmd/bubbles/health.go)
+// -- observability only, since that transcript is deliberately never
+// truncated. It is throttled with the warning it accompanies, so it counts
+// distinct reports rather than sweeps: a parked bubble must not read as an
+// incident count that climbs with the sweep cadence.
 const (
 	FNoticesWritten Field = iota
 	FNoticesSuppressed
@@ -30,20 +35,22 @@ const (
 	FEvictions
 	FRewarms
 	FContextTokens
+	FOversizedTranscripts
 )
 
 // Counters holds one bubble's cost/efficiency tally. All fields are int64 so
 // they persist and compare cleanly regardless of platform word size.
 type Counters struct {
-	NoticesWritten    int64
-	NoticesSuppressed int64
-	NoticesCapped     int64
-	DeliveriesInline  int64
-	DeliveriesViaTool int64
-	TurnsTriggered    int64
-	Evictions         int64
-	Rewarms           int64
-	ContextTokens     int64
+	NoticesWritten       int64
+	NoticesSuppressed    int64
+	NoticesCapped        int64
+	DeliveriesInline     int64
+	DeliveriesViaTool    int64
+	TurnsTriggered       int64
+	Evictions            int64
+	Rewarms              int64
+	ContextTokens        int64
+	OversizedTranscripts int64
 }
 
 // field maps f to the corresponding pointer inside c, so Add and Set can share
@@ -70,6 +77,8 @@ func field(c *Counters, f Field) *int64 {
 		return &c.Rewarms
 	case FContextTokens:
 		return &c.ContextTokens
+	case FOversizedTranscripts:
+		return &c.OversizedTranscripts
 	default:
 		return nil
 	}

@@ -15,7 +15,24 @@ import (
 	"golang.org/x/term"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
+	"github.com/Sentinal-Glimpass/bubbles/internal/transcript"
 )
+
+// TestResumeSummaryThresholdMatchesSharedConstant is a drift guard: the
+// resume-menu autopilot threshold and the shared context-nudge threshold mean
+// the same thing ("this conversation is large enough to summarize") and must
+// never diverge. It also asserts the force threshold stays above the nudge
+// threshold, since a lower force threshold would silently force-compact
+// bubbles before ever nudging them.
+func TestResumeSummaryThresholdMatchesSharedConstant(t *testing.T) {
+	r := NewLocal()
+	if r.ResumeSummaryThreshold != transcript.ContextNudgeTokens {
+		t.Fatalf("ResumeSummaryThreshold = %d, want %d (transcript.ContextNudgeTokens)", r.ResumeSummaryThreshold, transcript.ContextNudgeTokens)
+	}
+	if transcript.ContextForceTokens <= transcript.ContextNudgeTokens {
+		t.Fatalf("ContextForceTokens (%d) must be greater than ContextNudgeTokens (%d)", transcript.ContextForceTokens, transcript.ContextNudgeTokens)
+	}
+}
 
 // syncBuf is a concurrency-safe buffer the drainer can stream into from its
 // goroutine while a test reads it.
