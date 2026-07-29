@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,6 +28,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
+	"github.com/Sentinal-Glimpass/bubbles/internal/supervisor"
 	"github.com/Sentinal-Glimpass/bubbles/internal/tui"
 )
 
@@ -182,63 +184,34 @@ func runApp() {
 	// kernel reads it so an in-session /resume is what resumes next time.
 	lr.SessionFile = func(a addr.Address) string { return sessionFile(baseDir, a) }
 	k.CurrentSessionID = func(a addr.Address) string { return readSessionFile(baseDir, a) }
-	go func() { // periodic memory sweep: catch sessions that grow past the budget over time
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			k.EnforceBudget()
-		}
-	}()
-	go func() { // periodic idle sweep: page out sessions that have gone quiet
-		t := time.NewTicker(60 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			k.EvictIdle()
-		}
-	}()
-	go func() { // deliver a held message to the focused bubble as soon as you stop typing
-		t := time.NewTicker(1 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			k.FlushHeldIfIdle()
-		}
-	}()
-	go func() { // write coalesced batches once their window closes, so a burst of
-		// non-urgent follow-ups costs one notice instead of one per message —
-		// and doesn't sit silent until the next message happens to arrive.
-		// Cadence is well under notify.CoalesceWindow so a closed batch is
-		// announced promptly. Never wakes a cold bubble.
-		t := time.NewTicker(1 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			k.DrainCoalesced()
-		}
-	}()
-	go func() { // periodic inbox drain: page in cold bubbles with pending mail so none go unanswered
-		t := time.NewTicker(time.Duration(messagePollMinutes()) * time.Minute)
-		defer t.Stop()
-		for range t.C {
-			k.DrainInboxes()
-		}
-	}()
-	go func() { // fast recovery: re-nudge already-running bubbles whose notice never landed (cheap PTY write)
-		t := time.NewTicker(45 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			k.RecoverUnread(true)
-		}
-	}()
-	go func() { // fire durable wake schedules: the always-alive daemon wakes bubbles on their triggers
-		t := time.NewTicker(20 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			k.FireDue()
-		}
-	}()
-	// NOTE: the inbox/tasks/schedules SAVERS are started later — AFTER the initial
-	// load below — so a slow boot can't let a saver overwrite a persisted file with
+	// Every periodic sweep in this process runs through one supervisor registry:
+	// named, panic-safe, and observable. See checks.go for the full inventory and
+	// for why the driver spawns a goroutine per tick. Intervals live there.
+	//
+	// NOTE: the inbox/tasks/schedules SAVERS (and the health sweep / keep-alive)
+	// are phaseAfterLoad — they are registered further down, AFTER the initial
+	// load — so a slow boot can't let a saver overwrite a persisted file with
 	// empty in-memory state before it's been loaded (that race wiped schedules and
 	// mail on large, slow-booting fleets).
+	//
+	// Resource sampler and the two dashboard pollers feed the TUI's top-right
+	// panel; they send to whichever program is currently running (nil while
+	// diving into a bubble).
+	var curProg atomic.Pointer[tea.Program]
+	checks := backgroundChecks(checkDeps{
+		k:             k,
+		baseDir:       baseDir,
+		health:        NewHealthManager(k),
+		inboxPoll:     time.Duration(messagePollMinutes()) * time.Minute,
+		sampler:       samplerStep(k, &curProg),
+		claudeUsage:   claudeUsageStep(&curProg),   // account /usage in the dashboard, polled directly (no claude session)
+		headroomStats: headroomStatsStep(&curProg), // token-compression savings in the dashboard (no-op unless --headroom)
+	})
+	checkReg := supervisor.New(time.Now)
+	registerPhase(checkReg, checks, phaseBoot)
+	checkCtx, stopChecks := context.WithCancel(context.Background())
+	defer stopChecks()
+	go runChecks(checkCtx, checkReg, supervisorTick)
 
 	// Incoming webhooks: per-bubble secret URLs so scripts/crons/external
 	// services can message (and wake) a bubble programmatically.
@@ -254,13 +227,6 @@ func runApp() {
 			fmt.Fprintf(os.Stderr, "bubbles: ngrok tunnel failed: %v (webhooks stay loopback-only)\n", nerr)
 		}
 	}
-
-	// Resource sampler: feeds the dashboard's top-right panel. It sends to
-	// whichever TUI program is currently running (nil while diving into a bubble).
-	var curProg atomic.Pointer[tea.Program]
-	go runSampler(k, &curProg)
-	go runClaudeUsage(&curProg)   // account /usage in the dashboard, polled directly (no claude session)
-	go runHeadroomStats(&curProg) // token-compression savings in the dashboard (no-op unless --headroom)
 
 	_ = os.Remove(sock) // clear a stale socket a crashed daemon left, so the stable path can bind
 	ln, err := ipc.Serve(sock, func(r ipc.Request) ipc.Reply { return handleIPC(k, r) })
@@ -294,38 +260,14 @@ func runApp() {
 			k.Reg.SetAlwaysOn(addr.Address(a), true)
 		}
 	}
-	// Fleet-health manager: background upkeep (transcript trimming today; more as
-	// the product matures). Sweeps on its own cadence, off the request path.
-	go NewHealthManager(k).Run(2 * time.Minute)
-
 	k.KeepAlive() // launch always-on receivers now so they're hot and ready
-	go func() {   // keep them alive: relaunch any that die
-		t := time.NewTicker(30 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			k.KeepAlive()
-		}
-	}()
 
-	// Start the persistence savers ONLY now that the initial load is done — see the
-	// NOTE above. Each writes on a version change, so the first tick re-saves the
-	// just-loaded state (idempotent) rather than clobbering it with an empty store.
-	startSaver := func(version func() int64, save func(string, *kernel.Kernel) error) {
-		go func() {
-			t := time.NewTicker(2 * time.Second)
-			defer t.Stop()
-			var last int64 = -1
-			for range t.C {
-				if v := version(); v != last {
-					last = v
-					_ = save(baseDir, k)
-				}
-			}
-		}()
-	}
-	startSaver(k.Store.Version, saveInbox)
-	startSaver(k.Tasks.Version, saveTasks)
-	startSaver(k.Sched.Version, saveSchedules)
+	// The initial load is done, so the after-load checks — the fleet-health
+	// sweep, the always-on keep-alive, and the three persistence savers — can
+	// start. Each saver writes on a version change, so its first tick re-saves
+	// the just-loaded state (idempotent) rather than clobbering it with an empty
+	// store. See the NOTE above.
+	registerPhase(checkReg, checks, phaseAfterLoad)
 	// After a restart, wake and re-notify every bubble that still has unread mail,
 	// so a message that arrived before the stop lands in its terminal too. Delayed
 	// a few seconds so the fleet and webhook/tunnel setup settle first.
@@ -395,19 +337,21 @@ func clampPct(p float64) float64 {
 	return p
 }
 
-// runSampler polls per-session resource use every couple of seconds, turns the
-// cumulative CPU counters into a live percentage (delta over wall time), ranks
-// the busiest bubbles, and pushes a snapshot to the current TUI program.
-func runSampler(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program]) {
+// samplerStep builds the resource sampler's periodic body. Each call polls
+// per-session resource use, turns the cumulative CPU counters into a live
+// percentage (delta over wall time), ranks the busiest bubbles, and pushes a
+// snapshot to the current TUI program.
+//
+// The per-address previous-sample map and the core count are set up once, here,
+// and closed over: they are what make the CPU delta meaningful across ticks.
+func samplerStep(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program]) func() {
 	type prevSample struct {
 		cpu time.Duration
 		at  time.Time
 	}
 	prev := map[addr.Address]prevSample{}
 	ncpu := float64(runtime.NumCPU()) // normalize to % of the WHOLE machine, so 100% = all cores busy (not top's per-core %)
-	t := time.NewTicker(2 * time.Second)
-	defer t.Stop()
-	for range t.C {
+	return func() {
 		prog := curProg.Load()
 		samples := k.SampleUsage()
 		now := time.Now()
@@ -436,7 +380,7 @@ func runSampler(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program]) {
 			}
 		}
 		if prog == nil {
-			continue // nobody viewing (mid-dive): still refresh prev, just don't send
+			return // nobody viewing (mid-dive): prev is already refreshed above, just don't send
 		}
 		sort.Slice(rows, func(i, j int) bool {
 			if rows[i].CPU != rows[j].CPU {

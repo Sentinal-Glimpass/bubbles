@@ -149,9 +149,11 @@ const claudeUsagePoll = 60 * time.Second
 // every second (so the row is always painted, in step with the other metrics and
 // so reset countdowns tick), but only hits the API once a minute. A failed fetch
 // (expired token / offline / rate-limited) keeps the last-known value on screen.
-func runClaudeUsage(curProg interface{ Load() *tea.Program }) {
+func claudeUsageStep(curProg interface{ Load() *tea.Program }) func() {
 	if _, err := claudeAccessToken(); err != nil {
-		return // not logged in with a subscription token — no usage to show
+		// Not logged in with a subscription token — no usage to show. The check
+		// stays registered as a no-op so the inventory is the same on every host.
+		return func() {}
 	}
 	var last tui.ClaudeUsage
 	var lastFetch time.Time
@@ -167,11 +169,10 @@ func runClaudeUsage(curProg interface{ Load() *tea.Program }) {
 			}
 		}
 	}
-	fetch()
-	send()
-	t := time.NewTicker(1 * time.Second)
-	defer t.Stop()
-	for range t.C {
+	// No eager fetch here: lastFetch is zero, so the first tick (a second from
+	// now) fetches and sends exactly as the old goroutine's opening pair did —
+	// and, unlike an eager call, cannot block boot on a slow /usage request.
+	return func() {
 		if time.Since(lastFetch) >= claudeUsagePoll {
 			fetch()
 		}
