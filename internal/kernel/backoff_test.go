@@ -364,3 +364,35 @@ func TestBackoffStaleFailureAfterSuccessIsDropped(t *testing.T) {
 		t.Fatalf("stale failure recorded over a success: %+v", tr)
 	}
 }
+
+// Deleting a bubble must forget its crash-loop state. Nothing else can: once the
+// registry entry is gone, SetEnabled and ClearRelaunchFailures are unreachable
+// for that address and no relaunch can ever succeed to clear it, so a surviving
+// entry pins the fleet-health panel red for a bubble that no longer exists.
+func TestDeleteBubbleClearsCrashLoopState(t *testing.T) {
+	f := newCrashLoop(t)
+	child, err := f.k.SpawnUnder(addr.Root, f.a, "helper", "/nonexistent", runner.SpawnOpts{Persona: "helper"})
+	if err != nil {
+		t.Fatalf("spawn child: %v", err)
+	}
+	f.fr.FailLaunch = true
+
+	// Both the named bubble and its child pick up crash-loop state.
+	f.k.EnsureAlive(f.a)
+	f.k.EnsureAlive(child)
+	if got := len(f.k.RelaunchTroubles()); got != 2 {
+		t.Fatalf("setup: want 2 troubled bubbles, got %d", got)
+	}
+
+	f.k.DeleteBubble(f.a)
+
+	if got := f.k.RelaunchTroubles(); len(got) != 0 {
+		t.Fatalf("crash-loop state survived DeleteBubble: %+v", got)
+	}
+	if _, ok := f.k.RelaunchTroubleFor(f.a); ok {
+		t.Fatal("deleted bubble still has crash-loop state")
+	}
+	if _, ok := f.k.RelaunchTroubleFor(child); ok {
+		t.Fatal("deleted subtree child still has crash-loop state")
+	}
+}

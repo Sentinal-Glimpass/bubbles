@@ -1452,6 +1452,14 @@ func (k *Kernel) DeleteBubble(a addr.Address) []addr.Address {
 		k.Caps.Purge(v)             // drop it from EVERY bubble's contacts, so no ghost lingers
 		k.Sched.PurgeBubble(v)      // drop any wake schedules for/by it
 		k.Tasks.PurgeParticipant(v) // cancel its open tasks / degrade tasks it verified
+		// Crash-loop state is per-address and nothing else clears it for a bubble
+		// that is gone: SetEnabled and ClearRelaunchFailures are unreachable once
+		// the registry entry is removed, and no relaunch can ever succeed to clear
+		// it either. Left behind, the entry keeps RelaunchTroubles non-empty
+		// forever, which paints the TUI's fleet-health panel red for a bubble that
+		// no longer exists. Cleared for EVERY victim, not just the named address,
+		// because the whole subtree is what the delete removes.
+		k.ClearRelaunchFailures(v)
 	}
 	return victims
 }
