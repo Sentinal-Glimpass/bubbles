@@ -168,7 +168,7 @@ func runApp() {
 			k.Grace = d
 		}
 	}
-	k.TypingWindow = 10 * time.Second               // hold a focused bubble's messages while you're typing; deliver once you pause this long
+	k.TypingWindow = 10 * time.Second                 // hold a focused bubble's messages while you're typing; deliver once you pause this long
 	inheritedMCP := resolveMCPServers(mcpAllowList()) // curated operator servers bubbles inherit (e.g. playwright)
 	lr.MCPConfig = func(a addr.Address) string {
 		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a), inheritedMCP)
