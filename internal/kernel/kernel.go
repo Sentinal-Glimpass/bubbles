@@ -19,6 +19,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/groups"
 	"github.com/Sentinal-Glimpass/bubbles/internal/inbox"
 	"github.com/Sentinal-Glimpass/bubbles/internal/notify"
+	"github.com/Sentinal-Glimpass/bubbles/internal/paging"
 	"github.com/Sentinal-Glimpass/bubbles/internal/registry"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
@@ -79,8 +80,9 @@ type Kernel struct {
 
 	// MemBudget is the total resident-RAM budget (bytes) for live worker
 	// sessions. Sessions are packed by their ACTUAL memory — a 200 MB session
-	// costs 200 MB, not a fixed slot — and when the sum exceeds the budget the
-	// least-recently-used bubbles page out until it fits. 0 = unlimited.
+	// costs 200 MB, not a fixed slot — and when the sum exceeds the budget
+	// bubbles page out until it fits, cheapest-to-rewarm first (see CacheTTL and
+	// internal/paging). 0 = unlimited.
 	MemBudget int64
 
 	// WebhookBase is the advertised base URL of the daemon's incoming-webhook
@@ -281,7 +283,8 @@ func (k *Kernel) IsHot(a addr.Address) bool {
 	return s != nil && s.Alive()
 }
 
-// EnforceBudget pages out the least-recently-used worker sessions until the sum
+// EnforceBudget pages out worker sessions — the ones cheapest to rewarm, which
+// under CacheTTL == 0 is plain coldest-first LRU — until the sum
 // of live sessions' ACTUAL resident memory fits within MemBudget (root is always
 // resident and never counts). Paging out = kill the process; the registry entry,
 // inbox, and session id persist, so the bubble resumes on next use. Called after
@@ -291,48 +294,12 @@ func (k *Kernel) EnforceBudget() {
 	if k.MemBudget <= 0 {
 		return
 	}
-	k.smu.Lock()
-	type ent struct {
-		a    addr.Address
-		s    runner.Session
-		used int64
-	}
-	var live []ent
-	for a, s := range k.sessions {
-		if a == addr.Root || s == nil || !s.Alive() || k.isAlwaysOn(a) {
-			continue // always-on receivers are never paged out for budget
-		}
-		live = append(live, ent{a, s, k.lastUsed[a]})
-	}
-	k.smu.Unlock()
-
-	var total uint64
-	mem := make(map[addr.Address]uint64, len(live))
-	for _, e := range live {
-		m := e.s.MemBytes()
-		mem[e.a] = m
-		total += m
-	}
-	if int64(total) <= k.MemBudget {
-		return
-	}
-	sort.Slice(live, func(i, j int) bool { return live[i].used < live[j].used }) // coldest first
-	var victims []addr.Address
-	for _, e := range live {
-		if int64(total) <= k.MemBudget {
-			break
-		}
-		victims = append(victims, e.a)
-		total -= mem[e.a]
-	}
-	k.smu.Lock()
-	for _, v := range victims {
-		delete(k.sessions, v)
-	}
-	k.smu.Unlock()
-	for _, v := range victims {
-		_ = k.runner.Kill(v) // page out
-	}
+	// Gather under the lock, measure outside it, decide, then mutate and kill —
+	// see internal/kernel/paging.go for why each of those lives where it does.
+	// WHICH bubbles go is the pure policy's call (cheapest to rewarm first, not
+	// blindly coldest); how many go is still whatever the budget demands.
+	cand, total := k.candidates(k.gatherLive())
+	k.pageOut(paging.Victims(k.pagingConfig(), cand, total))
 }
 
 // RelaunchSession bounces a HOT bubble's session so config that is baked in at
@@ -406,35 +373,12 @@ func (k *Kernel) EvictIdle() {
 	if k.IdleTimeout <= 0 {
 		return
 	}
-	cutoff := k.clockNow().Add(-k.IdleTimeout)
-	k.smu.Lock()
-	var idle []addr.Address
-	for a, s := range k.sessions {
-		if a == addr.Root || s == nil || !s.Alive() {
-			continue
-		}
-		if k.isAlwaysOn(a) {
-			continue // always-on receivers stay hot for instant delivery
-		}
-		if !s.LastActivity().Before(cutoff) {
-			continue
-		}
-		// Idle alone is not a reason to kill a live prompt cache: nothing is
-		// asking for this RAM, so the eviction buys nothing and costs a full
-		// uncached rewarm on next use. Budget pressure (EnforceBudget) still
-		// evicts these; idleness on its own does not.
-		if k.CacheTTL > 0 && s.LastActivity().After(k.clockNow().Add(-k.CacheTTL)) {
-			continue
-		}
-		idle = append(idle, a)
-	}
-	for _, a := range idle {
-		delete(k.sessions, a)
-	}
-	k.smu.Unlock()
-	for _, a := range idle {
-		_ = k.runner.Kill(a) // page out; registry + session id persist -> resumes on use
-	}
+	// The policy applies both bars: past IdleTimeout AND past CacheTTL, so a
+	// session whose prompt cache is still alive is spared (nothing is asking for
+	// its RAM, so killing it would buy nothing and cost a full uncached rewarm).
+	// Always-on receivers stay hot for instant delivery; root is never touched.
+	cand, _ := k.candidates(k.gatherLive())
+	k.pageOut(paging.IdleVictims(k.pagingConfig(), k.IdleTimeout, cand))
 }
 
 // Usage is a per-session resource snapshot for the dashboard.

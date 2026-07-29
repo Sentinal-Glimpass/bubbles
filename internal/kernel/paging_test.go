@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
+	"github.com/Sentinal-Glimpass/bubbles/internal/costmeter"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 )
 
@@ -52,5 +53,132 @@ func TestCacheTTLZeroKeepsTodaysBehaviour(t *testing.T) {
 	k.EvictIdle()
 	if k.IsHot(a) {
 		t.Fatal("with CacheTTL == 0 an idle session must page out exactly as before")
+	}
+}
+
+// budgetKernel builds a kernel with n hot worker bubbles, each with the given
+// resident size and the same last-activity stamp, so eviction tests vary ONE
+// thing (rewarm cost) and never accidentally trade on idleness.
+func budgetKernel(t *testing.T, mem uint64, names ...string) (*runner.FakeRunner, *Kernel, []addr.Address) {
+	t.Helper()
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	same := time.Now().Add(-time.Minute)
+	var out []addr.Address
+	for _, n := range names {
+		a, _ := k.Spawn(addr.Root, n, "/tmp/"+n, runner.SpawnOpts{Name: n})
+		k.EnsureAlive(a)
+		fr.Session(a).SetMem(mem)
+		fr.Session(a).SetLastActivity(same)
+		out = append(out, a)
+	}
+	return fr, k, out
+}
+
+// TestEnforceBudgetEvictsCheapestToRewarm: at equal idleness and equal size,
+// the bubble that costs least to rewarm goes first. Under plain LRU the choice
+// was arbitrary, and half the time it killed the 500k-token session whose
+// rewarm dwarfs the RAM it gave back.
+func TestEnforceBudgetEvictsCheapestToRewarm(t *testing.T) {
+	_, k, as := budgetKernel(t, 600, "rich", "poor")
+	rich, poor := as[0], as[1]
+	k.MemBudget = 1000 // 1200 resident: one of them must go
+	k.CacheTTL = 30 * time.Minute
+	k.Cost.Set(rich, costmeter.FContextTokens, 500_000)
+	k.Cost.Set(poor, costmeter.FContextTokens, 1_000)
+
+	k.EnforceBudget()
+	if k.IsHot(poor) {
+		t.Fatal("the cheap-to-rewarm bubble should have been paged out first")
+	}
+	if !k.IsHot(rich) {
+		t.Fatal("the expensive-to-rewarm bubble should have been spared")
+	}
+	if got := k.Cost.Snapshot()[poor].Evictions; got != 1 {
+		t.Fatalf("evictions for the paged-out bubble = %d, want 1", got)
+	}
+}
+
+// TestEnforceBudgetStillEvictsWhenEverythingIsExpensive: cost decides WHO goes,
+// never HOW MANY. A budget is not negotiable just because every candidate has
+// a warm cache.
+func TestEnforceBudgetStillEvictsWhenEverythingIsExpensive(t *testing.T) {
+	_, k, as := budgetKernel(t, 600, "a", "b")
+	k.MemBudget = 1000
+	k.CacheTTL = 30 * time.Minute
+	for _, a := range as {
+		k.Cost.Set(a, costmeter.FContextTokens, 900_000) // all warm, all costly
+	}
+
+	k.EnforceBudget()
+	hot := 0
+	for _, a := range as {
+		if k.IsHot(a) {
+			hot++
+		}
+	}
+	if hot != 1 {
+		t.Fatalf("hot sessions after enforcement = %d, want 1 (budget must still be met)", hot)
+	}
+}
+
+// TestEnforceBudgetAggressivenessUnchanged: with CacheTTL == 0 the policy must
+// evict exactly as many bubbles as the old LRU did — only the ORDER may differ.
+// This is the pin against cost-awareness quietly becoming cost-timidity.
+func TestEnforceBudgetAggressivenessUnchanged(t *testing.T) {
+	for _, ttl := range []time.Duration{0, 30 * time.Minute} {
+		_, k, as := budgetKernel(t, 600, "a", "b", "c") // 1800 resident
+		k.MemBudget = 1000                              // must fall to <= 1000: two of the three go
+		k.CacheTTL = ttl
+		k.Cost.Set(as[0], costmeter.FContextTokens, 400_000)
+		k.Cost.Set(as[2], costmeter.FContextTokens, 5_000)
+
+		k.EnforceBudget()
+		hot := 0
+		for _, a := range as {
+			if k.IsHot(a) {
+				hot++
+			}
+		}
+		if hot != 1 {
+			t.Fatalf("CacheTTL=%s: hot sessions = %d, want 1", ttl, hot)
+		}
+	}
+}
+
+// TestEnforceBudgetExemptsAlwaysOn: an always-on receiver is never paged out
+// for budget, and its RAM is not budgeted against the workers — pre-existing
+// law that routing through the policy must not quietly repeal.
+func TestEnforceBudgetExemptsAlwaysOn(t *testing.T) {
+	_, k, as := budgetKernel(t, 600, "recv", "worker")
+	recv, worker := as[0], as[1]
+	k.Reg.SetAlwaysOn(recv, true)
+	k.MemBudget = 1000
+
+	k.EnforceBudget()
+	if !k.IsHot(recv) {
+		t.Fatal("an always-on receiver must never be paged out for budget")
+	}
+	if !k.IsHot(worker) {
+		t.Fatal("the worker alone (600) fits the budget: always-on RAM is not budgeted against it")
+	}
+}
+
+// TestEvictIdleCountsEvictions: every page-out is metered, or a paging policy
+// change is unfalsifiable from the outside.
+func TestEvictIdleCountsEvictions(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	k.IdleTimeout = 10 * time.Minute
+
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	k.EnsureAlive(a)
+	fr.Session(a).SetLastActivity(time.Now().Add(-time.Hour))
+
+	k.EvictIdle()
+	if got := k.Cost.Snapshot()[a].Evictions; got != 1 {
+		t.Fatalf("evictions after an idle page-out = %d, want 1", got)
 	}
 }
