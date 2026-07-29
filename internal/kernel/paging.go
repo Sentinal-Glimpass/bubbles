@@ -105,3 +105,15 @@ func (k *Kernel) pageOut(victims []addr.Address) {
 func (k *Kernel) pagingConfig() paging.Config {
 	return paging.Config{MemBudget: k.MemBudget, CacheTTL: k.CacheTTL}
 }
+
+// noteRewarm records that a paged-out bubble has just been relaunched, paying
+// full uncached input for its whole conversation again. It is only ever called
+// once a launch has actually succeeded — a failed launch costs nothing and
+// warms nothing. Paired with FEvictions this is how the paging policy is
+// judged: evictions roughly flat while rewarms fall is the win.
+func (k *Kernel) noteRewarm(a addr.Address, wasPagedOut bool) {
+	if !wasPagedOut || k.Cost == nil {
+		return
+	}
+	k.Cost.Add(a, costmeter.FRewarms, 1)
+}

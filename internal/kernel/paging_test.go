@@ -182,3 +182,37 @@ func TestEvictIdleCountsEvictions(t *testing.T) {
 		t.Fatalf("evictions after an idle page-out = %d, want 1", got)
 	}
 }
+
+// TestRewarmCountedOnlyForPagedOutBubbles: a rewarm is a relaunch of a bubble
+// that HAD been running and was paged out — that is the launch which re-pays
+// uncached input for the whole conversation. A bubble's first-ever launch has
+// no cache to have lost and must not be counted, or the metric the phase is
+// judged by inflates with every spawn.
+func TestRewarmCountedOnlyForPagedOutBubbles(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	k.IdleTimeout = 10 * time.Minute
+
+	a, _ := k.Spawn(addr.Root, "a", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	k.EnsureAlive(a) // first-ever launch: nothing was thrown away
+	if got := k.Cost.Snapshot()[a].Rewarms; got != 0 {
+		t.Fatalf("rewarms after a first launch = %d, want 0", got)
+	}
+
+	fr.Session(a).SetLastActivity(time.Now().Add(-time.Hour))
+	k.EvictIdle()
+	if k.IsHot(a) {
+		t.Fatal("precondition: the bubble should have paged out")
+	}
+
+	k.EnsureAlive(a) // paged back in: the cache is gone and is re-paid here
+	if got := k.Cost.Snapshot()[a].Rewarms; got != 1 {
+		t.Fatalf("rewarms after paging back in = %d, want 1", got)
+	}
+
+	k.EnsureAlive(a) // already hot: no relaunch, no rewarm
+	if got := k.Cost.Snapshot()[a].Rewarms; got != 1 {
+		t.Fatalf("rewarms after a no-op EnsureAlive = %d, want 1", got)
+	}
+}

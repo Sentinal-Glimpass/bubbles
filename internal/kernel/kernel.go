@@ -714,6 +714,15 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 			b.SessionID = cur
 		}
 	}
+	// A stored SessionID means this bubble has run before, and we are here
+	// because it is no longer live — i.e. it was paged out (budget, idleness, a
+	// relaunch, or a crash). Relaunching it re-pays full uncached input for the
+	// whole conversation, and that is what a REWARM is. A bubble with no stored
+	// id is a first-ever launch: it had no prompt cache to lose, so counting it
+	// would inflate the very metric this phase is judged by. Derived from the
+	// existing id rather than a new "was paged out" field, so no second source
+	// of truth can drift from the session table.
+	wasPagedOut := b.SessionID != ""
 	// Try to resume the existing conversation.
 	if b.SessionID != "" {
 		if sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Model: b.Model, SessionID: b.SessionID, Resume: true}); err == nil {
@@ -723,6 +732,7 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 			// dir changed). Either way, fall through to a fresh session — which keeps
 			// the bubble's pending inbox messages (those live in our store).
 			if k.resumeHealthy(sess) {
+				k.noteRewarm(a, wasPagedOut)
 				k.setSession(a, sess)
 				k.touch(a)
 				k.EnforceBudget() // page in -> may page out a colder bubble
@@ -744,6 +754,9 @@ func (k *Kernel) EnsureAlive(a addr.Address) runner.Session {
 			return nil
 		}
 	}
+	// Counted here too: a resume that claude could not honour still ends in a
+	// relaunch of a bubble that was paged out, and the operator pays for it.
+	k.noteRewarm(a, wasPagedOut)
 	k.setSession(a, sess)
 	k.touch(a)
 	k.EnforceBudget()

@@ -110,8 +110,8 @@ func runApp() {
 	k.BrainBase = filepath.Join(baseDir, ".bubbles", "brains")
 	k.DecisionsPath = filepath.Join(baseDir, ".bubbles", "memory", "decisions.md")
 	lr.BrainDir = func(a addr.Address) string { return filepath.Join(k.BrainBase, a.String()) }
-	k.MemBudget = 45 << 30                            // 45 GB total: sessions are packed by ACTUAL RAM; the coldest page out when the sum exceeds this
-	k.IdleTimeout = 30 * time.Minute                  // page out sessions silent (no output) this long; they resume on next use
+	k.MemBudget = 45 << 30           // 45 GB total: sessions are packed by ACTUAL RAM; the cheapest to rewarm page out when the sum exceeds this
+	k.IdleTimeout = 30 * time.Minute // page out sessions silent (no output) this long; they resume on next use
 	// Assumed prompt-cache lifetime: 1h, the extended cache TTL claude sessions
 	// hold (the 5m default would make this setting nearly inert — revisit the
 	// number if that assumption changes). Evicting a session idle less than this
