@@ -73,9 +73,16 @@ type Headroom struct {
 type HeadroomMsg Headroom
 
 // FleetHealth is the cost/health summary shown in the dashboard's FLEET block,
-// fed from the costmeter via the existing resource sampler (no new poller).
-// Metrics whose source doesn't exist yet (stuck/crash-loop/failing-check
-// counts, Phase 4) are simply absent from this struct rather than zeroed.
+// fed from the costmeter, the stuck detector, the kernel's crash-loop state and
+// the check registry via the existing resource sampler (no new poller).
+//
+// The Phase 4 health counts are POINTERS on purpose. Their sources can each be
+// absent — the stuck scan may not have completed a sweep yet, the context gauge
+// may not have measured anything, there may be no check registry attached — and
+// a zero would then read as "verified healthy" when it means "not measured".
+// nil is the only honest encoding of that difference, and it is unforgeable:
+// a producer that has nothing to say cannot accidentally say "0". Use Measured
+// to fill one in.
 type FleetHealth struct {
 	Hot        int // live sessions
 	Total      int // all bubbles
@@ -83,7 +90,18 @@ type FleetHealth struct {
 	Capped     int // notices capped (INV-1 flood ceiling actively firing)
 	Inlined    int // deliveries made inline (vs via tool)
 	Backlog    int // total unread messages across the fleet
+
+	Stuck         *int // hot bubbles sitting wedged on unconsumed mail
+	CrashLooping  *int // bubbles in relaunch backoff (or given up on)
+	OverContext   *int // bubbles past the context-compaction threshold
+	FailingChecks *int // registered checks whose last run failed or panicked
+	WedgedChecks  *int // registered checks running far past their own interval
 }
+
+// Measured wraps a count that really was measured, for FleetHealth's optional
+// fields. Its whole job is to make "0 because I looked" impossible to confuse
+// with "0 because nobody looked".
+func Measured(n int) *int { return &n }
 
 // FleetHealthMsg is pushed by the existing resource sampler into the dashboard.
 type FleetHealthMsg FleetHealth

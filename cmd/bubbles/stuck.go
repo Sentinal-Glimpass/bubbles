@@ -35,6 +35,7 @@ type stuckTracker struct {
 	mu    sync.Mutex
 	prev  []health.Sample
 	stuck []addr.Address
+	steps int // completed scans; see Verdict
 }
 
 func newStuckTracker(k *kernel.Kernel) *stuckTracker {
@@ -51,6 +52,7 @@ func (s *stuckTracker) Step() {
 	defer s.mu.Unlock()
 	s.stuck = health.Stuck(s.cfg, s.prev, cur, now)
 	s.prev = cur
+	s.steps++
 }
 
 // Stuck returns the most recent verdict. Safe for the TUI goroutine to call.
@@ -58,4 +60,18 @@ func (s *stuckTracker) Stuck() []addr.Address {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]addr.Address(nil), s.stuck...)
+}
+
+// Verdict returns the most recent verdict together with whether there IS one.
+// The detector is a difference between two samples, so it has said nothing at
+// all until it has taken two: before that, Stuck()'s empty list means "no
+// answer yet", not "nothing is stuck". The panel must be able to tell those
+// apart, so it asks here instead. Safe for the TUI goroutine to call.
+func (s *stuckTracker) Verdict() ([]addr.Address, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.steps < 2 {
+		return nil, false
+	}
+	return append([]addr.Address(nil), s.stuck...), true
 }

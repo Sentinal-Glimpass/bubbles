@@ -41,6 +41,12 @@ type Status struct {
 	Panicked    bool  // last run panicked (recovered)
 	Runs        int64
 
+	// Every is the check's registered interval, copied here so a reader holding
+	// only a Status can judge RunningSince against it: "running for 3s" means
+	// nothing until you know whether the check runs every second or every ten
+	// minutes. Immutable after Register.
+	Every time.Duration
+
 	// RunningSince is when the in-flight run of this check was claimed, or the
 	// zero time if it is not currently running. It is what makes a WEDGED check
 	// visible: RunDue bounds a hung check's blast radius to itself, but without
@@ -102,7 +108,7 @@ func (r *Registry) Register(c Check) error {
 	r.checks[c.Name] = &entry{
 		check:   c,
 		nextDue: first,
-		status:  Status{Name: c.Name},
+		status:  Status{Name: c.Name, Every: c.Every},
 	}
 	return nil
 }

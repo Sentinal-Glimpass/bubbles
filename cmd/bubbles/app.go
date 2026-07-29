@@ -29,6 +29,7 @@ import (
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
 	"github.com/Sentinal-Glimpass/bubbles/internal/sched"
 	"github.com/Sentinal-Glimpass/bubbles/internal/supervisor"
+	"github.com/Sentinal-Glimpass/bubbles/internal/transcript"
 	"github.com/Sentinal-Glimpass/bubbles/internal/tui"
 )
 
@@ -198,18 +199,22 @@ func runApp() {
 	// panel; they send to whichever program is currently running (nil while
 	// diving into a bubble).
 	var curProg atomic.Pointer[tea.Program]
+	// Both are built BEFORE the check inventory because the sampler renders from
+	// them: the fleet-health panel reads the stuck verdict and the check statuses
+	// off the same 2s tick that already collects RAM/CPU. No new poller.
+	stuck := newStuckTracker(k) // hot-but-wedged detector (reports only)
+	checkReg := supervisor.New(time.Now)
 	checks := backgroundChecks(checkDeps{
 		k:             k,
 		baseDir:       baseDir,
 		health:        NewHealthManager(k),
 		inboxPoll:     time.Duration(messagePollMinutes()) * time.Minute,
-		stuck:         newStuckTracker(k), // hot-but-wedged detector (reports only; Task 7 renders it)
+		stuck:         stuck,
 		tempSweep:     func() { lr.SweepTempConfigs() },
-		sampler:       samplerStep(k, &curProg),
+		sampler:       samplerStep(k, &curProg, stuck, checkReg),
 		claudeUsage:   claudeUsageStep(&curProg),   // account /usage in the dashboard, polled directly (no claude session)
 		headroomStats: headroomStatsStep(&curProg), // token-compression savings in the dashboard (no-op unless --headroom)
 	})
-	checkReg := supervisor.New(time.Now)
 	registerPhase(checkReg, checks, phaseBoot)
 	checkCtx, stopChecks := context.WithCancel(context.Background())
 	defer stopChecks()
@@ -346,7 +351,7 @@ func clampPct(p float64) float64 {
 //
 // The per-address previous-sample map and the core count are set up once, here,
 // and closed over: they are what make the CPU delta meaningful across ticks.
-func samplerStep(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program]) func() {
+func samplerStep(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program], stuck *stuckTracker, reg *supervisor.Registry) func() {
 	type prevSample struct {
 		cpu time.Duration
 		at  time.Time
@@ -394,33 +399,92 @@ func samplerStep(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program]) func() 
 			rows = rows[:5]
 		}
 		prog.Send(tui.UsageMsg{TotalMem: totalMem, TotalCPU: totalCPU, Hot: len(samples), Top: rows})
-		prog.Send(fleetHealthSnapshot(k, len(samples)))
+		prog.Send(fleetHealthSnapshot(k, len(samples), stuck, reg, time.Now()))
 	}
 }
 
-// fleetHealthSnapshot summarizes the costmeter and fleet state into the
-// dashboard's FLEET block. Reuses the resource sampler's own hot count so it
-// doesn't need a second pass over live sessions.
-func fleetHealthSnapshot(k *kernel.Kernel, hot int) tui.FleetHealthMsg {
+// wedgedCheckMultiple is how many of its own intervals a check may be mid-run
+// for before it counts as WEDGED. Failing() cannot see this case at all: it
+// reports on OUTCOMES, and a hung check has no outcome — it simply stops
+// appearing to run, which is indistinguishable from being idle between
+// intervals unless you look at RunningSince. Ten intervals is deliberately
+// generous: RunDue explicitly permits a check to outrun its interval (a slow
+// disk sweep, a stalled HTTP fetch that will still return), so this must only
+// fire on a check that is not coming back.
+const wedgedCheckMultiple = 10
+
+// fleetHealthSnapshot summarizes the costmeter, the fleet, the stuck detector,
+// the kernel's crash-loop state and the check registry into the dashboard's
+// FLEET block. Reuses the resource sampler's own hot count so it doesn't need a
+// second pass over live sessions.
+//
+// Every source here is state the fleet ALREADY maintains — this reads, it never
+// samples. Nothing on this path calls EnsureAlive, wakes a bubble, writes to a
+// PTY or probes memory: it is running on the TUI's sampler and must stay a pure
+// read. Each optional count is filled in only when its source has actually
+// reported, so an unmeasured metric reaches the panel as nil and is omitted
+// rather than shown as a reassuring zero.
+func fleetHealthSnapshot(k *kernel.Kernel, hot int, stuck *stuckTracker, reg *supervisor.Registry, now time.Time) tui.FleetHealthMsg {
 	all := k.Reg.All()
 	var suppressed, capped, inlined int64
+	// overContext counts bubbles at or past the pump's nudge threshold. measured
+	// is false until the context pump has recorded a single non-zero size:
+	// FContextTokens is a gauge that starts at 0, so an all-zero fleet means the
+	// pump has not run (or has no home dir), not that every bubble is small.
+	overContext, ctxMeasured := 0, false
 	for _, c := range k.Cost.Snapshot() {
 		suppressed += c.NoticesSuppressed
 		capped += c.NoticesCapped
 		inlined += c.DeliveriesInline
+		if c.ContextTokens > 0 {
+			ctxMeasured = true
+			if c.ContextTokens >= transcript.ContextNudgeTokens {
+				overContext++
+			}
+		}
 	}
 	backlog := 0
 	for _, b := range all {
 		backlog += k.Store.UnreadCount(b.Addr)
 	}
-	return tui.FleetHealthMsg{
+	msg := tui.FleetHealthMsg{
 		Hot:        hot,
 		Total:      len(all),
 		Suppressed: int(suppressed),
 		Capped:     int(capped),
 		Inlined:    int(inlined),
 		Backlog:    backlog,
+		// The kernel always tracks relaunch failures, so this count is always
+		// measured; it is 0 precisely when nothing is crash-looping.
+		CrashLooping: tui.Measured(len(k.RelaunchTroubles())),
 	}
+	if ctxMeasured {
+		msg.OverContext = tui.Measured(overContext)
+	}
+	if stuck != nil {
+		if list, ok := stuck.Verdict(); ok {
+			msg.Stuck = tui.Measured(len(list))
+		}
+	}
+	if reg != nil {
+		// Failing() is defined over checks that have RUN, so it is only an answer
+		// once at least one has; before that every check is merely young.
+		wedged, ran := 0, false
+		for _, st := range reg.Snapshot() {
+			if st.Runs > 0 {
+				ran = true
+			}
+			if !st.RunningSince.IsZero() && st.Every > 0 &&
+				now.Sub(st.RunningSince) > time.Duration(wedgedCheckMultiple)*st.Every {
+				wedged++
+			}
+		}
+		if ran {
+			msg.FailingChecks = tui.Measured(reg.Failing())
+			msg.WedgedChecks = tui.Measured(wedged)
+		}
+	}
+	return msg
 }
 
 // handleIPC maps a relayed tool call to a kernel operation. Identity is taken

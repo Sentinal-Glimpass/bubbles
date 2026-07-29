@@ -36,14 +36,147 @@ func TestOverlayKeepsPanelTopRight(t *testing.T) {
 	}
 }
 
+// TestFleetHealthRowsOmitUnavailableMetrics is the successor to the guard test
+// that asserted "stuck" was never rendered at all. Phase 4 now MEASURES
+// stuckness, so that premise is superseded — but the guarantee underneath it is
+// not, and this asserts BOTH halves of it: an unmeasured source is still
+// omitted, and a measured one is rendered. Only the second half would leave the
+// panel free to print a reassuring 0 for something nobody looked at.
 func TestFleetHealthRowsOmitUnavailableMetrics(t *testing.T) {
-	rows := fleetHealthRows(FleetHealth{Hot: 2, Total: 5, Suppressed: 40, Capped: 0, Inlined: 12, Backlog: 3})
-	joined := strings.Join(rows, "\n")
+	base := FleetHealth{Hot: 2, Total: 5, Suppressed: 40, Capped: 0, Inlined: 12, Backlog: 3}
+
+	// Source unavailable (nil): the original guarantee, preserved verbatim.
+	joined := strings.Join(fleetHealthRows(base, 100), "\n")
 	if !strings.Contains(joined, "40") {
 		t.Fatal("suppressed count must be shown")
 	}
 	if strings.Contains(joined, "stuck") {
-		t.Fatal("Phase 4 metrics must be omitted, not rendered as zero")
+		t.Fatal("an unmeasured metric must be omitted, not rendered as zero")
+	}
+
+	// Measured zero: still not an alert, and still must not be mistaken for one.
+	zeroed := base
+	zeroed.Stuck = Measured(0)
+	if strings.Contains(strings.Join(fleetHealthRows(zeroed, 100), "\n"), "stuck") {
+		t.Fatal("a measured zero must not render as a stuck alert")
+	}
+
+	// Measured and non-zero: the row IS rendered.
+	hot := base
+	hot.Stuck = Measured(3)
+	got := strings.Join(fleetHealthRows(hot, 100), "\n")
+	if !strings.Contains(got, "stuck 3") {
+		t.Fatalf("a measured stuck count must be rendered: %q", got)
+	}
+}
+
+func TestFleetHealthRowsRenderEachMeasuredMetric(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*FleetHealth)
+		want string
+	}{
+		{"stuck", func(h *FleetHealth) { h.Stuck = Measured(1) }, "stuck 1"},
+		{"crash-loop", func(h *FleetHealth) { h.CrashLooping = Measured(2) }, "crash 2"},
+		{"over-context", func(h *FleetHealth) { h.OverContext = Measured(3) }, "ctx 3"},
+		{"failing-checks", func(h *FleetHealth) { h.FailingChecks = Measured(4) }, "chk 4"},
+		{"wedged-checks", func(h *FleetHealth) { h.WedgedChecks = Measured(5) }, "hung 5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var h FleetHealth
+			tc.set(&h)
+			got := strings.Join(fleetHealthRows(h, 200), "\n")
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("measured metric not rendered: want %q in %q", tc.want, got)
+			}
+			// And the same field left nil renders nothing at all.
+			label := strings.Fields(tc.want)[0]
+			if bare := strings.Join(fleetHealthRows(FleetHealth{}, 200), "\n"); strings.Contains(bare, label) {
+				t.Fatalf("unmeasured %s must be omitted: %q", label, bare)
+			}
+		})
+	}
+}
+
+func TestFleetHealthRowsSeverity(t *testing.T) {
+	// sevStyle is the only source of colour; compare against what it renders so
+	// the test asserts the CHOICE of severity, not an ANSI literal.
+	red := sevStyle("critical").Render("x")
+	amber := sevStyle("warning").Render("x")
+	green := sevStyle("good").Render("x")
+	prefix := func(s string) string { return strings.SplitN(s, "x", 2)[0] }
+
+	// Green: both sources the spec names reported, and both are clean.
+	ok := FleetHealth{Stuck: Measured(0), FailingChecks: Measured(0)}
+	rows := fleetHealthRows(ok, 100)
+	if !strings.HasPrefix(rows[1], prefix(green)) {
+		t.Fatalf("all-clear must be green: %q", rows[1])
+	}
+	if !strings.Contains(rows[1], "checks ok") {
+		t.Fatalf("all-clear row missing: %q", rows[1])
+	}
+
+	// Green requires EVIDENCE: with either source missing there is no row.
+	half := FleetHealth{Stuck: Measured(0)}
+	if got := strings.Join(fleetHealthRows(half, 100), "\n"); strings.Contains(got, "checks ok") {
+		t.Fatalf("green must not be claimed without check evidence: %q", got)
+	}
+
+	// Amber: a cost warning, not a breakage.
+	warn := fleetHealthRows(FleetHealth{Stuck: Measured(0), FailingChecks: Measured(0), OverContext: Measured(2)}, 100)
+	if !strings.HasPrefix(warn[1], prefix(amber)) {
+		t.Fatalf("context threshold must be amber: %q", warn[1])
+	}
+
+	// Red: each of the three breakages the spec names, plus a wedged check.
+	for _, h := range []FleetHealth{
+		{Stuck: Measured(1)},
+		{CrashLooping: Measured(1)},
+		{FailingChecks: Measured(1)},
+		{WedgedChecks: Measured(1)},
+	} {
+		got := fleetHealthRows(h, 100)
+		if !strings.HasPrefix(got[1], prefix(red)) {
+			t.Fatalf("breakage must be red: %q", got[1])
+		}
+	}
+}
+
+func TestFleetHealthRowsDropLowestPriorityWhenNarrow(t *testing.T) {
+	h := FleetHealth{
+		Stuck: Measured(1), CrashLooping: Measured(2), OverContext: Measured(3),
+		FailingChecks: Measured(4), WedgedChecks: Measured(5),
+	}
+	// Wide: everything fits, in priority order.
+	wide := fleetHealthRows(h, 300)[1]
+	for _, want := range []string{"stuck 1", "crash 2", "ctx 3", "chk 4", "hung 5"} {
+		if !strings.Contains(wide, want) {
+			t.Fatalf("wide row must carry every metric, missing %q: %q", want, wide)
+		}
+	}
+	if i, j := strings.Index(wide, "stuck"), strings.Index(wide, "crash"); i > j {
+		t.Fatalf("priority order violated: %q", wide)
+	}
+
+	// Narrower terminals drop from the TAIL, lowest priority first, and the row
+	// never outgrows its budget.
+	prevKept := 6
+	for _, width := range []int{300, 90, 60, 45, 30, 20} {
+		row := fleetHealthRows(h, width)[1]
+		kept := strings.Count(row, "·") + 1
+		if kept > prevKept {
+			t.Fatalf("width %d kept MORE segments (%d > %d): %q", width, kept, prevKept, row)
+		}
+		prevKept = kept
+		if kept < 5 && strings.Contains(row, "hung") {
+			t.Fatalf("width %d dropped a segment but kept the lowest priority one: %q", width, row)
+		}
+		if !strings.Contains(row, "stuck 1") {
+			t.Fatalf("width %d dropped the HIGHEST priority segment: %q", width, row)
+		}
+		if b := healthBudget(width); kept > 1 && lipgloss.Width(row) > b {
+			t.Fatalf("width %d: row %q is %d cols, over budget %d", width, row, lipgloss.Width(row), b)
+		}
 	}
 }
 
