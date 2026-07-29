@@ -101,6 +101,12 @@ func Stuck(c Config, prev, cur []Sample, now time.Time) []addr.Address {
 		if !seen || before != s.RecentOutput {
 			continue
 		}
+		// An EMPTY ring in both samples matches "unchanged" trivially, and that is
+		// deliberate: a bubble that booted, was handed mail, and has printed
+		// literally nothing since is the clearest wedge there is (a hung boot).
+		// Skipping it would discard the strongest true positive in order to guard
+		// against a hypothetical runner variant that never populates the ring.
+		// Kept because this detector only ever REPORTS.
 		if now.Sub(s.LastActivity) < c.Threshold {
 			continue
 		}

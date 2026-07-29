@@ -96,8 +96,10 @@ func TestStuckNonPositiveThresholdDisablesDetection(t *testing.T) {
 // Verbatim copies of the only three marker strings the repo matches against
 // RecentOutput today. Sources of truth (both unexported, deliberately not
 // exported just for this test):
-//   - internal/runner/local.go:341-344  resumeMenuOpt1 / resumeMenuOpt2
-//   - internal/kernel/kernel.go:1229    the "No conversation found" literal
+// Named by SYMBOL, not line number, because a line pointer here has already
+// drifted once:
+//   - internal/runner/local.go   resumeMenuOpt1 / resumeMenuOpt2
+//   - internal/kernel            resumeLost(), which matches "No conversation found"
 const (
 	resumeMenuOpt1      = "Resume from summary"
 	resumeMenuOpt2      = "Resume full session as-is"
