@@ -118,6 +118,35 @@ func (m *HealthManager) endSweep() {
 	m.statMu.Unlock()
 }
 
+// prune drops per-bubble state for bubbles that no longer exist. Without it
+// lastPump and lastOversizedReport grow for the life of the process: a fleet
+// that spawns and deletes workers all day would keep one entry per address ever
+// seen, and the throttle state of a deleted bubble is meaningless anyway (a
+// re-spawn gets a fresh address). The stats memo needs no pruning — it is
+// emptied at the end of every sweep.
+func (m *HealthManager) prune() {
+	live := map[addr.Address]bool{}
+	for _, b := range m.k.Reg.All() {
+		live[b.Addr] = true
+	}
+
+	m.pumpMu.Lock()
+	for a := range m.lastPump {
+		if !live[a] {
+			delete(m.lastPump, a)
+		}
+	}
+	m.pumpMu.Unlock()
+
+	m.reportMu.Lock()
+	for a := range m.lastOversizedReport {
+		if !live[a] {
+			delete(m.lastOversizedReport, a)
+		}
+	}
+	m.reportMu.Unlock()
+}
+
 // NewHealthManager builds the manager over a kernel.
 func NewHealthManager(k *kernel.Kernel) *HealthManager {
 	home, _ := os.UserHomeDir()
@@ -145,6 +174,9 @@ func (m *HealthManager) Sweep() {
 	m.trimTranscripts()
 	m.pumpContext()
 	m.endSweep()
+	// Last: both checks above have just enumerated the registry, so anything
+	// deleted since the previous sweep is dropped with this sweep's own view.
+	m.prune()
 }
 
 // transcriptKeepBeforeCompact is how many lines to keep BEFORE the latest
@@ -242,9 +274,21 @@ func (m *HealthManager) trimTranscripts() {
 // that stays cold and oversized indefinitely (no HOT window in which the pump
 // could act) is exactly the case this function exists to surface, not silently
 // swallow.
-func (m *HealthManager) reportOversizedTranscript(a addr.Address, bytes int64) {
-	m.k.Cost.Add(a, costmeter.FOversizedTranscripts, 1)
-
+// The COUNTER is throttled together with the stderr line, deliberately. It
+// counts REPORTS, not sweeps. Incremented per sweep it counted nothing but the
+// sweep cadence: one parked bubble accrued ~30/hour for a single unchanged
+// condition, and the TUI panel renders it beside genuine incident counters, so
+// "OversizedTranscripts: 214" read as 214 events when it meant one file. The
+// alternative — making it a gauge (Set 0/1) — was rejected because a gauge has
+// to be cleared as well as set: every non-oversized bubble would need a Set(0)
+// on every sweep to keep it truthful, widening the meter write surface from
+// "the rare bad case" to "the whole fleet, always", and the field name is
+// plural and additive like every other F* counter beside it.
+//
+// The parameter is `size`, not `bytes`: this file uses the bytes PACKAGE
+// heavily (trimTranscript), and a parameter shadowing it here is one edit away
+// from a confusing compile error in a function that must stay easy to read.
+func (m *HealthManager) reportOversizedTranscript(a addr.Address, size int64) {
 	m.reportMu.Lock()
 	last, seen := m.lastOversizedReport[a]
 	due := !seen || time.Since(last) >= oversizedReportThrottle
@@ -254,7 +298,8 @@ func (m *HealthManager) reportOversizedTranscript(a addr.Address, bytes int64) {
 	m.reportMu.Unlock()
 
 	if due {
-		fmt.Fprintf(os.Stderr, "bubbles: %s transcript is %d bytes with no compaction boundary — cannot safely trim (see reportOversizedTranscript); waiting for Task 3's pump to force /compact\n", a, bytes)
+		m.k.Cost.Add(a, costmeter.FOversizedTranscripts, 1)
+		fmt.Fprintf(os.Stderr, "bubbles: %s transcript is %d bytes with no compaction boundary — cannot safely trim (see reportOversizedTranscript); waiting for Task 3's pump to force /compact\n", a, size)
 	}
 }
 

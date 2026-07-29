@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
+	"github.com/Sentinal-Glimpass/bubbles/internal/transcript"
 )
 
 // TestSweepReadsEachTranscriptOnce pins the performance property as a
@@ -54,5 +56,68 @@ func TestSweepStillPumpsAndTrimsFromOneRead(t *testing.T) {
 
 	if got := f.k.Cost.Snapshot()[f.a].OversizedTranscripts; got != 1 {
 		t.Fatalf("OversizedTranscripts = %d, want 1", got)
+	}
+}
+
+// TestOversizedReportCounterIsThrottledWithItsWarning: the counter is rendered
+// beside genuine incident counters in the TUI. Incremented per sweep, one
+// parked bubble accrued ~30/hour for a single unchanged condition, so
+// "OversizedTranscripts: 214" read as 214 events when it meant one file.
+func TestOversizedReportCounterIsThrottledWithItsWarning(t *testing.T) {
+	f := newPumpFixture(t)
+	f.sessionID(t, "cold-session-id")
+	f.writeOversizedNoCompaction(t)
+
+	f.m.trimTranscripts()
+	f.m.trimTranscripts()
+	f.m.trimTranscripts()
+
+	if got := f.k.Cost.Snapshot()[f.a].OversizedTranscripts; got != 1 {
+		t.Fatalf("OversizedTranscripts = %d after 3 sweeps, want 1 -- the counter counts reports, not sweeps", got)
+	}
+
+	// It is still a report, not a one-shot: once the throttle expires the
+	// condition is recorded again.
+	f.m.reportMu.Lock()
+	f.m.lastOversizedReport[f.a] = time.Now().Add(-oversizedReportThrottle - time.Minute)
+	f.m.reportMu.Unlock()
+
+	f.m.trimTranscripts()
+	if got := f.k.Cost.Snapshot()[f.a].OversizedTranscripts; got != 2 {
+		t.Fatalf("OversizedTranscripts = %d after the throttle expired, want 2", got)
+	}
+}
+
+// TestSweepPrunesStateOfDeletedBubbles: lastPump and lastOversizedReport are
+// keyed by address and were never cleaned up, so a fleet that spawns and
+// deletes workers all day grew one entry per address ever seen.
+func TestSweepPrunesStateOfDeletedBubbles(t *testing.T) {
+	f := newPumpFixture(t)
+	s := f.hot(t)
+	_ = s
+	f.writeContext(t, transcript.ContextForceTokens+50_000)
+
+	f.m.Sweep()
+	f.m.pumpMu.Lock()
+	got := len(f.m.lastPump)
+	f.m.pumpMu.Unlock()
+	if got != 1 {
+		t.Fatalf("setup: lastPump has %d entries, want 1", got)
+	}
+
+	f.k.DeleteBubble(f.a)
+	f.m.Sweep()
+
+	f.m.pumpMu.Lock()
+	got = len(f.m.lastPump)
+	f.m.pumpMu.Unlock()
+	if got != 0 {
+		t.Fatalf("lastPump kept %d entries for a deleted bubble", got)
+	}
+	f.m.reportMu.Lock()
+	n := len(f.m.lastOversizedReport)
+	f.m.reportMu.Unlock()
+	if n != 0 {
+		t.Fatalf("lastOversizedReport kept %d entries for a deleted bubble", n)
 	}
 }

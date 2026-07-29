@@ -19,10 +19,12 @@ type Field int
 // notice production; Inline/ViaTool describe how a delivered notice reached the
 // model; TurnsTriggered counts turns a notice caused to run; Evictions/Rewarms
 // describe context-window churn; ContextTokens is a live gauge, not a running
-// total (see Set); OversizedTranscripts counts sweeps that found a COLD
-// bubble's never-compacted transcript over the byte ceiling (see
-// cmd/bubbles/health.go) -- observability only, since that transcript is
-// deliberately never truncated.
+// total (see Set); OversizedTranscripts counts REPORTS of a COLD bubble's
+// never-compacted transcript over the byte ceiling (see cmd/bubbles/health.go)
+// -- observability only, since that transcript is deliberately never
+// truncated. It is throttled with the warning it accompanies, so it counts
+// distinct reports rather than sweeps: a parked bubble must not read as an
+// incident count that climbs with the sweep cadence.
 const (
 	FNoticesWritten Field = iota
 	FNoticesSuppressed

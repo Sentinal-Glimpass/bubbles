@@ -276,13 +276,23 @@ func (r *LocalRunner) Kill(a addr.Address) error {
 	return s.Close()
 }
 
+// CitizenPromptFor composes the capability-gated citizen prompt: the base
+// prose every bubble is billed for, plus the spawn-family section only when the
+// bubble actually holds the spawn tools. It is exported because it is the ONE
+// definition of that composition — the launch path below calls it, and so does
+// cmd/bubbles's citizenPromptFor, whose test would otherwise be asserting the
+// gating of a helper the shipping path did not use.
+func CitizenPromptFor(base, spawn string, canSpawn bool) string {
+	if canSpawn {
+		return base + spawn
+	}
+	return base
+}
+
 // citizen embeds the bubble's address (and its private brain folder, when
 // configured) into the citizen system prompt.
 func (r *LocalRunner) citizen(a addr.Address) string {
-	p := r.CitizenPrompt
-	if r.CanSpawn != nil && r.CanSpawn(a) {
-		p += r.CitizenPromptSpawn
-	}
+	p := CitizenPromptFor(r.CitizenPrompt, r.CitizenPromptSpawn, r.CanSpawn != nil && r.CanSpawn(a))
 	p += "\nYou are bubble " + a.String() + ". Root (the human) is address 0."
 	if r.BrainDir != nil {
 		if d := r.BrainDir(a); d != "" {

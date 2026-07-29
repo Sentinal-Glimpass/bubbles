@@ -1,5 +1,7 @@
 package main
 
+import "github.com/Sentinal-Glimpass/bubbles/internal/runner"
+
 // citizenPromptFor returns the prompt appended to a bubble's system prompt
 // (--append-system-prompt) so an ordinary claude session becomes a
 // fleet-aware citizen. canSpawn MUST come from the same Caps.CanSpawn value
@@ -7,12 +9,14 @@ package main
 // second, independently-computed notion of "may spawn" here would let the
 // prompt and the actual tool list disagree. The bubble's own address is
 // appended per-launch by LocalRunner.
+//
+// It delegates to runner.CitizenPromptFor, which is the same function
+// LocalRunner.citizen calls on every launch with the same two constants (wired
+// in app.go). That indirection is the point: composing the prompt a second time
+// here would let this helper — and the test that pins the capability gating to
+// it — drift away from what bubbles are actually launched with.
 func citizenPromptFor(canSpawn bool) string {
-	p := citizenPromptBase
-	if canSpawn {
-		p += citizenPromptSpawn
-	}
-	return p
+	return runner.CitizenPromptFor(citizenPromptBase, citizenPromptSpawn, canSpawn)
 }
 
 // citizenPromptBase is billed to EVERY bubble regardless of grant.
