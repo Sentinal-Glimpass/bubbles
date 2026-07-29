@@ -469,8 +469,9 @@ func fleetHealthSnapshot(k *kernel.Kernel, hot int, stuck *stuckTracker, reg *su
 	if reg != nil {
 		// Failing() is defined over checks that have RUN, so it is only an answer
 		// once at least one has; before that every check is merely young.
-		wedged, ran := 0, false
+		wedged, ran, any := 0, false, false
 		for _, st := range reg.Snapshot() {
+			any = true
 			if st.Runs > 0 {
 				ran = true
 			}
@@ -481,6 +482,15 @@ func fleetHealthSnapshot(k *kernel.Kernel, hot int, stuck *stuckTracker, reg *su
 		}
 		if ran {
 			msg.FailingChecks = tui.Measured(reg.Failing())
+		}
+		// Wedgedness is gated on the registry being POPULATED, not on some check
+		// having finished. Those are different questions, and using `ran` for both
+		// hides the worst case: a check that hangs on its very first run has
+		// Runs == 0, so if it were also the only check to have started, the hang —
+		// the exact failure the supervisor exists to expose — would render as
+		// "not measured" and disappear. RunningSince is set at claim time, so a
+		// non-empty registry can always answer "how many are hung".
+		if any {
 			msg.WedgedChecks = tui.Measured(wedged)
 		}
 	}

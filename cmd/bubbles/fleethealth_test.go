@@ -132,3 +132,59 @@ func TestFleetHealthSnapshotCountsOverContext(t *testing.T) {
 		t.Fatalf("bubble at the nudge threshold must count: %v", msg.OverContext)
 	}
 }
+
+// TestWedgedIsMeasuredEvenWhenNoCheckHasFinished pins the failure the previous
+// gate hid: a check that hangs on its very first run has Runs == 0, so gating
+// wedgedness on "some check has run" would report it as not-measured — the hang
+// the supervisor exists to expose rendering as silence.
+func TestWedgedIsMeasuredEvenWhenNoCheckHasFinished(t *testing.T) {
+	base := time.Unix(0, 0).UTC()
+	reg := supervisor.New(func() time.Time { return base })
+
+	block := make(chan struct{})
+	defer close(block)
+	if err := reg.Register(supervisor.Check{Name: "hang", Every: time.Second, Fn: func(context.Context) error {
+		<-block
+		return nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	at := base.Add(time.Second)
+	go reg.RunDue(context.Background(), at)
+
+	// Wait for the claim, then look far enough past it to exceed the multiple.
+	deadline := time.After(5 * time.Second)
+	for {
+		running := false
+		for _, st := range reg.Snapshot() {
+			if !st.RunningSince.IsZero() {
+				running = true
+			}
+		}
+		if running {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("check never reported RunningSince")
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	now := at.Add(time.Duration(wedgedCheckMultiple+1) * time.Second)
+	fr := runner.NewFake()
+	k := kernel.New(fr)
+	k.RelaunchProbe = 0
+	msg := fleetHealthSnapshot(k, 0, nil, reg, now)
+	if msg.WedgedChecks == nil {
+		t.Fatal("a check hung on its first run must still be measured as wedged, not omitted")
+	}
+	if *msg.WedgedChecks != 1 {
+		t.Fatalf("wedged = %d, want 1", *msg.WedgedChecks)
+	}
+	if msg.FailingChecks != nil {
+		t.Fatalf("no check has finished, so failing must stay unmeasured, got %d", *msg.FailingChecks)
+	}
+}
