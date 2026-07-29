@@ -74,6 +74,16 @@ type Kernel struct {
 	// Tests set it to 0; real use gives claude a moment to fail.
 	RelaunchProbe time.Duration
 
+	// RelaunchBackoff is the suppression window after the FIRST failed relaunch;
+	// it doubles per consecutive failure up to RelaunchBackoffCap, and after
+	// relaunchGiveUpAfter consecutive failures the bubble stops being relaunched
+	// at all. A failed relaunch is not free — a bubble that comes up only to die
+	// has already re-paid its whole boot context — so retrying one on every
+	// sweep is the single most expensive way to be wrong. 0 => the package
+	// defaults; see internal/kernel/backoff.go.
+	RelaunchBackoff    time.Duration
+	RelaunchBackoffCap time.Duration
+
 	// CurrentSessionID, if set, returns the LIVE session id a bubble is on now
 	// (recorded by its session hook), which can differ from the launch id after an
 	// in-session /resume. nil = just use the stored id.
@@ -145,6 +155,15 @@ type Kernel struct {
 	// relaunch backoff is a decision about elapsed time that tests must be able
 	// to drive without sleeping.
 	now func() time.Time
+
+	// backoffMu guards relaunch, the crash-loop counter keyed by address. It is
+	// its own small mutex, held only for the counter read and the counter write
+	// and NEVER across a launch, a Kill or a probe sleep — the same discipline as
+	// HealthManager.pumpMu. See internal/kernel/backoff.go for why the state
+	// cannot live in internal/sessions and how the read/launch/write sequence is
+	// made safe against concurrent callers.
+	backoffMu sync.Mutex
+	relaunch  map[addr.Address]*relaunchState
 }
 
 func (k *Kernel) clearNudge(a addr.Address) {
@@ -281,6 +300,10 @@ func New(r runner.Runner) *Kernel {
 		lastNudge:     map[addr.Address]time.Time{},
 		Cost:          costmeter.New(),
 		now:           time.Now,
+
+		RelaunchBackoff:    defaultRelaunchBackoff,
+		RelaunchBackoffCap: defaultRelaunchBackoffCap,
+		relaunch:           map[addr.Address]*relaunchState{},
 	}
 	// The ceiling is constructed with the package defaults and has no bypass:
 	// it is the last line of defense against the 632fe95 flood, so nothing
@@ -343,6 +366,12 @@ func (k *Kernel) SetEnabled(a addr.Address, enabled bool) {
 		return
 	}
 	k.Reg.SetDisabled(a, !enabled)
+	if enabled {
+		// Re-enabling is the operator saying "I fixed it": a bubble the fleet had
+		// given up relaunching gets a clean slate, so park/un-park is the reset
+		// gesture for a crash loop as well as for a disabled bubble.
+		k.ClearRelaunchFailures(a)
+	}
 	if !enabled { // stop it now
 		s := k.sessions.Take(a)
 		if s != nil {
@@ -710,6 +739,18 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	if b.Disabled {
 		return nil // parked: refuse to launch until re-enabled
 	}
+	// Crash-loop gate. A bubble that has just failed to launch is left cold
+	// until its backoff window elapses, and one that has failed
+	// relaunchGiveUpAfter times in a row is not relaunched at all. This is read
+	// BEFORE the launch and the outcome written after it, under epoch, with the
+	// lock released across everything slow: see internal/kernel/backoff.go. A
+	// healthy bubble never has state here, so its path is a map lookup and is
+	// otherwise unchanged.
+	epoch, mayLaunch := k.relaunchAllowed(a)
+	if !mayLaunch {
+		// Nothing is metered: a relaunch that never happened rewarmed nothing.
+		return nil
+	}
 	if cur != nil {
 		_ = cur.Close()
 	}
@@ -738,6 +779,7 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 			// dir changed). Either way, fall through to a fresh session — which keeps
 			// the bubble's pending inbox messages (those live in our store).
 			if k.resumeHealthy(sess) {
+				k.noteRelaunchSuccess(a) // healthy again: counter, window and give-up all cleared
 				k.noteRewarm(a, wasPagedOut)
 				k.setSession(a, sess)
 				k.EnforceBudget() // page in -> may page out a colder bubble
@@ -750,15 +792,21 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	b.SessionID = newSessionID()
 	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Goal: b.Goal, Model: b.Model, SessionID: b.SessionID, Resume: false})
 	if err != nil {
+		// A failed launch is metered as nothing (no FRewarms: nothing was warmed)
+		// but it IS counted as a crash-loop failure, which is what stops the next
+		// sweep from paying for the same attempt again.
+		k.noteRelaunchFailed(a, epoch)
 		return nil
 	}
 	if k.RelaunchProbe > 0 {
 		time.Sleep(k.RelaunchProbe) // a launch that dies at once (bad dir/args) shouldn't be handed back as a live PTY
 		if !sess.Alive() {
 			_ = sess.Close()
+			k.noteRelaunchFailed(a, epoch) // came up and died at once: the expensive kind of failure
 			return nil
 		}
 	}
+	k.noteRelaunchSuccess(a)
 	// NOT a rewarm. Reaching here means the resume did not happen: claude has no
 	// record of the session id, so this is a FRESH conversation with no context
 	// to re-pay. Nothing was rewarmed — the cache we would have been charged for
