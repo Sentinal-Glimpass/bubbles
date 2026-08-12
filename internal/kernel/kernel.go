@@ -57,6 +57,15 @@ type Kernel struct {
 	// win and a notification regression look identical from the outside.
 	Cost *costmeter.Meter
 
+	// Persist, when set, durably writes the fleet (the host owns the file
+	// format — saveFleet lives in cmd/bubbles, not here). SpawnUnder calls it
+	// SYNCHRONOUSLY before returning an address, so a returned address always
+	// means "durably recorded"; if it fails, the spawn is rolled back whole and
+	// the error returned. It does file I/O, so it is never called under a lock.
+	// nil = no persistence layer (tests, embedded use) — spawn behaves as it
+	// always did.
+	Persist func() error
+
 	// VerifierReap, when set (tests), replaces the delayed post-verdict deletion
 	// of a task's verifier bubble with an inline call.
 	VerifierReap func(addr.Address)
@@ -1370,6 +1379,30 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 		k.Caps.GrantSpawnDepth(b.Addr, d-1)
 	}
 	k.SeedBrain(b.Addr) // guaranteed private brain skeleton, keyed by address (workspaces may be shared)
+
+	// Durability gate. Everything above is IN MEMORY ONLY: before this, a spawn
+	// returned an address the instant Reg.Add ran, and whether that address ever
+	// reached disk depended on which caller happened to persist afterwards — the
+	// TUI paths did, the IPC handler the spawn() tool uses did not. Bubbles that
+	// existed long enough to appear in contacts() and receive mail then vanished
+	// on reload. So persist HERE, synchronously, and let the address out only
+	// once it is durable. No lock is held across the hook: it does file I/O.
+	if k.Persist != nil {
+		if err := k.Persist(); err != nil {
+			// Roll back in reverse order, so a failed spawn leaves nothing
+			// behind — no half-bubble a later sweep could trip over. Purge drops
+			// the child's own contacts, every edge pointing AT it, and its
+			// spawn-depth grant in one pass.
+			k.Caps.Purge(b.Addr) // includes the parent -> child edge granted above
+			k.Reg.Remove(b.Addr)
+			k.Caps.RefundSpawn(by) // the quota was consumed for a bubble that does not exist
+			// The brain folder is deliberately left: SeedBrain is idempotent and
+			// never reuses an address (Add's sequence only moves forward), so an
+			// orphan folder is inert, while deleting one is destructive I/O on a
+			// path we may not own.
+			return "", fmt.Errorf("kernel: spawn not persisted, rolled back: %w", err)
+		}
+	}
 	return b.Addr, nil
 }
 
