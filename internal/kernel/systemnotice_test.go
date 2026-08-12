@@ -228,21 +228,31 @@ func TestSystemCompactNeverWakesAColdBubble(t *testing.T) {
 	}
 }
 
-// TestInteractiveCompactStillWritesWhileTyping pins the reason SystemCompact is
-// a separate entry point rather than a guard inside Compact: the operator's own
-// command and a bubble's compact() tool call are deliberate, present-tense
-// requests, and must never silently become no-ops because the typing window
-// happens to be open.
-func TestInteractiveCompactStillWritesWhileTyping(t *testing.T) {
+// TestInteractiveCompactIsNeverDroppedWhileTyping pins the same property this
+// file always pinned — the operator's own command and a bubble's compact() tool
+// call are deliberate requests and must never silently become no-ops because
+// the typing window happens to be open — under the deferred contract that
+// replaced the inline write (see compact.go). The typing-hold is now a DELAY:
+// the request survives it and lands once the operator pauses. What must not
+// happen is what SystemCompact does, which is to refuse and drop.
+func TestInteractiveCompactIsNeverDroppedWhileTyping(t *testing.T) {
 	k, a, s := newNoticeKernel(t)
 	k.TypingWindow = time.Hour
 	k.SetFocus(a)
 	k.NoteKeystroke()
+	s.SetLastActivity(time.Now().Add(-2 * CompactSettle)) // its turn is over
 
 	if err := k.Compact(a, ""); err != nil {
-		t.Fatalf("interactive Compact must still work while typing: %v", err)
+		t.Fatalf("interactive Compact must still be accepted while typing: %v", err)
 	}
+	k.FlushPendingCompacts()
+	if w := s.Written(); w != "" {
+		t.Fatalf("held compact was typed into a half-written prompt: %q", w)
+	}
+
+	k.TypingWindow = time.Nanosecond // operator paused
+	k.FlushPendingCompacts()
 	if !strings.Contains(s.Written(), "/compact") {
-		t.Fatalf("interactive Compact wrote nothing, got %q", s.Written())
+		t.Fatalf("interactive Compact was dropped rather than delayed, got %q", s.Written())
 	}
 }

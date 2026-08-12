@@ -174,6 +174,13 @@ type Kernel struct {
 	// made safe against concurrent callers.
 	backoffMu sync.Mutex
 	relaunch  map[addr.Address]*relaunchState
+
+	// compactMu guards pendingCompacts, the deferred `/compact` queue keyed by
+	// address. Its own small mutex, held only for the map read and the map write
+	// and NEVER across a PTY write — the same discipline as backoffMu. See
+	// internal/kernel/compact.go for why compaction has to be deferred at all.
+	compactMu       sync.Mutex
+	pendingCompacts map[addr.Address]pendingCompact
 }
 
 func (k *Kernel) clearNudge(a addr.Address) {
@@ -314,6 +321,7 @@ func New(r runner.Runner) *Kernel {
 		RelaunchBackoff:    defaultRelaunchBackoff,
 		RelaunchBackoffCap: defaultRelaunchBackoffCap,
 		relaunch:           map[addr.Address]*relaunchState{},
+		pendingCompacts:    map[addr.Address]pendingCompact{},
 	}
 	// The ceiling is constructed with the package defaults and has no bypass:
 	// it is the last line of defense against the 632fe95 flood, so nothing
@@ -962,25 +970,29 @@ func (k *Kernel) SyncSessionIDs() {
 	}
 }
 
-// Compact asks a running bubble to compact its OWN conversation now — typing the
-// `/compact` slash command (with an optional focus) into its session, queued for
-// after its current turn. A bubble calls this at a natural checkpoint (task done,
-// key context written down) so its context is reclaimed deliberately instead of
-// auto-compacting only once it's near the limit. No-op if the bubble is cold.
+// Compact asks a running bubble to compact its OWN conversation — QUEUEING the
+// `/compact` slash command (with an optional focus) to be typed into its session
+// once its current turn ends. A bubble calls this at a natural checkpoint (task
+// done, key context written down) so its context is reclaimed deliberately
+// instead of auto-compacting only once it's near the limit. It errors if the
+// bubble is cold: there is nothing to compact and nothing worth waking.
 //
-// This is the INTERACTIVE entry point: the operator's own command and a
-// bubble's compact() tool call, both of which are a human or the session
-// itself asking, right now, on purpose. It deliberately writes immediately.
-// AUTOMATED callers (anything on a ticker) MUST use SystemCompact instead,
-// which honours the operator typing-hold and the InputReady discipline; see
-// the comment there for why the guards cannot live in here.
+// It DOES NOT WRITE. It used to, and that was the bug: the caller is a bubble
+// invoking the compact() tool from inside its own turn, so it is mid-turn by
+// construction, not accepting input, and the keystrokes were swallowed while the
+// tool reply promised a compaction that never happened. FlushPendingCompacts
+// does the write, once the turn has actually ended; see compact.go.
+//
+// AUTOMATED callers (anything on a ticker) still use SystemCompact, which is a
+// separate, unchanged mechanism: it is called from a sweep at a moment the
+// bubble is already idle, so its inline write is correct there.
 func (k *Kernel) Compact(a addr.Address, focus string) error {
 	s := k.session(a)
 	if s == nil || !s.Alive() {
 		return fmt.Errorf("kernel: %s is not running", a)
 	}
-	_, err := s.Write([]byte(compactCommand(focus))) // Write appends Enter, submitting the command
-	return err
+	k.queueCompact(a, focus, k.now())
+	return nil
 }
 
 // compactCommand builds the exact line both compaction paths type, so the

@@ -1221,8 +1221,10 @@ func TestRelaunchSession(t *testing.T) {
 	}
 }
 
-// TestCompact: a running bubble's compact() types the /compact command into its
-// own session; a cold bubble reports it isn't running.
+// TestCompact: a running bubble's compact() queues the /compact command for its
+// own session, typed once its turn ends (see compact.go — writing at call time
+// is swallowed, because the caller is mid-turn by construction); a cold bubble
+// reports it isn't running.
 func TestCompact(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
@@ -1236,6 +1238,8 @@ func TestCompact(t *testing.T) {
 	if err := k.Compact(a, "keep the schema"); err != nil {
 		t.Fatalf("compact: %v", err)
 	}
+	fr.Session(a).SetLastActivity(time.Now().Add(-2 * CompactSettle)) // turn over
+	k.FlushPendingCompacts()
 	w := fr.Session(a).Written()
 	if !strings.Contains(w, "/compact keep the schema") {
 		t.Fatalf("compact should type the slash command, got %q", w)
@@ -1244,6 +1248,8 @@ func TestCompact(t *testing.T) {
 	if err := k.Compact(a, "  "); err != nil {
 		t.Fatalf("compact: %v", err)
 	}
+	fr.Session(a).SetLastActivity(time.Now().Add(-2 * CompactSettle))
+	k.FlushPendingCompacts()
 	if !strings.Contains(fr.Session(a).Written(), "/compact") {
 		t.Fatal("bare compact should still type /compact")
 	}

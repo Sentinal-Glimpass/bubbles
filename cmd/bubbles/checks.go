@@ -101,6 +101,13 @@ func backgroundChecks(d checkDeps) []bgCheck {
 		// well under notify.CoalesceWindow so a closed batch is announced
 		// promptly. Never wakes a cold bubble.
 		{Check: supervisor.Check{Name: "coalesce-drain", Every: 1 * time.Second, Fn: plain(k.DrainCoalesced)}, phase: phaseBoot},
+		// type queued `/compact` lines into bubbles whose turn has just ended. A
+		// bubble calls compact() from INSIDE its own turn, when the session is not
+		// accepting input, so the write has to wait for the turn to finish or it
+		// is swallowed and the compaction silently never happens. Cadence is well
+		// under kernel.CompactSettle so a settled session is compacted promptly.
+		// Never wakes a cold bubble — a pending compact for one is dropped.
+		{Check: supervisor.Check{Name: "compact-flush", Every: 2 * time.Second, Fn: plain(k.FlushPendingCompacts)}, phase: phaseBoot},
 		// periodic inbox drain: page in cold bubbles with pending mail so none go unanswered
 		{Check: supervisor.Check{Name: "inbox-drain", Every: d.inboxPoll, Fn: plain(k.DrainInboxes)}, phase: phaseBoot},
 		// fast recovery: re-nudge already-running bubbles whose notice never landed (cheap PTY write)
