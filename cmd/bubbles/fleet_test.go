@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -182,5 +184,116 @@ func TestTasksPersistRoundTrip(t *testing.T) {
 	// The ID sequence continues after restore.
 	if n := k2.Tasks.Create(tasks.Task{Worker: "0.2"}); n.ID != "t2" {
 		t.Fatalf("sequence after restore: %s", n.ID)
+	}
+}
+
+// TestSaveFleetTornWriteKeepsPreviousFleet is the durability gate that Task 2
+// made load-bearing. saveFleet used to be a bare os.WriteFile: it truncated
+// fleet.json in place, so a write that failed partway (disk full) left invalid
+// JSON on disk, and loadFleet drops the ENTIRE fleet on an unmarshal failure.
+// Before Task 2 that was a lost update; now that a returned spawn address means
+// "durably recorded", it would be a fleet-destroying event. The write must be
+// atomic: the real file is only ever replaced by a complete one.
+func TestSaveFleetTornWriteKeepsPreviousFleet(t *testing.T) {
+	base := t.TempDir()
+
+	k := kernel.New(runner.NewFake())
+	a1, _ := k.Spawn(addr.Root, "alice", filepath.Join(base, "alice"), runner.SpawnOpts{Persona: "alice"})
+	a2, _ := k.Spawn(addr.Root, "bob", filepath.Join(base, "bob"), runner.SpawnOpts{Persona: "bob"})
+	_ = k.Introduce(addr.Root, a1, a2)
+	if err := saveFleet(base, k, nil); err != nil {
+		t.Fatalf("initial save: %v", err)
+	}
+	good, err := os.ReadFile(fleetPath(base))
+	if err != nil {
+		t.Fatalf("read initial fleet: %v", err)
+	}
+
+	// Simulate the disk filling up mid-write: the bytes that fit are stored, then
+	// ENOSPC. Restored after the test so later cases are unaffected.
+	real := syncedWrite
+	defer func() { syncedWrite = real }()
+	boom := errors.New("no space left on device")
+	syncedWrite = func(path string, data []byte, perm os.FileMode) error {
+		_ = real(path, data[:len(data)/2], perm) // short write: half the bytes land
+		return boom
+	}
+
+	k.Spawn(addr.Root, "carol", filepath.Join(base, "carol"), runner.SpawnOpts{Persona: "carol"})
+	if err := saveFleet(base, k, nil); !errors.Is(err, boom) {
+		t.Fatalf("saveFleet should surface the write error, got %v", err)
+	}
+
+	// The PREVIOUS fleet must still be on disk, byte for byte, and loadable.
+	after, err := os.ReadFile(fleetPath(base))
+	if err != nil {
+		t.Fatalf("fleet.json is gone after a failed save: %v", err)
+	}
+	if !bytes.Equal(after, good) {
+		t.Fatalf("a failed save corrupted fleet.json:\nwant %d bytes\ngot  %d bytes: %s", len(good), len(after), after)
+	}
+	m, ok := loadFleet(base)
+	if !ok {
+		t.Fatal("fleet.json no longer loads after a failed save — the whole fleet would be dropped on next start")
+	}
+	if len(m.Bubbles) != 2 {
+		t.Fatalf("restored fleet has %d bubbles, want the 2 from before the failed save", len(m.Bubbles))
+	}
+	assertNoTempFiles(t, base)
+}
+
+// TestSaveFleetSuccessIsUnchanged: the atomic path must write exactly the bytes
+// the direct write wrote, with the same mode, and leave no temp file behind.
+func TestSaveFleetSuccessIsUnchanged(t *testing.T) {
+	base := t.TempDir()
+	k := kernel.New(runner.NewFake())
+	a1, _ := k.Spawn(addr.Root, "alice", filepath.Join(base, "alice"), runner.SpawnOpts{Persona: "alice"})
+	k.EnsureAlive(a1)
+
+	// Capture the serialized manifest as handed to the writer, so this asserts
+	// the file content without duplicating saveFleet's serializer.
+	real := syncedWrite
+	defer func() { syncedWrite = real }()
+	var handed []byte
+	syncedWrite = func(path string, data []byte, perm os.FileMode) error {
+		handed = append([]byte(nil), data...)
+		return real(path, data, perm)
+	}
+	if err := saveFleet(base, k, map[int]addr.Address{2: a1}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	on, err := os.ReadFile(fleetPath(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(on, handed) {
+		t.Fatalf("fleet.json is not the serialized manifest:\nwant %s\ngot  %s", handed, on)
+	}
+	st, err := os.Stat(fleetPath(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o644 {
+		t.Fatalf("fleet.json mode = %v want 0644", st.Mode().Perm())
+	}
+	assertNoTempFiles(t, base)
+	if _, ok := loadFleet(base); !ok {
+		t.Fatal("saved fleet does not load back")
+	}
+}
+
+// assertNoTempFiles fails if the metadata dir holds anything that is not one of
+// the known manifests — a leaked scratch file from an atomic write.
+func assertNoTempFiles(t *testing.T, base string) {
+	t.Helper()
+	ents, err := os.ReadDir(filepath.Dir(fleetPath(base)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	known := map[string]bool{"fleet.json": true, "inbox.json": true, "tasks.json": true, ".gitignore": true}
+	for _, e := range ents {
+		if !known[e.Name()] {
+			t.Fatalf("leftover temp file in %s: %s", filepath.Dir(fleetPath(base)), e.Name())
+		}
 	}
 }
