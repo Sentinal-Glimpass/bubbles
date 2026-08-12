@@ -42,6 +42,13 @@ type Field int
 // prompt-cache rewarm -- but a silent discard is indistinguishable from a lost
 // one); CompactsRetried counts commands that were written but provoked no
 // output at all, i.e. were swallowed by a session that was not accepting input,
+// CompactsAccepted counts the ONLY positive outcome: a written /compact the
+// session visibly reacted to. Without it every compact counter measures a
+// failure, so an all-zero fleet reads identically whether every compaction
+// landed, no bubble ever called compact(), or the flush check never ran — which
+// is exactly the silence the original swallowed-keystroke bug lived in for 7+
+// calls and 792k of billed context. "Accepted" not "succeeded": it evidences
+// receipt of the keystrokes, not a completed summarization.
 // and so were re-issued; CompactsAbandoned counts the give-up after
 // maxCompactWrites of that.
 const (
@@ -60,6 +67,7 @@ const (
 	FCompactsDropped
 	FCompactsRetried
 	FCompactsAbandoned
+	FCompactsAccepted
 )
 
 // Counters holds one bubble's cost/efficiency tally. All fields are int64 so
@@ -80,6 +88,7 @@ type Counters struct {
 	CompactsDropped      int64
 	CompactsRetried      int64
 	CompactsAbandoned    int64
+	CompactsAccepted     int64
 }
 
 // field maps f to the corresponding pointer inside c, so Add and Set can share
@@ -116,6 +125,8 @@ func field(c *Counters, f Field) *int64 {
 		return &c.CompactsDropped
 	case FCompactsRetried:
 		return &c.CompactsRetried
+	case FCompactsAccepted:
+		return &c.CompactsAccepted
 	case FCompactsAbandoned:
 		return &c.CompactsAbandoned
 	default:

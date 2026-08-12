@@ -252,6 +252,7 @@ func (k *Kernel) FlushPendingCompacts() {
 func (k *Kernel) verifyCompact(a addr.Address, p pendingCompact, last, now time.Time) {
 	if last.After(p.quiet) {
 		k.dropCompact(a, p) // the session is talking: the command landed
+		k.Cost.Add(a, costmeter.FCompactsAccepted, 1)
 		return
 	}
 	if now.Sub(p.wrote) < compactReactWindow {

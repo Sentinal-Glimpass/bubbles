@@ -370,3 +370,33 @@ func TestCompactOnAColdBubbleErrors(t *testing.T) {
 		t.Fatal("a cold bubble must not leave a pending compact behind")
 	}
 }
+
+// TestAcceptedCompactIsMetered pins the ONLY positive outcome. Every other
+// compact counter records a failure, so without this one an all-zero fleet reads
+// identically whether every compaction landed, no bubble ever called compact(),
+// or the flush check never ran — the exact silence the original swallowed-write
+// bug lived in for 7+ calls and 792k of billed context.
+func TestAcceptedCompactIsMetered(t *testing.T) {
+	k, a, s, c := compactKernel(t)
+
+	if err := k.Compact(a, ""); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	settled(s, c)
+	k.FlushPendingCompacts()
+	if n := k.Cost.Snapshot()[a].CompactsAccepted; n != 0 {
+		t.Fatalf("accepted counted before the session reacted: %d", n)
+	}
+
+	c.advance(compactReactWindow + time.Second)
+	s.SetLastActivity(c.t) // the compaction turn is talking: receipt
+	k.FlushPendingCompacts()
+
+	got := k.Cost.Snapshot()[a]
+	if got.CompactsAccepted != 1 {
+		t.Fatalf("CompactsAccepted = %d, want 1 — the one positive outcome must be countable", got.CompactsAccepted)
+	}
+	if got.CompactsRetried != 0 || got.CompactsAbandoned != 0 || got.CompactsDropped != 0 || got.CompactsExpired != 0 {
+		t.Fatalf("an accepted compact recorded a failure: %+v", got)
+	}
+}
