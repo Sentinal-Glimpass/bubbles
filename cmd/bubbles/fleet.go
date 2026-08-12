@@ -87,7 +87,10 @@ func saveTasks(baseDir string, k *kernel.Kernel) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	// Atomic for the same reason saveFleet is: loadTasks/loadSchedules/loadInbox
+	// all fall back to "no data" when the JSON does not parse, so a write torn by
+	// a full disk silently discards the whole file rather than losing one update.
+	return writeFileAtomic(p, data, 0o644)
 }
 
 // loadTasks restores the task ledger on startup (no-op if none saved).
@@ -116,7 +119,10 @@ func saveSchedules(baseDir string, k *kernel.Kernel) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	// Atomic for the same reason saveFleet is: loadTasks/loadSchedules/loadInbox
+	// all fall back to "no data" when the JSON does not parse, so a write torn by
+	// a full disk silently discards the whole file rather than losing one update.
+	return writeFileAtomic(p, data, 0o644)
 }
 
 // loadSchedules restores wake schedules on startup (no-op if none saved).
@@ -142,7 +148,10 @@ func saveInbox(baseDir string, k *kernel.Kernel) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	// Atomic for the same reason saveFleet is: loadTasks/loadSchedules/loadInbox
+	// all fall back to "no data" when the JSON does not parse, so a write torn by
+	// a full disk silently discards the whole file rather than losing one update.
+	return writeFileAtomic(p, data, 0o644)
 }
 
 // loadInbox restores the message store. Returns false if there was no saved
