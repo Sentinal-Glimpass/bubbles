@@ -1284,6 +1284,9 @@ func (k *Kernel) Introduce(by, a, b addr.Address) error {
 	if by != addr.Root {
 		return ErrNotAllowed
 	}
+	if a == b { // same rejection as IntroduceBy: no self-edges
+		return ErrNotAllowed
+	}
 	if _, ok := k.Reg.Get(a); !ok {
 		return fmt.Errorf("kernel: no bubble at %s", a)
 	}

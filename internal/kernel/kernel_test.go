@@ -239,6 +239,24 @@ func TestIntroducePhantomAddress(t *testing.T) {
 	}
 }
 
+// TestIntroduceSelf: root may not introduce a bubble to itself. IntroduceBy
+// rejects a == b up front; Introduce must too, or the two paths are not in fact
+// indistinguishable to a caller.
+func TestIntroduceSelf(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	if err := k.Introduce(addr.Root, a, a); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("Introduce(%s, %s) should be denied, got %v", a, a, err)
+	}
+	for _, c := range k.Caps.Contacts(a) {
+		if c == a {
+			t.Fatalf("%s was made its own contact", a)
+		}
+	}
+}
+
 // TestSpawnPersistsBeforeReturning: a returned spawn address must mean "durably
 // recorded". SpawnUnder used to return after an in-memory Reg.Add only, and the
 // IPC spawn handler (what the spawn() MCP tool uses) never persisted — so some
