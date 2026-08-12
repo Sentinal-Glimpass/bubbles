@@ -143,3 +143,19 @@ func (s *Store) ConsumeSpawn(owner addr.Address) error {
 	s.spawn[owner]--
 	return nil
 }
+
+// RefundSpawn returns one consumed count budget to owner — the exact inverse of
+// ConsumeSpawn, for a spawn that was rolled back (e.g. the fleet could not be
+// persisted, so the bubble does not exist). Root and depth-granted bubbles never
+// spent anything, so they get nothing back.
+func (s *Store) RefundSpawn(owner addr.Address) {
+	if owner == addr.Root {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.depth[owner] > 0 {
+		return // depth grant: unlimited count, nothing was decremented
+	}
+	s.spawn[owner]++
+}

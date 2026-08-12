@@ -198,6 +198,172 @@ func TestIntroduceRootOnly(t *testing.T) {
 	}
 }
 
+// TestIntroducePhantomAddress: the ROOT introduce path must verify BOTH bubbles
+// exist. Introducing a phantom returned "introduced" and minted a contact edge
+// to an address nobody could reach — the reported introduce(0.9.34, 0.9.30.10).
+// Both argument positions are covered: a check on one side only is the same
+// defect with a smaller blast radius.
+func TestIntroducePhantomAddress(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	real1, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/r1", runner.SpawnOpts{Name: "r1"})
+	real2, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/r2", runner.SpawnOpts{Name: "r2"})
+	phantom := addr.Address("0.99.99")
+
+	cases := []struct {
+		name string
+		a, b addr.Address
+	}{
+		{"phantom as a", phantom, real1},
+		{"phantom as b", real2, phantom},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := k.Introduce(addr.Root, tc.a, tc.b)
+			if err == nil {
+				t.Fatalf("Introduce(%s, %s) with a nonexistent bubble should fail", tc.a, tc.b)
+			}
+			if !strings.Contains(err.Error(), phantom.String()) {
+				t.Fatalf("error should name the missing address %s, got %v", phantom, err)
+			}
+			// and no edge in EITHER direction
+			if k.Caps.CanSend(tc.a, tc.b) && tc.a != addr.Root {
+				t.Fatalf("no contact edge %s -> %s should exist after a failed introduce", tc.a, tc.b)
+			}
+			if k.Caps.CanSend(tc.b, tc.a) && tc.b != addr.Root {
+				t.Fatalf("no contact edge %s -> %s should exist after a failed introduce", tc.b, tc.a)
+			}
+		})
+	}
+}
+
+// TestIntroduceSelf: root may not introduce a bubble to itself. IntroduceBy
+// rejects a == b up front; Introduce must too, or the two paths are not in fact
+// indistinguishable to a caller.
+func TestIntroduceSelf(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	a, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	if err := k.Introduce(addr.Root, a, a); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("Introduce(%s, %s) should be denied, got %v", a, a, err)
+	}
+	for _, c := range k.Caps.Contacts(a) {
+		if c == a {
+			t.Fatalf("%s was made its own contact", a)
+		}
+	}
+}
+
+// TestSpawnPersistsBeforeReturning: a returned spawn address must mean "durably
+// recorded". SpawnUnder used to return after an in-memory Reg.Add only, and the
+// IPC spawn handler (what the spawn() MCP tool uses) never persisted — so some
+// spawns survived a reload and some vanished, addresses and all.
+func TestSpawnPersistsBeforeReturning(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	calls := 0
+	var sawInRegistry bool
+	var spawned addr.Address
+	k.Persist = func() error {
+		calls++
+		// the hook must observe a COMPLETE bubble: it is what writes fleet.json
+		for _, b := range k.Reg.All() {
+			if b.Addr != addr.Root {
+				spawned = b.Addr
+				if b.Label() == "w1" {
+					sawInRegistry = true
+				}
+			}
+		}
+		return nil
+	}
+	a, err := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/w1", runner.SpawnOpts{Name: "w1"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("Persist hook ran %d times, want 1 (synchronously, before the address is returned)", calls)
+	}
+	if !sawInRegistry || spawned != a {
+		t.Fatalf("persist hook saw %q/%v, want the fully-populated %s", spawned, sawInRegistry, a)
+	}
+	if _, ok := k.Reg.Get(a); !ok {
+		t.Fatalf("returned address %s is not in the registry", a)
+	}
+}
+
+// TestSpawnRollsBackWhenPersistFails is the test that matters: if the fleet
+// cannot be written, the spawn must fail whole — no registry entry, no contact
+// edges, and the spawn quota not consumed. A returned address that isn't durable
+// puts the caller straight back to guessing.
+func TestSpawnRollsBackWhenPersistFails(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	mgr, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/mgr", runner.SpawnOpts{Name: "mgr"})
+	k.Caps.GrantSpawn(mgr, 1) // exactly one child's worth of budget
+
+	before := len(k.Reg.All())
+	boom := errors.New("disk full")
+	k.Persist = func() error { return boom }
+
+	a, err := k.Spawn(mgr, "", "/tmp/child", runner.SpawnOpts{Name: "child"})
+	if !errors.Is(err, boom) {
+		t.Fatalf("spawn with a failing persist should return the persist error, got addr=%q err=%v", a, err)
+	}
+	if a != "" {
+		t.Fatalf("a failed spawn must not return an address, got %s", a)
+	}
+	if n := len(k.Reg.All()); n != before {
+		t.Fatalf("registry has %d bubbles, want %d — the failed spawn left a bubble behind", n, before)
+	}
+	if kids := k.Reg.Children(mgr); len(kids) != 0 {
+		t.Fatalf("mgr has %d children after a failed spawn, want 0", len(kids))
+	}
+	// no contact edges in either direction, to the phantom child address
+	ghost := mgr.Child("1")
+	if k.Caps.CanSend(mgr, ghost) || k.Caps.CanSend(ghost, mgr) || k.Caps.CanSend(ghost, addr.Root) {
+		t.Fatalf("failed spawn left contact edges around %s", ghost)
+	}
+	for _, c := range k.Caps.Contacts(mgr) {
+		if c == ghost {
+			t.Fatalf("%s is still listed in mgr's contacts", ghost)
+		}
+	}
+	// quota released: the one grant is still spendable
+	if !k.Caps.CanSpawn(mgr) {
+		t.Fatal("failed spawn consumed the spawn quota — it must be released on rollback")
+	}
+	k.Persist = nil
+	if _, err := k.Spawn(mgr, "", "/tmp/child2", runner.SpawnOpts{Name: "child2"}); err != nil {
+		t.Fatalf("retry after a rolled-back spawn should succeed, got %v", err)
+	}
+}
+
+// TestSpawnNilPersistUnchanged: the hook is optional. Tests and embedded use
+// have no persistence layer at all and must behave exactly as before.
+func TestSpawnNilPersistUnchanged(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	if k.Persist != nil {
+		t.Fatal("Persist must default to nil")
+	}
+	a, err := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/w", runner.SpawnOpts{Name: "w"})
+	if err != nil {
+		t.Fatalf("spawn with no Persist hook: %v", err)
+	}
+	if _, ok := k.Reg.Get(a); !ok {
+		t.Fatalf("%s missing from registry", a)
+	}
+}
+
 // TestSendHealsResumableBubble: a message to a crashed bubble relaunches it via
 // --resume (same session id), then injects the notice into the new session.
 func TestSendHealsResumableBubble(t *testing.T) {
@@ -1055,8 +1221,10 @@ func TestRelaunchSession(t *testing.T) {
 	}
 }
 
-// TestCompact: a running bubble's compact() types the /compact command into its
-// own session; a cold bubble reports it isn't running.
+// TestCompact: a running bubble's compact() queues the /compact command for its
+// own session, typed once its turn ends (see compact.go — writing at call time
+// is swallowed, because the caller is mid-turn by construction); a cold bubble
+// reports it isn't running.
 func TestCompact(t *testing.T) {
 	fr := runner.NewFake()
 	k := New(fr)
@@ -1070,6 +1238,8 @@ func TestCompact(t *testing.T) {
 	if err := k.Compact(a, "keep the schema"); err != nil {
 		t.Fatalf("compact: %v", err)
 	}
+	fr.Session(a).SetLastActivity(time.Now().Add(-2 * CompactSettle)) // turn over
+	k.FlushPendingCompacts()
 	w := fr.Session(a).Written()
 	if !strings.Contains(w, "/compact keep the schema") {
 		t.Fatalf("compact should type the slash command, got %q", w)
@@ -1078,6 +1248,8 @@ func TestCompact(t *testing.T) {
 	if err := k.Compact(a, "  "); err != nil {
 		t.Fatalf("compact: %v", err)
 	}
+	fr.Session(a).SetLastActivity(time.Now().Add(-2 * CompactSettle))
+	k.FlushPendingCompacts()
 	if !strings.Contains(fr.Session(a).Written(), "/compact") {
 		t.Fatal("bare compact should still type /compact")
 	}

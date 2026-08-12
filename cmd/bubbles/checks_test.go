@@ -45,6 +45,7 @@ func TestBackgroundChecksInventory(t *testing.T) {
 		{"idle", 60 * time.Second, phaseBoot},
 		{"flush-held", 1 * time.Second, phaseBoot},
 		{"coalesce-drain", 1 * time.Second, phaseBoot},
+		{"compact-flush", 2 * time.Second, phaseBoot},
 		{"inbox-drain", testInboxPoll, phaseBoot},
 		{"recover-unread", 45 * time.Second, phaseBoot},
 		{"schedules", 20 * time.Second, phaseBoot},

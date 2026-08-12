@@ -15,7 +15,7 @@ import (
 // callers don't need a separate method per counter.
 type Field int
 
-// The eleven counters tracked per bubble. Written/Suppressed/Capped describe
+// The fifteen counters tracked per bubble. Written/Suppressed/Capped describe
 // notice production; Inline/ViaTool describe how a delivered notice reached the
 // model; TurnsTriggered counts turns a notice caused to run; Evictions/Rewarms
 // describe context-window churn; ContextTokens is a live gauge, not a running
@@ -30,6 +30,27 @@ type Field int
 // repo increments a counter, so that a decision NOT to act is as visible in the
 // telemetry as an action. It deliberately counts refusals, not distinct
 // bubbles -- the cost being avoided is per attempt.
+// CompactsExpired counts DEFERRED compactions the kernel gave up on: a
+// compact() call whose session never went output-silent (or whose operator
+// never stopped typing) before the pending entry hit its bound. A compaction
+// that silently never happens is the exact failure this counter exists to make
+// visible -- it was invisible before, and cost real money. Its three siblings
+// cover the rest of that family, because a deferred compaction can fail in more
+// than one way and each way needs its own diagnosis: CompactsDropped counts
+// pending compactions discarded because the bubble went cold or died before the
+// command could be typed (discarding is correct -- waking it would pay a full
+// prompt-cache rewarm -- but a silent discard is indistinguishable from a lost
+// one); CompactsRetried counts commands that were written but provoked no
+// output at all, i.e. were swallowed by a session that was not accepting input,
+// CompactsAccepted counts the ONLY positive outcome: a written /compact the
+// session visibly reacted to. Without it every compact counter measures a
+// failure, so an all-zero fleet reads identically whether every compaction
+// landed, no bubble ever called compact(), or the flush check never ran — which
+// is exactly the silence the original swallowed-keystroke bug lived in for 7+
+// calls and 792k of billed context. "Accepted" not "succeeded": it evidences
+// receipt of the keystrokes, not a completed summarization.
+// and so were re-issued; CompactsAbandoned counts the give-up after
+// maxCompactWrites of that.
 const (
 	FNoticesWritten Field = iota
 	FNoticesSuppressed
@@ -42,6 +63,11 @@ const (
 	FContextTokens
 	FOversizedTranscripts
 	FRelaunchesSuppressed
+	FCompactsExpired
+	FCompactsDropped
+	FCompactsRetried
+	FCompactsAbandoned
+	FCompactsAccepted
 )
 
 // Counters holds one bubble's cost/efficiency tally. All fields are int64 so
@@ -58,6 +84,11 @@ type Counters struct {
 	ContextTokens        int64
 	OversizedTranscripts int64
 	RelaunchesSuppressed int64
+	CompactsExpired      int64
+	CompactsDropped      int64
+	CompactsRetried      int64
+	CompactsAbandoned    int64
+	CompactsAccepted     int64
 }
 
 // field maps f to the corresponding pointer inside c, so Add and Set can share
@@ -88,6 +119,16 @@ func field(c *Counters, f Field) *int64 {
 		return &c.OversizedTranscripts
 	case FRelaunchesSuppressed:
 		return &c.RelaunchesSuppressed
+	case FCompactsExpired:
+		return &c.CompactsExpired
+	case FCompactsDropped:
+		return &c.CompactsDropped
+	case FCompactsRetried:
+		return &c.CompactsRetried
+	case FCompactsAccepted:
+		return &c.CompactsAccepted
+	case FCompactsAbandoned:
+		return &c.CompactsAbandoned
 	default:
 		return nil
 	}

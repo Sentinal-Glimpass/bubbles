@@ -87,7 +87,10 @@ func saveTasks(baseDir string, k *kernel.Kernel) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	// Atomic for the same reason saveFleet is: loadTasks/loadSchedules/loadInbox
+	// all fall back to "no data" when the JSON does not parse, so a write torn by
+	// a full disk silently discards the whole file rather than losing one update.
+	return writeFileAtomic(p, data, 0o644)
 }
 
 // loadTasks restores the task ledger on startup (no-op if none saved).
@@ -116,7 +119,10 @@ func saveSchedules(baseDir string, k *kernel.Kernel) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	// Atomic for the same reason saveFleet is: loadTasks/loadSchedules/loadInbox
+	// all fall back to "no data" when the JSON does not parse, so a write torn by
+	// a full disk silently discards the whole file rather than losing one update.
+	return writeFileAtomic(p, data, 0o644)
 }
 
 // loadSchedules restores wake schedules on startup (no-op if none saved).
@@ -142,7 +148,10 @@ func saveInbox(baseDir string, k *kernel.Kernel) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	// Atomic for the same reason saveFleet is: loadTasks/loadSchedules/loadInbox
+	// all fall back to "no data" when the JSON does not parse, so a write torn by
+	// a full disk silently discards the whole file rather than losing one update.
+	return writeFileAtomic(p, data, 0o644)
 }
 
 // loadInbox restores the message store. Returns false if there was no saved
@@ -203,7 +212,62 @@ func saveFleet(baseDir string, k *kernel.Kernel, marks map[int]addr.Address) err
 	}
 	// keep the .bubbles metadata dir out of the user's git
 	_ = os.WriteFile(filepath.Join(filepath.Dir(p), ".gitignore"), []byte("*\n"), 0o644)
-	return os.WriteFile(p, data, 0o644)
+	return writeFileAtomic(p, data, 0o644)
+}
+
+// writeFileAtomic replaces path with data as a single step: serialize into a
+// fresh temp file IN THE SAME DIRECTORY (so the rename is same-filesystem and
+// therefore atomic), fsync it, then rename over the target. A bare os.WriteFile
+// truncates in place, so a write that dies partway — a full disk — leaves a
+// torn file; for fleet.json that is fatal, because loadFleet treats an unmarshal
+// failure as "no fleet" and silently drops every bubble on the next start. Once
+// a returned spawn address means "durably recorded" (SpawnUnder's Persist hook),
+// that failure mode is strictly worse than the phantom bubbles it replaced.
+// A torn temp file is harmless: the real file is only ever replaced by a
+// complete one. The temp name is unique so concurrent saves cannot interleave
+// into one scratch file and rename a spliced result.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	f.Close() // syncedWrite reopens it; this only reserves a collision-free name
+	if err := syncedWrite(tmp, data, perm); err != nil {
+		os.Remove(tmp) // never leave scratch behind, on either path
+		return err
+	}
+	// CreateTemp makes 0600 and O_CREATE won't widen an existing file, so set the
+	// mode explicitly — otherwise the rename would silently tighten fleet.json.
+	if err := os.Chmod(tmp, perm); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// syncedWrite writes data to path (truncating), flushes it to the platter, and
+// closes it. It is a package var purely as a test seam: a genuine torn write
+// needs a full filesystem, so tests substitute a writer that stores a prefix and
+// then reports ENOSPC.
+var syncedWrite = func(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil { // durable before the rename, or the rename guarantees nothing
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func loadFleet(baseDir string) (manifest, bool) {

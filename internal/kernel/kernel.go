@@ -57,6 +57,15 @@ type Kernel struct {
 	// win and a notification regression look identical from the outside.
 	Cost *costmeter.Meter
 
+	// Persist, when set, durably writes the fleet (the host owns the file
+	// format — saveFleet lives in cmd/bubbles, not here). SpawnUnder calls it
+	// SYNCHRONOUSLY before returning an address, so a returned address always
+	// means "durably recorded"; if it fails, the spawn is rolled back whole and
+	// the error returned. It does file I/O, so it is never called under a lock.
+	// nil = no persistence layer (tests, embedded use) — spawn behaves as it
+	// always did.
+	Persist func() error
+
 	// VerifierReap, when set (tests), replaces the delayed post-verdict deletion
 	// of a task's verifier bubble with an inline call.
 	VerifierReap func(addr.Address)
@@ -165,6 +174,13 @@ type Kernel struct {
 	// made safe against concurrent callers.
 	backoffMu sync.Mutex
 	relaunch  map[addr.Address]*relaunchState
+
+	// compactMu guards pendingCompacts, the deferred `/compact` queue keyed by
+	// address. Its own small mutex, held only for the map read and the map write
+	// and NEVER across a PTY write — the same discipline as backoffMu. See
+	// internal/kernel/compact.go for why compaction has to be deferred at all.
+	compactMu       sync.Mutex
+	pendingCompacts map[addr.Address]pendingCompact
 }
 
 func (k *Kernel) clearNudge(a addr.Address) {
@@ -305,6 +321,7 @@ func New(r runner.Runner) *Kernel {
 		RelaunchBackoff:    defaultRelaunchBackoff,
 		RelaunchBackoffCap: defaultRelaunchBackoffCap,
 		relaunch:           map[addr.Address]*relaunchState{},
+		pendingCompacts:    map[addr.Address]pendingCompact{},
 	}
 	// The ceiling is constructed with the package defaults and has no bypass:
 	// it is the last line of defense against the 632fe95 flood, so nothing
@@ -953,25 +970,29 @@ func (k *Kernel) SyncSessionIDs() {
 	}
 }
 
-// Compact asks a running bubble to compact its OWN conversation now — typing the
-// `/compact` slash command (with an optional focus) into its session, queued for
-// after its current turn. A bubble calls this at a natural checkpoint (task done,
-// key context written down) so its context is reclaimed deliberately instead of
-// auto-compacting only once it's near the limit. No-op if the bubble is cold.
+// Compact asks a running bubble to compact its OWN conversation — QUEUEING the
+// `/compact` slash command (with an optional focus) to be typed into its session
+// once its current turn ends. A bubble calls this at a natural checkpoint (task
+// done, key context written down) so its context is reclaimed deliberately
+// instead of auto-compacting only once it's near the limit. It errors if the
+// bubble is cold: there is nothing to compact and nothing worth waking.
 //
-// This is the INTERACTIVE entry point: the operator's own command and a
-// bubble's compact() tool call, both of which are a human or the session
-// itself asking, right now, on purpose. It deliberately writes immediately.
-// AUTOMATED callers (anything on a ticker) MUST use SystemCompact instead,
-// which honours the operator typing-hold and the InputReady discipline; see
-// the comment there for why the guards cannot live in here.
+// It DOES NOT WRITE. It used to, and that was the bug: the caller is a bubble
+// invoking the compact() tool from inside its own turn, so it is mid-turn by
+// construction, not accepting input, and the keystrokes were swallowed while the
+// tool reply promised a compaction that never happened. FlushPendingCompacts
+// does the write, once the turn has actually ended; see compact.go.
+//
+// AUTOMATED callers (anything on a ticker) still use SystemCompact, which is a
+// separate, unchanged mechanism: it is called from a sweep at a moment the
+// bubble is already idle, so its inline write is correct there.
 func (k *Kernel) Compact(a addr.Address, focus string) error {
 	s := k.session(a)
 	if s == nil || !s.Alive() {
 		return fmt.Errorf("kernel: %s is not running", a)
 	}
-	_, err := s.Write([]byte(compactCommand(focus))) // Write appends Enter, submitting the command
-	return err
+	k.queueCompact(a, focus, k.now())
+	return nil
 }
 
 // compactCommand builds the exact line both compaction paths type, so the
@@ -1267,10 +1288,22 @@ func (k *Kernel) FireDue() {
 	}
 }
 
-// Introduce makes a and b mutual contacts. Root only.
+// Introduce makes a and b mutual contacts. Root only. Both targets must exist —
+// same check, same wording as IntroduceBy, so the two paths are indistinguishable
+// to a caller. Without it root could mint a contact edge to an address that no
+// longer exists, and the phantom would show up in contacts() as a reachable peer.
 func (k *Kernel) Introduce(by, a, b addr.Address) error {
 	if by != addr.Root {
 		return ErrNotAllowed
+	}
+	if a == b { // same rejection as IntroduceBy: no self-edges
+		return ErrNotAllowed
+	}
+	if _, ok := k.Reg.Get(a); !ok {
+		return fmt.Errorf("kernel: no bubble at %s", a)
+	}
+	if _, ok := k.Reg.Get(b); !ok {
+		return fmt.Errorf("kernel: no bubble at %s", b)
 	}
 	k.Caps.Introduce(a, b)
 	return nil
@@ -1361,6 +1394,30 @@ func (k *Kernel) SpawnUnder(by, parent addr.Address, persona, dir string, opts r
 		k.Caps.GrantSpawnDepth(b.Addr, d-1)
 	}
 	k.SeedBrain(b.Addr) // guaranteed private brain skeleton, keyed by address (workspaces may be shared)
+
+	// Durability gate. Everything above is IN MEMORY ONLY: before this, a spawn
+	// returned an address the instant Reg.Add ran, and whether that address ever
+	// reached disk depended on which caller happened to persist afterwards — the
+	// TUI paths did, the IPC handler the spawn() tool uses did not. Bubbles that
+	// existed long enough to appear in contacts() and receive mail then vanished
+	// on reload. So persist HERE, synchronously, and let the address out only
+	// once it is durable. No lock is held across the hook: it does file I/O.
+	if k.Persist != nil {
+		if err := k.Persist(); err != nil {
+			// Roll back in reverse order, so a failed spawn leaves nothing
+			// behind — no half-bubble a later sweep could trip over. Purge drops
+			// the child's own contacts, every edge pointing AT it, and its
+			// spawn-depth grant in one pass.
+			k.Caps.Purge(b.Addr) // includes the parent -> child edge granted above
+			k.Reg.Remove(b.Addr)
+			k.Caps.RefundSpawn(by) // the quota was consumed for a bubble that does not exist
+			// The brain folder is deliberately left: SeedBrain is idempotent and
+			// never reuses an address (Add's sequence only moves forward), so an
+			// orphan folder is inert, while deleting one is destructive I/O on a
+			// path we may not own.
+			return "", fmt.Errorf("kernel: spawn not persisted, rolled back: %w", err)
+		}
+	}
 	return b.Addr, nil
 }
 

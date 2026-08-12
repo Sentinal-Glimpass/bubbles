@@ -1016,8 +1016,13 @@ func (m Model) updateSpawnOptions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.spawnGrant = !m.spawnGrant // grant spawn ability (depth 1)
 	case "enter":
 		// root authorizes; the new bubble is attached under the selected parent
-		_, _ = m.k.SpawnUnder(addr.Root, m.pendingParent, "", m.pendingDir,
-			runner.SpawnOpts{Name: m.pendingPersona, Model: m.spawnModel, GrantSpawn: m.spawnGrant})
+		// Spawn can now fail late (the fleet couldn't be persisted, so the
+		// bubble was rolled back). Say so instead of showing an empty row the
+		// operator would take for a working bubble.
+		if _, err := m.k.SpawnUnder(addr.Root, m.pendingParent, "", m.pendingDir,
+			runner.SpawnOpts{Name: m.pendingPersona, Model: m.spawnModel, GrantSpawn: m.spawnGrant}); err != nil {
+			m.Flash = "⚠ spawn failed: " + err.Error()
+		}
 		m.expanded[m.pendingParent] = true // reveal the new child
 		m.rows = m.fleetRows()
 		return m.clearSpawn(), nil

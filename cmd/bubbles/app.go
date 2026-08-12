@@ -309,6 +309,12 @@ func runApp() {
 	// Persist promptly whenever the fleet changes (incl. agent-driven spawn/edit/
 	// delete over IPC), so nothing is lost if the daemon dies before the next dive.
 	m.OnPersist = func() { k.SyncSessionIDs(); _ = saveFleet(baseDir, k, marks); _ = saveInbox(baseDir, k) }
+	// The kernel's own durability hook: SpawnUnder calls this synchronously
+	// before it hands back an address, so a returned address is always on disk.
+	// OnPersist above is best-effort and only fires on TUI ticks/exits — the IPC
+	// spawn handler (the spawn() tool) never reached it, which is how bubbles
+	// came back as phantoms after a reload.
+	k.Persist = func() error { k.SyncSessionIDs(); return saveFleet(baseDir, k, marks) }
 	for {
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		curProg.Store(p)
