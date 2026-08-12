@@ -1267,10 +1267,19 @@ func (k *Kernel) FireDue() {
 	}
 }
 
-// Introduce makes a and b mutual contacts. Root only.
+// Introduce makes a and b mutual contacts. Root only. Both targets must exist —
+// same check, same wording as IntroduceBy, so the two paths are indistinguishable
+// to a caller. Without it root could mint a contact edge to an address that no
+// longer exists, and the phantom would show up in contacts() as a reachable peer.
 func (k *Kernel) Introduce(by, a, b addr.Address) error {
 	if by != addr.Root {
 		return ErrNotAllowed
+	}
+	if _, ok := k.Reg.Get(a); !ok {
+		return fmt.Errorf("kernel: no bubble at %s", a)
+	}
+	if _, ok := k.Reg.Get(b); !ok {
+		return fmt.Errorf("kernel: no bubble at %s", b)
 	}
 	k.Caps.Introduce(a, b)
 	return nil

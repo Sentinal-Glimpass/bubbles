@@ -198,6 +198,47 @@ func TestIntroduceRootOnly(t *testing.T) {
 	}
 }
 
+// TestIntroducePhantomAddress: the ROOT introduce path must verify BOTH bubbles
+// exist. Introducing a phantom returned "introduced" and minted a contact edge
+// to an address nobody could reach — the reported introduce(0.9.34, 0.9.30.10).
+// Both argument positions are covered: a check on one side only is the same
+// defect with a smaller blast radius.
+func TestIntroducePhantomAddress(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+
+	real1, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/r1", runner.SpawnOpts{Name: "r1"})
+	real2, _ := k.SpawnUnder(addr.Root, addr.Root, "", "/tmp/r2", runner.SpawnOpts{Name: "r2"})
+	phantom := addr.Address("0.99.99")
+
+	cases := []struct {
+		name string
+		a, b addr.Address
+	}{
+		{"phantom as a", phantom, real1},
+		{"phantom as b", real2, phantom},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := k.Introduce(addr.Root, tc.a, tc.b)
+			if err == nil {
+				t.Fatalf("Introduce(%s, %s) with a nonexistent bubble should fail", tc.a, tc.b)
+			}
+			if !strings.Contains(err.Error(), phantom.String()) {
+				t.Fatalf("error should name the missing address %s, got %v", phantom, err)
+			}
+			// and no edge in EITHER direction
+			if k.Caps.CanSend(tc.a, tc.b) && tc.a != addr.Root {
+				t.Fatalf("no contact edge %s -> %s should exist after a failed introduce", tc.a, tc.b)
+			}
+			if k.Caps.CanSend(tc.b, tc.a) && tc.b != addr.Root {
+				t.Fatalf("no contact edge %s -> %s should exist after a failed introduce", tc.b, tc.a)
+			}
+		})
+	}
+}
+
 // TestSendHealsResumableBubble: a message to a crashed bubble relaunches it via
 // --resume (same session id), then injects the notice into the new session.
 func TestSendHealsResumableBubble(t *testing.T) {
