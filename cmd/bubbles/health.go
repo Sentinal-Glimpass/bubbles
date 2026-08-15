@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -208,10 +209,10 @@ func (m *HealthManager) trimTranscripts() {
 		if b.Addr.IsRoot() || b.SessionID == "" || b.Dir == "" {
 			continue
 		}
+		path := convPath(m.home, b.Dir, b.SessionID)
 		if m.k.IsHot(b.Addr) {
 			continue // never rewrite a transcript claude currently holds open
 		}
-		path := convPath(m.home, b.Dir, b.SessionID)
 
 		// Read-only check BEFORE the trim attempt, reusing transcript.Read so
 		// there is one definition of "has a compaction boundary" (the same one
@@ -238,8 +239,8 @@ func (m *HealthManager) trimTranscripts() {
 			continue
 		}
 
-		if err := trimTranscript(path, transcriptKeepBeforeCompact); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "bubbles: transcript trim %s: %v\n", b.Addr, err)
+		if res := gatedTrim(path, b.SessionID, transcriptKeepBeforeCompact); res.Err != nil && !os.IsNotExist(res.Err) {
+			fmt.Fprintf(os.Stderr, "bubbles: transcript trim %s: %v\n", b.Addr, res.Err)
 		}
 	}
 }
@@ -313,15 +314,155 @@ const transcriptArchiveSuffix = ".archive"
 // the active thread. See internal/transcript for the single definition of
 // what a compaction boundary looks like.
 
+// trimQuietPeriod is how long a transcript must have been untouched before it
+// may be rewritten. A file being appended to must never be rewritten under its
+// writer, WHATEVER THE KERNEL BELIEVES about hotness: IsHot is registry state,
+// and registry state is exactly what proved unreliable (SetSessionID never
+// bumps the fleet version, so a bubble can point at a session that moved on).
+// The mtime is the file's own testimony and cannot go stale.
+//
+// 5 minutes is far longer than any gap between claude's appends within a turn,
+// and far shorter than the idle period of a genuinely parked bubble, so the
+// gate costs nothing real: a transcript refused for recency is simply trimmed
+// on a later sweep.
+const trimQuietPeriod = 5 * time.Minute
+
+// trimIdentityTailBytes bounds the identity read. The gate needs the LAST
+// sessionId in the file — the identity of whoever wrote most recently — so it
+// reads the tail rather than the whole (possibly multi-MiB) transcript, and
+// runs before any full read or any write. A transcript whose final 256 KiB
+// carries no sessionId at all is refused, like any other file that cannot say
+// whose it is.
+const trimIdentityTailBytes = 256 << 10
+
+// sessionIDKey is the field claude records the owning session under, on
+// essentially every transcript entry.
+var sessionIDKey = []byte(`"sessionId"`)
+
+// gatedTrim is the ONLY path from the sweep to the trimming mechanism. It
+// applies the gates that depend on the FILE rather than on registry state, and
+// only then rewrites anything:
+//
+//	Gate A (recency)  — refuse a transcript modified within trimQuietPeriod.
+//	Gate B (identity) — refuse unless the sessionId recorded INSIDE the
+//	                    transcript is the session this bubble claims. No
+//	                    sessionId found is also a refusal: unknown identity is
+//	                    not permission.
+//
+// These ADD to the caller's IsHot check, they do not replace it. Both are cheap
+// (a stat and a bounded tail read) and both run before trimTranscriptFile's
+// os.ReadFile of the whole file, so a refusal costs almost nothing.
+//
+// wantSession is the registry's SessionID — the value that is NOT trustworthy.
+// It is used only as the thing the file's own recorded identity must agree
+// with; on disagreement the file wins and nothing is written.
+func gatedTrim(path, wantSession string, keepBefore int) trimResult {
+	res := trimResult{Path: path}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
+	}
+	res.BytesBefore = info.Size()
+	res.BytesAfter = info.Size()
+	if time.Since(info.ModTime()) < trimQuietPeriod {
+		res.Outcome = trimRefusedRecent
+		return res
+	}
+
+	sid, err := transcriptSessionID(path)
+	if err != nil {
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
+	}
+	res.Session = sid
+	if sid == "" || sid != wantSession {
+		res.Outcome = trimRefusedIdentity
+		return res
+	}
+
+	out := trimTranscriptFile(path, keepBefore)
+	out.Session = sid
+	return out
+}
+
+// transcriptSessionID returns the last sessionId recorded in path's final
+// trimIdentityTailBytes, or "" if the tail carries none. Byte scanning, not
+// JSON decoding: the answer must not depend on the rest of an entry's shape
+// staying parseable, and this runs on every trim attempt.
+//
+// The tail is read rather than the head because the question is "who is writing
+// to this file NOW" — a transcript carried across a resume keeps its older
+// entries, and it is the most recent writer whose file this is.
+func transcriptSessionID(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	size := info.Size()
+	if size == 0 {
+		return "", nil
+	}
+	off := int64(0)
+	if size > trimIdentityTailBytes {
+		off = size - trimIdentityTailBytes
+	}
+	buf := make([]byte, size-off)
+	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
+		return "", err
+	}
+	return lastSessionID(buf), nil
+}
+
+// lastSessionID returns the value of the last `"sessionId": "..."` in b, or ""
+// if there is none. A key whose value is not a plain string is skipped rather
+// than guessed at.
+func lastSessionID(b []byte) string {
+	for i := bytes.LastIndex(b, sessionIDKey); i >= 0; i = bytes.LastIndex(b[:i], sessionIDKey) {
+		rest := b[i+len(sessionIDKey):]
+		j := 0
+		for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+			j++
+		}
+		if j >= len(rest) || rest[j] != ':' {
+			continue
+		}
+		j++
+		for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+			j++
+		}
+		if j >= len(rest) || rest[j] != '"' {
+			continue
+		}
+		j++
+		end := bytes.IndexByte(rest[j:], '"')
+		if end <= 0 {
+			continue
+		}
+		return string(rest[j : j+end])
+	}
+	return ""
+}
+
 // trimOutcome names what one trim attempt actually did. Every attempt ends in
 // exactly one of these, and every one of them is recorded: this incident cost a
 // day of work precisely because trimming decided things silently.
 type trimOutcome string
 
 const (
-	trimTrimmed    trimOutcome = "trimmed"     // the cut portion was archived and the live file replaced
-	trimNoBoundary trimOutcome = "no-boundary" // no compaction marker, or nothing before the keep buffer
-	trimFailed     trimOutcome = "error"       // an I/O error; see trimResult.Err
+	trimTrimmed         trimOutcome = "trimmed"          // the cut portion was archived and the live file replaced
+	trimNoBoundary      trimOutcome = "no-boundary"      // no compaction marker, or nothing before the keep buffer
+	trimRefusedRecent   trimOutcome = "refused-recent"   // modified within trimQuietPeriod (Gate A)
+	trimRefusedIdentity trimOutcome = "refused-identity" // the file's own sessionId is not this bubble's (Gate B)
+	trimFailed          trimOutcome = "error"            // an I/O error; see trimResult.Err
 )
 
 // trimResult is one attempt's full record: enough to reconstruct, from a log
