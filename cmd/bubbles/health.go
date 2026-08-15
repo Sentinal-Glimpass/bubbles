@@ -38,6 +38,18 @@ type HealthManager struct {
 	reportMu            sync.Mutex
 	lastOversizedReport map[addr.Address]time.Time
 
+	// Throttle state for the STEADY-STATE trim outcomes only (see recordTrim).
+	// Keyed by bubble AND outcome so a condition changing is always announced
+	// immediately, and only an unchanged one is quieted.
+	trimLogMu   sync.Mutex
+	lastTrimLog map[trimLogKey]time.Time
+
+	// logf is where trim decisions are announced. It is a field rather than a
+	// direct os.Stderr write so a test can prove a decision was announced at
+	// all -- the absence of any such proof is why this incident needed forensic
+	// archaeology. The daemon's stderr lands in .bubbles/daemon.log.
+	logf func(format string, a ...any)
+
 	// Decoded-transcript memo, keyed by conversation path, live only for the
 	// duration of one Sweep. See transcriptStats: it is what stops a sweep from
 	// JSON-decoding every bubble's whole transcript two or three times over.
@@ -121,7 +133,8 @@ func (m *HealthManager) endSweep() {
 }
 
 // prune drops per-bubble state for bubbles that no longer exist. Without it
-// lastPump and lastOversizedReport grow for the life of the process: a fleet
+// lastPump, lastOversizedReport and lastTrimLog grow for the life of the
+// process: a fleet
 // that spawns and deletes workers all day would keep one entry per address ever
 // seen, and the throttle state of a deleted bubble is meaningless anyway (a
 // re-spawn gets a fresh address). The stats memo needs no pruning — it is
@@ -147,6 +160,14 @@ func (m *HealthManager) prune() {
 		}
 	}
 	m.reportMu.Unlock()
+
+	m.trimLogMu.Lock()
+	for k := range m.lastTrimLog {
+		if !live[k.addr] {
+			delete(m.lastTrimLog, k)
+		}
+	}
+	m.trimLogMu.Unlock()
 }
 
 // NewHealthManager builds the manager over a kernel.
@@ -157,7 +178,9 @@ func NewHealthManager(k *kernel.Kernel) *HealthManager {
 		home:                home,
 		lastPump:            map[addr.Address]pumpWindows{},
 		lastOversizedReport: map[addr.Address]time.Time{},
+		lastTrimLog:         map[trimLogKey]time.Time{},
 		statCache:           map[string]cachedStats{},
+		logf:                func(format string, a ...any) { fmt.Fprintf(os.Stderr, format, a...) },
 	}
 }
 
@@ -211,7 +234,13 @@ func (m *HealthManager) trimTranscripts() {
 		}
 		path := convPath(m.home, b.Dir, b.SessionID)
 		if m.k.IsHot(b.Addr) {
-			continue // never rewrite a transcript claude currently holds open
+			// Never rewrite a transcript claude currently holds open. Recorded
+			// like every other outcome, through the steady-state throttle: it is
+			// the commonest outcome in a healthy fleet, and the sweep runs every
+			// 2 minutes. The session id here is the REGISTRY's, since nothing
+			// read the file — the log line says so by construction.
+			m.recordTrim(b.Addr, trimResult{Outcome: trimRefusedHot, Path: path, Session: b.SessionID})
+			continue
 		}
 
 		// Read-only check BEFORE the trim attempt, reusing transcript.Read so
@@ -235,13 +264,14 @@ func (m *HealthManager) trimTranscripts() {
 			// prove it. HasCompaction answers the marker question from the same
 			// transcript.CompactMarker scan trimTranscript itself performs, so
 			// skipping here decides nothing differently; it just declines to
-			// re-read to learn what was already read.
+			// re-read to learn what was already read. Recorded through the
+			// steady-state throttle: a never-compacted bubble is in this state
+			// on every sweep, unchanged.
+			m.recordTrim(b.Addr, trimResult{Outcome: trimNoBoundary, Path: path, Session: b.SessionID, BytesBefore: st.Bytes, BytesAfter: st.Bytes})
 			continue
 		}
 
-		if res := gatedTrim(path, b.SessionID, transcriptKeepBeforeCompact); res.Err != nil && !os.IsNotExist(res.Err) {
-			fmt.Fprintf(os.Stderr, "bubbles: transcript trim %s: %v\n", b.Addr, res.Err)
-		}
+		m.recordTrim(b.Addr, gatedTrim(path, b.SessionID, transcriptKeepBeforeCompact))
 	}
 }
 
@@ -314,6 +344,75 @@ const transcriptArchiveSuffix = ".archive"
 // the active thread. See internal/transcript for the single definition of
 // what a compaction boundary looks like.
 
+// trimLogKey throttles a trim record by bubble AND outcome, so a bubble whose
+// outcome CHANGES is always announced immediately and only an unchanged
+// steady-state condition is quieted.
+type trimLogKey struct {
+	addr    addr.Address
+	outcome trimOutcome
+}
+
+// steadyStateTrimOutcomes are the outcomes a healthy fleet produces on every
+// sweep forever: the bubble is in use, or its transcript has nothing to cut.
+// Nothing was at stake in either, so they are recorded through a throttle,
+// exactly as reportOversizedTranscript throttles its counter together with its
+// warning: the sweep runs every 2 minutes, and a counter that climbs with the
+// sweep cadence reads as an incident count when it means one unchanged fact
+// ("OversizedTranscripts: 214" meant one file).
+//
+// Every OTHER outcome — a rewrite, a refusal on the identity or recency gates,
+// an I/O failure, a registry pointing at a file that does not exist — is
+// recorded EVERY time, unthrottled. Those are the ones this incident needed and
+// did not have.
+func steadyStateTrimOutcome(o trimOutcome) bool {
+	return o == trimRefusedHot || o == trimNoBoundary
+}
+
+// recordTrim is the single place a trim attempt becomes visible: one log line
+// carrying the path, the bubble, the session id it resolved, the size before
+// and after, the bytes archived and the outcome — plus the matching counters.
+//
+// The line is deliberately reconstructible: given it alone, an operator can say
+// what was on disk, what is on disk now, and where the difference went. The
+// absence of exactly this line is why recovering the lost conversation took
+// file-history archaeology.
+func (m *HealthManager) recordTrim(a addr.Address, res trimResult) {
+	if steadyStateTrimOutcome(res.Outcome) && !m.trimLogDue(a, res.Outcome) {
+		return
+	}
+
+	errPart := ""
+	if res.Err != nil {
+		errPart = fmt.Sprintf(" err=%v", res.Err)
+	}
+	m.logf("bubbles: transcript trim outcome=%s addr=%s path=%s session=%s before=%d after=%d archived=%d%s\n",
+		res.Outcome, a, res.Path, res.Session, res.BytesBefore, res.BytesAfter, res.BytesArchived, errPart)
+
+	if res.Outcome == trimTrimmed {
+		m.k.Cost.Add(a, costmeter.FTranscriptsTrimmed, 1)
+		m.k.Cost.Add(a, costmeter.FTranscriptBytesArchived, res.BytesArchived)
+		return
+	}
+	// Everything that is not a rewrite is a trim that did not happen. Counting
+	// them together is deliberate: the question the counter answers is "how
+	// often did this path decline to act", and the log line beside it says why.
+	m.k.Cost.Add(a, costmeter.FTrimsRefused, 1)
+}
+
+// trimLogDue reports whether a steady-state outcome for a is due to be recorded
+// again, claiming the window if so. Never called for the outcomes that matter.
+func (m *HealthManager) trimLogDue(a addr.Address, o trimOutcome) bool {
+	k := trimLogKey{addr: a, outcome: o}
+	m.trimLogMu.Lock()
+	defer m.trimLogMu.Unlock()
+	last, seen := m.lastTrimLog[k]
+	if seen && time.Since(last) < oversizedReportThrottle {
+		return false
+	}
+	m.lastTrimLog[k] = time.Now()
+	return true
+}
+
 // trimQuietPeriod is how long a transcript must have been untouched before it
 // may be rewritten. A file being appended to must never be rewritten under its
 // writer, WHATEVER THE KERNEL BELIEVES about hotness: IsHot is registry state,
@@ -357,12 +456,22 @@ var sessionIDKey = []byte(`"sessionId"`)
 // It is used only as the thing the file's own recorded identity must agree
 // with; on disagreement the file wins and nothing is written.
 func gatedTrim(path, wantSession string, keepBefore int) trimResult {
-	res := trimResult{Path: path}
+	// Session starts as the registry's claim and is replaced by the file's own
+	// once one is found, so the log line always names a session and names the
+	// surprising one whenever the two disagree.
+	res := trimResult{Path: path, Session: wantSession}
 
 	info, err := os.Stat(path)
 	if err != nil {
-		res.Outcome = trimFailed
-		res.Err = err
+		// A registry entry naming a file that does not exist is not an I/O
+		// failure, it is the staleness this whole plan is about — four bubbles
+		// are in that state today. It gets its own outcome so it can be seen
+		// rather than swallowed as "trim error".
+		res.Outcome = trimNoTranscript
+		if !os.IsNotExist(err) {
+			res.Outcome = trimFailed
+			res.Err = err
+		}
 		return res
 	}
 	res.BytesBefore = info.Size()
@@ -378,7 +487,9 @@ func gatedTrim(path, wantSession string, keepBefore int) trimResult {
 		res.Err = err
 		return res
 	}
-	res.Session = sid
+	if sid != "" {
+		res.Session = sid
+	}
 	if sid == "" || sid != wantSession {
 		res.Outcome = trimRefusedIdentity
 		return res
@@ -462,6 +573,8 @@ const (
 	trimNoBoundary      trimOutcome = "no-boundary"      // no compaction marker, or nothing before the keep buffer
 	trimRefusedRecent   trimOutcome = "refused-recent"   // modified within trimQuietPeriod (Gate A)
 	trimRefusedIdentity trimOutcome = "refused-identity" // the file's own sessionId is not this bubble's (Gate B)
+	trimRefusedHot      trimOutcome = "refused-hot"      // claude holds the file open
+	trimNoTranscript    trimOutcome = "no-transcript"    // the registry names a file that does not exist
 	trimFailed          trimOutcome = "error"            // an I/O error; see trimResult.Err
 )
 
