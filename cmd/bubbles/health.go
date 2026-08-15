@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -294,21 +295,98 @@ func (m *HealthManager) reportOversizedTranscript(a addr.Address, size int64) {
 	}
 }
 
+// transcriptArchiveSuffix names the sidecar file that holds everything trimming
+// has ever cut from a transcript: <transcript>.jsonl.archive. It is APPEND
+// ONLY. Nothing in this repo removes bytes from it, prunes it, or ages it out —
+// disk grows where it used to shrink, and that is the deliberate trade. An
+// automatic pruner would reintroduce exactly the class of bug the archive
+// exists to remove.
+//
+// The suffix keeps the ".jsonl" in the middle rather than replacing it so the
+// archive sits next to its transcript in a directory listing, and cannot be
+// resolved by convPath: session ids never end in ".jsonl.archive", so no scan
+// in this package can mistake an archive for a session's conversation.
+const transcriptArchiveSuffix = ".archive"
+
 // Everything after transcript.CompactMarker is a self-contained conversation
 // tree rooted at a parentUuid:null entry, so cutting before it never breaks
 // the active thread. See internal/transcript for the single definition of
 // what a compaction boundary looks like.
 
-// trimTranscript rewrites path in place, discarding everything before
-// (latestCompaction - keepBefore) lines. No-op if there's no compaction yet or
-// nothing meaningful to remove. Byte-exact: kept lines are copied verbatim (we
-// never re-serialize claude's JSON). MUST only run on a file no process holds
-// open (the bubble must be cold).
+// trimOutcome names what one trim attempt actually did. Every attempt ends in
+// exactly one of these, and every one of them is recorded: this incident cost a
+// day of work precisely because trimming decided things silently.
+type trimOutcome string
+
+const (
+	trimTrimmed    trimOutcome = "trimmed"     // the cut portion was archived and the live file replaced
+	trimNoBoundary trimOutcome = "no-boundary" // no compaction marker, or nothing before the keep buffer
+	trimFailed     trimOutcome = "error"       // an I/O error; see trimResult.Err
+)
+
+// trimResult is one attempt's full record: enough to reconstruct, from a log
+// line alone, what was on disk before, what is on disk now, and where the
+// difference went.
+type trimResult struct {
+	Outcome       trimOutcome
+	Path          string
+	Session       string // session id as resolved for/from the file ("" = none found)
+	BytesBefore   int64
+	BytesAfter    int64
+	BytesArchived int64
+	Err           error
+}
+
+// trimTranscript is the compatibility spelling of the mechanism: it cuts and
+// archives, and reports only whether that failed. Callers that need to log or
+// meter the outcome use trimTranscriptFile directly.
 func trimTranscript(path string, keepBefore int) error {
+	return trimTranscriptFile(path, keepBefore).Err
+}
+
+// trimTranscriptFile rewrites path, moving everything before
+// (latestCompaction - keepBefore) lines into <path>.archive. No-op if there's
+// no compaction yet or nothing meaningful to remove. Byte-exact in both
+// directions: cut and kept lines are copied verbatim (we never re-serialize
+// claude's JSON), so archive+live always reconstructs the original.
+//
+// ARCHIVE FIRST, REPLACE SECOND, NEVER THE OTHER ORDER. The cut portion is
+// durably appended to the archive and only then is the live file replaced. If
+// the archive write fails the live transcript is left completely untouched: a
+// trim that half-succeeds is the bug this function was rewritten to remove.
+// The reverse failure is survivable by construction — an archive append that
+// lands while the replace fails leaves the same bytes in two places, which
+// costs disk and loses nothing, and a retry next sweep re-appends rather than
+// re-deletes.
+//
+// This function is the MECHANISM only. It assumes the caller has already
+// established that rewriting this file is safe — see trimTranscripts, which
+// holds the identity, recency and hotness gates. It MUST only run on a file no
+// process holds open.
+func trimTranscriptFile(path string, keepBefore int) trimResult {
+	res := trimResult{Outcome: trimNoBoundary, Path: path}
+
+	// An archive is append-only history that accumulates compaction markers by
+	// construction, so anything that mistook one for a transcript would cut it
+	// down — destroying exactly what it exists to hold. Nothing in this package
+	// can name an archive (convPath builds from session ids), so this is a
+	// backstop against a future caller, and it refuses loudly rather than
+	// silently no-opping.
+	if strings.HasSuffix(path, transcriptArchiveSuffix) {
+		res.Outcome = trimFailed
+		res.Err = fmt.Errorf("refusing to trim an archive: %s", path)
+		return res
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
 	}
+	res.BytesBefore = int64(len(data))
+	res.BytesAfter = res.BytesBefore
+
 	lines := bytes.SplitAfter(data, []byte{'\n'}) // keeps the trailing \n on each line
 	latest := -1
 	for i, l := range lines {
@@ -317,21 +395,81 @@ func trimTranscript(path string, keepBefore int) error {
 		}
 	}
 	if latest < 0 {
-		return nil // no compaction boundary yet — nothing summarized away to clear
+		return res // no compaction boundary yet — nothing summarized away to clear
 	}
 	cut := latest - keepBefore
 	if cut <= 0 {
-		return nil // the whole file is at/after the buffer — nothing to remove
+		return res // the whole file is at/after the buffer — nothing to remove
 	}
-	var buf bytes.Buffer
-	buf.Grow(len(data))
+
+	var drop, keep bytes.Buffer
+	drop.Grow(len(data))
+	keep.Grow(len(data))
+	for _, l := range lines[:cut] {
+		drop.Write(l)
+	}
 	for _, l := range lines[cut:] {
-		buf.Write(l)
+		keep.Write(l)
 	}
+
+	if err := appendArchive(path+transcriptArchiveSuffix, drop.Bytes()); err != nil {
+		// The live transcript has not been touched and must not be: the history
+		// about to be cut has nowhere durable to go.
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
+	}
+
 	tmp := path + ".htrim"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
-		return err
+	if err := os.WriteFile(tmp, keep.Bytes(), 0o644); err != nil {
+		_ = os.Remove(tmp)
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
 	}
 	// Same final path/name → same session id → the bubble keeps writing to it.
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
+	}
+
+	res.Outcome = trimTrimmed
+	res.BytesArchived = int64(drop.Len())
+	res.BytesAfter = int64(keep.Len())
+	return res
+}
+
+// appendArchive durably appends b to the archive at path, creating it on first
+// use. It is the only writer of archives in this repo, and it only ever grows
+// them.
+//
+// The fsync is not decoration: the whole point of the archive is that it
+// survives the crash that interrupts the trim, and an append still sitting in
+// the page cache when the live file is replaced would not. A write that fails
+// part-way is truncated back to the length it had on entry, so an archive never
+// keeps a half line — a torn record would corrupt the very reconstruction the
+// archive exists to make possible.
+func appendArchive(path string, b []byte) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	start := info.Size()
+	_, werr := f.Write(b)
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if werr != nil {
+		_ = f.Truncate(start) // best effort: never leave a torn record behind
+		f.Close()
+		return werr
+	}
+	return f.Close()
 }
