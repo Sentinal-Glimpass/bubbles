@@ -291,7 +291,7 @@ func (r *Registry) ByControlToken(tok string) (*Bubble, bool) {
 
 // SetDir changes a bubble's working directory (used on its next launch).
 //
-// This DOES bump version, and the difference from SetSessionID is deliberate.
+// This DOES bump version, and the difference from SetSessionIDForSave is deliberate.
 // Dir is durable fleet state the operator set: if it changes, fleet.json is
 // stale until it is re-saved. SessionID is refreshed by SyncSessionIDs on the
 // way INTO a save, so bumping there would mark the fleet dirty as a side effect
@@ -320,10 +320,15 @@ func (r *Registry) Dir(a addr.Address) (string, bool) {
 	return "", false
 }
 
-// SetSessionID records the claude session id a bubble should resume from
+// SetSessionIDForSave records the claude session id a bubble should resume from
 // WITHOUT marking the fleet dirty. It is the PRE-SAVE entry point, and its only
 // callers are the ones that write a value which is about to be persisted
 // anyway: the pre-persist sweep (SyncSessionIDs) and fleet restore.
+//
+// THE CONSTRAINT IS IN THE NAME ON PURPOSE. It cannot be unexported — the
+// kernel and the daemon both need it — so "ForSave" is the enforcement: a
+// caller reaching for this from a launch path has to type the reason it is
+// wrong. Anything that is not immediately-before-a-save wants RecordSessionID.
 //
 // Deliberately does NOT bump version, and this is the half of the split that
 // must stay that way. SyncSessionIDs runs inside OnPersist, immediately before
@@ -338,7 +343,7 @@ func (r *Registry) Dir(a addr.Address) (string, bool) {
 //
 // Like every other mutator here it goes through the mutex: the relaunch path
 // (ensureAlive) and the pre-persist sweep can write the same address at once.
-func (r *Registry) SetSessionID(a addr.Address, id string) {
+func (r *Registry) SetSessionIDForSave(a addr.Address, id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if b, ok := r.bubbles[a]; ok {
@@ -361,7 +366,7 @@ func (r *Registry) SetSessionID(a addr.Address, id string) {
 //
 // A bump must be a REAL change: re-recording the id a bubble already has leaves
 // the version untouched, so a no-op refresh cannot re-trigger a save. See
-// SetSessionID above for the non-dirtying counterpart and the loop it avoids.
+// SetSessionIDForSave above for the non-dirtying counterpart and the loop it avoids.
 func (r *Registry) RecordSessionID(a addr.Address, id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

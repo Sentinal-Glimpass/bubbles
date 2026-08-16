@@ -26,7 +26,7 @@ func TestSessionIDConcurrentEnsureAliveAndSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	k.Reg.SetSessionID(a, "seed-session")
+	k.Reg.SetSessionIDForSave(a, "seed-session")
 
 	// A live hook, as app.go wires: the id a bubble is actually on right now.
 	var n int64
@@ -75,7 +75,7 @@ func TestEnsureAliveUsesOneCoherentSessionID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("spawn: %v", err)
 		}
-		k.Reg.SetSessionID(a, "stored-id")
+		k.Reg.SetSessionIDForSave(a, "stored-id")
 
 		if k.EnsureAlive(a) == nil {
 			t.Fatal("EnsureAlive returned nil")
@@ -129,7 +129,7 @@ func TestEnsureAliveUsesOneCoherentSessionID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("spawn: %v", err)
 		}
-		k.Reg.SetSessionID(a, "stale-id")
+		k.Reg.SetSessionIDForSave(a, "stale-id")
 		k.CurrentSessionID = func(addr.Address) string { return "live-id" }
 
 		if k.EnsureAlive(a) == nil {
@@ -152,7 +152,7 @@ func TestSetSessionIDDoesNotBumpVersion(t *testing.T) {
 	r := registry.New()
 	b := r.Add(addr.Root, "worker", "/tmp/w")
 	before := r.Version()
-	r.SetSessionID(b.Addr, "x")
+	r.SetSessionIDForSave(b.Addr, "x")
 	if after := r.Version(); after != before {
 		t.Fatalf("version moved %d -> %d on SetSessionID", before, after)
 	}

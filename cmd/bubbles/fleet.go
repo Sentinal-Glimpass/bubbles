@@ -305,7 +305,7 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 				// marking the fleet dirty with it would only schedule a save that
 				// rewrites what is already on disk. RecordSessionID is for a
 				// bubble that genuinely acquired a new conversation.
-				k.Reg.SetSessionID(addr.Root, r.SessionID)
+				k.Reg.SetSessionIDForSave(addr.Root, r.SessionID)
 			}
 			continue
 		}

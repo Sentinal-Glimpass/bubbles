@@ -833,7 +833,7 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 			sid = cur
 			// Launch path: this bubble has genuinely moved conversation, so the
 			// fleet must be marked dirty and re-saved. RecordSessionID (not
-			// SetSessionID) is what does that — see registry for the split.
+			// SetSessionIDForSave) is what does that — see registry for the split.
 			k.Reg.RecordSessionID(a, cur)
 		}
 	}
@@ -866,7 +866,7 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	}
 	// Fresh session with a new id, seeded with the persona and its charter/goal.
 	// Recorded through the launch-path setter so the new id marks the fleet dirty
-	// and actually reaches fleet.json; a plain SetSessionID here is how ids used
+	// and actually reaches fleet.json; a plain SetSessionIDForSave here is how ids used
 	// to be lost, leaving the next launch to resume a conversation that had been
 	// superseded.
 	sid = newSessionID()
@@ -967,7 +967,7 @@ func (k *Kernel) Forget(owner, contact addr.Address) error {
 // hook, so a conversation switched via /resume in a still-running session is
 // captured before the fleet is persisted. No-op without CurrentSessionID.
 //
-// It writes through SetSessionID, the NON-dirtying setter, and must keep doing
+// It writes through SetSessionIDForSave, the NON-dirtying setter, and must keep doing
 // so: this runs inside OnPersist immediately before saveFleet, freshening
 // values that are about to be written anyway. Marking the fleet dirty from here
 // would land after the persist loop captured its version and make every save
@@ -979,7 +979,7 @@ func (k *Kernel) SyncSessionIDs() {
 	}
 	for _, b := range k.Reg.All() {
 		if cur := k.CurrentSessionID(b.Addr); cur != "" {
-			k.Reg.SetSessionID(b.Addr, cur)
+			k.Reg.SetSessionIDForSave(b.Addr, cur)
 		}
 	}
 }

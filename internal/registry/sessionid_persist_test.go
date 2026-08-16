@@ -81,9 +81,9 @@ func TestSetSessionIDStaysNonDirtying(t *testing.T) {
 	r.RecordSessionID(b.Addr, "sess-a")
 
 	v := r.Version()
-	r.SetSessionID(b.Addr, "sess-live") // a DIFFERENT id, i.e. a real value change
+	r.SetSessionIDForSave(b.Addr, "sess-live") // a DIFFERENT id, i.e. a real value change
 	if got := r.Version(); got != v {
-		t.Fatalf("version moved %d -> %d on SetSessionID; the pre-save setter must never dirty the fleet", v, got)
+		t.Fatalf("version moved %d -> %d on SetSessionIDForSave; the pre-save setter must never dirty the fleet", v, got)
 	}
 	if sid, _ := r.SessionID(b.Addr); sid != "sess-live" {
 		t.Fatalf("SessionID = %q want sess-live — the value must still land", sid)
