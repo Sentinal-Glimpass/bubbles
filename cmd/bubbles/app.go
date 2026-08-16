@@ -213,6 +213,14 @@ func runApp() {
 	// empty in-memory state before it's been loaded (that race wiped schedules and
 	// mail on large, slow-booting fleets).
 	//
+	// STILL ACCURATE, and strictly easier to satisfy since the loads moved above
+	// the listener binds (see the EVERY LOAD ABOVE EVERY BIND block): the initial
+	// load now finishes earlier in boot, while this registration stayed where it
+	// was, so the gap this NOTE protects only widened. It is a SEPARATE rule from
+	// that one and both are asserted together by
+	// TestPersistedStoresAreLoadedBeforeListenersBind — savers after the loads
+	// here, listeners after the loads there.
+	//
 	// Resource sampler and the two dashboard pollers feed the TUI's top-right
 	// panel; they send to whichever program is currently running (nil while
 	// diving into a bubble).
@@ -238,24 +246,35 @@ func runApp() {
 	defer stopChecks()
 	go runChecks(checkCtx, checkReg, supervisorTick)
 
-	// THE FLEET IS LOADED AND REPAIRED BEFORE ANY LISTENER IS BOUND. Everything
-	// below this point — the webhook server, the IPC socket — can deliver a
-	// message, and delivery of an urgent message reaches EnsureAlive, which
-	// launches a bubble on whatever session id the registry holds at that moment.
-	// Both directions of that race lose work:
+	// EVERY LOAD ABOVE EVERY BIND. This is the whole rule, and the next person to
+	// add either kind of thing has to keep it. Everything below this block — the
+	// webhook server, the IPC socket — accepts traffic the instant it is bound,
+	// and traffic mutates exactly the state these loads are about to install.
 	//
-	//   - a delivery arriving before the repair resumes a phantom id (or, if an
-	//     id was ever recycled, somebody else's conversation) — exactly what
-	//     reconcileSessionIDs exists to prevent;
-	//   - a bubble launched before the repair mints a fresh id whose .jsonl has
-	//     not been flushed yet, and the repair then clears a LIVE pointer — the
-	//     same silent loss this branch exists to eliminate, caused by the cure.
+	// Two distinct losses live in a bind-before-load window:
+	//
+	//   - THE REGISTRY. Delivery of an urgent message reaches EnsureAlive, which
+	//     launches a bubble on whatever session id the registry holds right then.
+	//     A delivery before restoreFleet/reconcileSessionIDs resumes a phantom id
+	//     (or, if an id was ever recycled, somebody else's conversation); and a
+	//     bubble launched before the repair mints a fresh id whose .jsonl is not
+	//     flushed yet, so the repair clears a LIVE pointer — the same silent loss
+	//     this branch exists to eliminate, caused by the cure.
+	//
+	//   - THE STORES. inbox.Store.Load, sched.Store.Load and tasks.Store.Load all
+	//     REPLACE their contents wholesale (they rebuild s.all from the file). A
+	//     message, schedule or task that arrives in the window is therefore not
+	//     merged with the persisted state — it is overwritten by it, and it is
+	//     gone. That breaks this repo's oldest law, "no message is ever dropped",
+	//     with no self-healing fallback anywhere: unlike a stale session id,
+	//     nothing later notices, UnreadCount never counted it, and the sender was
+	//     told it was delivered.
 	//
 	// Ordering is the fix rather than a "loaded yet?" gate: a gate is another
 	// piece of state that can be read from the wrong goroutine or forgotten on a
 	// new delivery path, while an unbound listener cannot deliver anything at
-	// all. Keep the two loads above the two binds. (Guarded by
-	// TestFleetIsLoadedAndRepairedBeforeListenersBind.)
+	// all. (Guarded by TestPersistedStoresAreLoadedBeforeListenersBind and
+	// TestMessageArrivingAtTheBindWindowIsNeverDropped.)
 	marks := restoreFleet(baseDir, k) // rehydrate a saved fleet (empty if none)
 	// Repair fleets saved before the launch path marked session ids dirty: any
 	// stored id whose transcript is gone would otherwise be resumed forever,
@@ -276,6 +295,13 @@ func runApp() {
 			_ = saveFleet(baseDir, k, marks)
 		}
 	}
+	// The other three persisted stores, for the reason above: each Load replaces
+	// its store wholesale, so anything that arrives before them is destroyed
+	// rather than merged. They are pure data loads — no goroutine, no launch, no
+	// dependency on the listeners — so nothing is gained by binding first.
+	inboxExisted, inboxOK := loadInbox(baseDir, k)
+	loadSchedules(baseDir, k)
+	loadTasks(baseDir, k)
 
 	// Incoming webhooks: per-bubble secret URLs so scripts/crons/external
 	// services can message (and wake) a bubble programmatically.
@@ -308,11 +334,13 @@ func runApp() {
 	}
 
 	// Quit/relaunch loop: the TUI quits when you dive in; we hand over the
-	// terminal, then relaunch the fleet view. (The fleet itself was restored and
-	// repaired above, before any listener was bound — see there for why.)
-	inboxExisted, inboxOK := loadInbox(baseDir, k)
-	loadSchedules(baseDir, k)
-	loadTasks(baseDir, k)
+	// terminal, then relaunch the fleet view. (Every persisted store was loaded
+	// above, before any listener was bound — see there for why.)
+	//
+	// Reaping stays HERE rather than moving up with the loads: it acts on the
+	// task ledger the loads installed, and it only deletes verifiers of tasks
+	// that are already Done or Cancelled, so a task submitted over IPC in the
+	// meantime (necessarily Open) is out of its reach.
 	if n := k.ReapOrphanVerifiers(); n > 0 {
 		fmt.Fprintf(os.Stderr, "bubbles: reaped %d orphaned task verifier(s) from a previous run\n", n)
 	}

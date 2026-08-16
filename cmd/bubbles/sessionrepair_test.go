@@ -215,7 +215,7 @@ func TestUnreadableTranscriptKeepsTheID(t *testing.T) {
 // holds; after the repair that must be a FRESH conversation, never the phantom.
 //
 // This is the delivery the startup ordering exists to protect: main binds no
-// listener until the repair has run (see TestFleetIsLoadedAndRepairedBefore-
+// listener until every load has run (see TestPersistedStoresAreLoadedBefore-
 // ListenersBind), so the first delivery a daemon can ever receive sees the
 // registry in exactly this state.
 func TestDeliveryAfterRepairCannotResumeAClearedID(t *testing.T) {
@@ -243,53 +243,5 @@ func TestDeliveryAfterRepairCannotResumeAClearedID(t *testing.T) {
 	}
 	if sid, _ := f.k.Reg.SessionID(f.a); sid != got.Opts.SessionID {
 		t.Fatalf("stored id %q != launched id %q", sid, got.Opts.SessionID)
-	}
-}
-
-// TestFleetIsLoadedAndRepairedBeforeListenersBind pins the startup ORDERING,
-// which is the only thing that makes the repair safe.
-//
-// startWebhookServer and ipc.Serve both accept traffic the moment they are
-// bound, and an urgent delivery reaches EnsureAlive. Bind either of them before
-// the fleet is loaded and repaired and there are two ways to lose work: a
-// delivery in that window resumes a phantom id, or a bubble launched in that
-// window mints a fresh id whose transcript has not been flushed yet and the
-// repair clears a LIVE pointer.
-//
-// Asserted against the source because the property IS the order of statements
-// in main, which no runtime seam can observe without becoming a second copy of
-// the thing under test. Ordering is used deliberately in preference to a
-// "loaded yet?" gate: an unbound listener cannot deliver at all, whereas a gate
-// is more state to get wrong on the next delivery path someone adds.
-func TestFleetIsLoadedAndRepairedBeforeListenersBind(t *testing.T) {
-	src, err := os.ReadFile("app.go")
-	if err != nil {
-		t.Fatalf("read app.go: %v", err)
-	}
-	at := func(needle string) int {
-		i := strings.Index(string(src), needle)
-		if i < 0 {
-			t.Fatalf("app.go no longer contains %q — this guard must be updated deliberately, not deleted", needle)
-		}
-		if j := strings.Index(string(src[i+len(needle):]), needle); j >= 0 {
-			t.Fatalf("%q appears more than once in app.go; the guard cannot tell which one binds first", needle)
-		}
-		return i
-	}
-	load := at("restoreFleet(baseDir, k)")
-	repair := at("reconcileSessionIDs(k, home,")
-	for _, bind := range []struct {
-		what, needle string
-	}{
-		{"the webhook server", "startWebhookServer(k)"},
-		{"the IPC socket", "ipc.Serve(sock,"},
-	} {
-		b := at(bind.needle)
-		if load > b {
-			t.Errorf("restoreFleet runs AFTER %s binds: a delivery in that window launches a bubble the registry has not restored yet", bind.what)
-		}
-		if repair > b {
-			t.Errorf("reconcileSessionIDs runs AFTER %s binds: a delivery in that window can resume a phantom session id, and a launch in that window can have a LIVE id cleared under it", bind.what)
-		}
 	}
 }
