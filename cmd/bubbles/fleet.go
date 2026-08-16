@@ -301,6 +301,10 @@ func restoreFleet(baseDir string, k *kernel.Kernel) map[int]addr.Address {
 		if addr.Address(r.Addr).IsRoot() { // root is pre-seeded; just restore its session info
 			if _, ok := k.Reg.Get(addr.Root); ok {
 				k.Reg.SetDir(addr.Root, r.Dir)
+				// The non-dirtying setter: this value came FROM fleet.json, so
+				// marking the fleet dirty with it would only schedule a save that
+				// rewrites what is already on disk. RecordSessionID is for a
+				// bubble that genuinely acquired a new conversation.
 				k.Reg.SetSessionID(addr.Root, r.SessionID)
 			}
 			continue

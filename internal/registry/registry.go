@@ -291,12 +291,13 @@ func (r *Registry) ByControlToken(tok string) (*Bubble, bool) {
 
 // SetDir changes a bubble's working directory (used on its next launch).
 //
-// Unlike SetSessionID this DOES bump version, and the difference is deliberate.
+// This DOES bump version, and the difference from SetSessionID is deliberate.
 // Dir is durable fleet state the operator set: if it changes, fleet.json is
 // stale until it is re-saved. SessionID is refreshed by SyncSessionIDs on the
 // way INTO a save, so bumping there would mark the fleet dirty as a side effect
 // of saving it. Dir is never written from the persist path, so it has no such
-// feedback loop.
+// feedback loop — and neither does RecordSessionID, the launch-path session-id
+// setter, which bumps for exactly the same reason SetDir does.
 func (r *Registry) SetDir(a addr.Address, dir string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -319,21 +320,58 @@ func (r *Registry) Dir(a addr.Address) (string, bool) {
 	return "", false
 }
 
-// SetSessionID records the claude session id a bubble should resume from. This
-// field is written from the kernel's relaunch path (ensureAlive) and from the
-// pre-persist sweep (SyncSessionIDs), which can run concurrently for the same
-// address — so it must go through the mutex like every other mutator here.
+// SetSessionID records the claude session id a bubble should resume from
+// WITHOUT marking the fleet dirty. It is the PRE-SAVE entry point, and its only
+// callers are the ones that write a value which is about to be persisted
+// anyway: the pre-persist sweep (SyncSessionIDs) and fleet restore.
 //
-// Deliberately does NOT bump version. SessionID is persisted, but it is
-// refreshed on the way INTO a save (SyncSessionIDs runs immediately before
-// saveFleet); bumping the version there would mark the fleet dirty as a side
-// effect of saving it and make the change-driven autosave re-save forever.
+// Deliberately does NOT bump version, and this is the half of the split that
+// must stay that way. SyncSessionIDs runs inside OnPersist, immediately before
+// saveFleet, while the TUI has ALREADY captured the version it is saving at
+// (internal/tui/model.go). A bump from inside that callback lands after the
+// capture, so the next tick sees a change and saves again, and again, forever.
+//
+// It is NOT the entry point for a bubble that genuinely acquired or moved to a
+// new conversation — that is RecordSessionID below, which does bump. The two
+// must not be collapsed back into one function: one of them exists to break the
+// autosave loop, the other exists to make a real id reach disk.
+//
+// Like every other mutator here it goes through the mutex: the relaunch path
+// (ensureAlive) and the pre-persist sweep can write the same address at once.
 func (r *Registry) SetSessionID(a addr.Address, id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if b, ok := r.bubbles[a]; ok {
 		b.SessionID = id
 	}
+}
+
+// RecordSessionID is the LAUNCH-PATH entry point for the same field: the bubble
+// has genuinely acquired a conversation (a fresh session id was minted) or
+// moved to a different one (an in-session /resume that ensureAlive observed).
+// That is durable fleet state, so it DOES bump version — the change-driven
+// autosave then writes the id to fleet.json. It reports whether it changed
+// anything.
+//
+// Without this, a new session id reached disk only if some UNRELATED fleet
+// change happened to bump the version while the bubble was still hot (so that
+// SyncSessionIDs could still read the live id). Otherwise the id was silently
+// lost and the next launch resumed the OLD id from fleet.json: you got an old
+// conversation back and the real work was orphaned. That cost a day of work.
+//
+// A bump must be a REAL change: re-recording the id a bubble already has leaves
+// the version untouched, so a no-op refresh cannot re-trigger a save. See
+// SetSessionID above for the non-dirtying counterpart and the loop it avoids.
+func (r *Registry) RecordSessionID(a addr.Address, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.bubbles[a]
+	if !ok || b.SessionID == id {
+		return false
+	}
+	b.SessionID = id
+	r.version++
+	return true
 }
 
 // SessionID returns a bubble's stored session id and whether the bubble exists.

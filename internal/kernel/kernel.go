@@ -831,7 +831,10 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 	if k.CurrentSessionID != nil {
 		if cur := k.CurrentSessionID(a); cur != "" {
 			sid = cur
-			k.Reg.SetSessionID(a, cur)
+			// Launch path: this bubble has genuinely moved conversation, so the
+			// fleet must be marked dirty and re-saved. RecordSessionID (not
+			// SetSessionID) is what does that — see registry for the split.
+			k.Reg.RecordSessionID(a, cur)
 		}
 	}
 	// A stored SessionID means this bubble has run before, and we are here
@@ -862,8 +865,12 @@ func (k *Kernel) ensureAlive(a addr.Address, meterRewarm bool) runner.Session {
 		}
 	}
 	// Fresh session with a new id, seeded with the persona and its charter/goal.
+	// Recorded through the launch-path setter so the new id marks the fleet dirty
+	// and actually reaches fleet.json; a plain SetSessionID here is how ids used
+	// to be lost, leaving the next launch to resume a conversation that had been
+	// superseded.
 	sid = newSessionID()
-	k.Reg.SetSessionID(a, sid)
+	k.Reg.RecordSessionID(a, sid)
 	sess, err := k.runner.Launch(a, b.Dir, runner.SpawnOpts{Persona: b.Label(), Goal: b.Goal, Model: b.Model, SessionID: sid, Resume: false})
 	if err != nil {
 		// A failed launch is metered as nothing (no FRewarms: nothing was warmed)
@@ -959,6 +966,13 @@ func (k *Kernel) Forget(owner, contact addr.Address) error {
 // SyncSessionIDs refreshes each bubble's stored SessionID from its live session
 // hook, so a conversation switched via /resume in a still-running session is
 // captured before the fleet is persisted. No-op without CurrentSessionID.
+//
+// It writes through SetSessionID, the NON-dirtying setter, and must keep doing
+// so: this runs inside OnPersist immediately before saveFleet, freshening
+// values that are about to be written anyway. Marking the fleet dirty from here
+// would land after the persist loop captured its version and make every save
+// schedule the next one, forever. The launch path uses RecordSessionID instead,
+// which is where a genuinely new id gets its dirty mark.
 func (k *Kernel) SyncSessionIDs() {
 	if k.CurrentSessionID == nil {
 		return
@@ -1620,13 +1634,13 @@ func (k *Kernel) StartRoot(dir string) error {
 	if k.CurrentSessionID != nil { // resume the conversation root is actually on now
 		if cur := k.CurrentSessionID(addr.Root); cur != "" {
 			sid = cur
-			k.Reg.SetSessionID(addr.Root, cur)
+			k.Reg.RecordSessionID(addr.Root, cur) // launch path: must mark the fleet dirty
 		}
 	}
 	resume := sid != "" // set => restored, resume its conversation
 	if sid == "" {
 		sid = newSessionID()
-		k.Reg.SetSessionID(addr.Root, sid)
+		k.Reg.RecordSessionID(addr.Root, sid) // launch path: must mark the fleet dirty
 	}
 	sess, err := k.runner.Launch(addr.Root, rootDir, runner.SpawnOpts{Persona: "root", SessionID: sid, Resume: resume})
 	if err != nil {
