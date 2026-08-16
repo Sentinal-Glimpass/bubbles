@@ -144,14 +144,63 @@ func TestHotRefusalIsRecorded(t *testing.T) {
 		t.Errorf("a hot-bubble refusal must say so; got %q", line)
 	}
 
-	// Sweep runs every 2 minutes and a hot bubble stays hot. Repeating the
-	// same unchanged outcome must not climb with the sweep cadence — that is
-	// the "OversizedTranscripts: 214" lesson, in a counter the TUI shows
-	// beside genuine incidents.
+	// Sweep runs every 2 minutes and a hot bubble stays hot. The LOG LINE must
+	// not climb with the sweep cadence — that is the "OversizedTranscripts:
+	// 214" lesson. The COUNTER must, because every suppression path in this
+	// repo is metered on every suppression.
 	f.m.trimTranscripts()
 	f.m.trimTranscripts()
-	if _, _, refused := f.counters(); refused != 1 {
-		t.Errorf("TrimsRefused = %d after 3 sweeps of the same unchanged condition, want 1", refused)
+	if n := strings.Count(log.text(), "outcome=refused-hot"); n != 1 {
+		t.Errorf("refused-hot logged %d times across 3 sweeps of one unchanged condition, want 1", n)
+	}
+	if _, _, refused := f.counters(); refused != 3 {
+		t.Errorf("TrimsRefused = %d after 3 sweeps, want 3 — only the log line is rate-limited, never the meter", refused)
+	}
+}
+
+// TestTrimLogThrottleCoversEverySteadyState: refused-identity and
+// no-transcript are STICKY, not transient. This branch deliberately defers the
+// SetSessionID persistence fix, so a bubble naming a session that does not
+// exist hits the same outcome on every 2-minute sweep, forever. Unthrottled
+// that is ~720 lines a day burying the very lines this work exists to surface.
+func TestTrimLogThrottleCoversEverySteadyState(t *testing.T) {
+	f := newPumpFixture(t)
+	f.sessionID(t, "sess-that-never-existed")
+	log := f.captureTrimLog()
+
+	f.m.trimTranscripts()
+	f.m.trimTranscripts()
+	f.m.trimTranscripts()
+
+	if n := strings.Count(log.text(), "outcome=no-transcript"); n != 1 {
+		t.Errorf("no-transcript logged %d times across 3 sweeps, want 1 — a sticky outcome must not repeat at sweep cadence", n)
+	}
+	if _, _, refused := f.counters(); refused != 3 {
+		t.Errorf("TrimsRefused = %d, want 3 — the meter counts every attempt even when the line is suppressed", refused)
+	}
+}
+
+// TestTrimLogAnnouncesAChangeOfStateImmediately is the other half of the
+// throttle, and the reason its key carries the outcome: what is worth seeing is
+// a condition CHANGING, and it must never wait out the previous condition's
+// window.
+func TestTrimLogAnnouncesAChangeOfStateImmediately(t *testing.T) {
+	f := newPumpFixture(t)
+	f.sessionID(t, "sess-a")
+	log := f.captureTrimLog()
+
+	f.m.trimTranscripts() // no transcript on disk yet
+	if !strings.Contains(log.text(), "outcome=no-transcript") {
+		t.Fatal("setup: the first outcome was not recorded")
+	}
+
+	// Same bubble, same window, different outcome: somebody else's transcript
+	// has appeared where this bubble's should be.
+	f.writeIdentifiedTranscript(t, "someone-elses-session", time.Hour)
+	f.m.trimTranscripts()
+
+	if !strings.Contains(log.text(), "outcome=refused-identity") {
+		t.Errorf("a CHANGE of outcome must be announced immediately, not swallowed by the previous outcome's window; got %q", log.text())
 	}
 }
 

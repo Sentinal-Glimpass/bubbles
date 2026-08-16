@@ -234,11 +234,10 @@ func (m *HealthManager) trimTranscripts() {
 		}
 		path := convPath(m.home, b.Dir, b.SessionID)
 		if m.k.IsHot(b.Addr) {
-			// Never rewrite a transcript claude currently holds open. Recorded
-			// like every other outcome, through the steady-state throttle: it is
-			// the commonest outcome in a healthy fleet, and the sweep runs every
-			// 2 minutes. The session id here is the REGISTRY's, since nothing
-			// read the file — the log line says so by construction.
+			// Never rewrite a transcript claude currently holds open. Metered on
+			// every sweep and logged on the shared per-outcome window like every
+			// other outcome (see recordTrim). The session id here is the
+			// REGISTRY's, since nothing read the file.
 			m.recordTrim(b.Addr, trimResult{Outcome: trimRefusedHot, Path: path, Session: b.SessionID})
 			continue
 		}
@@ -264,9 +263,9 @@ func (m *HealthManager) trimTranscripts() {
 			// prove it. HasCompaction answers the marker question from the same
 			// transcript.CompactMarker scan trimTranscript itself performs, so
 			// skipping here decides nothing differently; it just declines to
-			// re-read to learn what was already read. Recorded through the
-			// steady-state throttle: a never-compacted bubble is in this state
-			// on every sweep, unchanged.
+			// re-read to learn what was already read. Recorded like every other
+			// outcome: a never-compacted bubble is in this state on every sweep,
+			// unchanged, so the meter counts it and the line is windowed.
 			m.recordTrim(b.Addr, trimResult{Outcome: trimNoBoundary, Path: path, Session: b.SessionID, BytesBefore: st.Bytes, BytesAfter: st.Bytes})
 			continue
 		}
@@ -352,22 +351,6 @@ type trimLogKey struct {
 	outcome trimOutcome
 }
 
-// steadyStateTrimOutcomes are the outcomes a healthy fleet produces on every
-// sweep forever: the bubble is in use, or its transcript has nothing to cut.
-// Nothing was at stake in either, so they are recorded through a throttle,
-// exactly as reportOversizedTranscript throttles its counter together with its
-// warning: the sweep runs every 2 minutes, and a counter that climbs with the
-// sweep cadence reads as an incident count when it means one unchanged fact
-// ("OversizedTranscripts: 214" meant one file).
-//
-// Every OTHER outcome — a rewrite, a refusal on the identity or recency gates,
-// an I/O failure, a registry pointing at a file that does not exist — is
-// recorded EVERY time, unthrottled. Those are the ones this incident needed and
-// did not have.
-func steadyStateTrimOutcome(o trimOutcome) bool {
-	return o == trimRefusedHot || o == trimNoBoundary
-}
-
 // recordTrim is the single place a trim attempt becomes visible: one log line
 // carrying the path, the bubble, the session id it resolved, the size before
 // and after, the bytes archived and the outcome — plus the matching counters.
@@ -376,31 +359,47 @@ func steadyStateTrimOutcome(o trimOutcome) bool {
 // what was on disk, what is on disk now, and where the difference went. The
 // absence of exactly this line is why recovering the lost conversation took
 // file-history archaeology.
+//
+// THE METER IS UNCONDITIONAL; ONLY THE LINE IS RATE-LIMITED. Every attempt
+// increments a counter, so "every suppression path is metered" stays exactly
+// true and the counters remain a faithful count of attempts. The log line goes
+// through a per-(bubble, outcome) window because EVERY outcome here is sticky,
+// not just the obvious two: a hot bubble stays hot, a never-compacted
+// transcript stays never-compacted, and — since this branch deliberately defers
+// the SetSessionID persistence fix — a bubble naming a session that does not
+// exist keeps naming it on every 2-minute sweep. Unthrottled, those ~720 lines
+// a day per bubble would bury the refused-identity and error lines this work
+// exists to surface, which is the "OversizedTranscripts: 214 meant one file"
+// pathology one layer down.
+//
+// What is worth seeing is a condition CHANGING, and the key carries the outcome
+// precisely so a change is announced immediately rather than waiting out the
+// previous condition's window.
 func (m *HealthManager) recordTrim(a addr.Address, res trimResult) {
-	if steadyStateTrimOutcome(res.Outcome) && !m.trimLogDue(a, res.Outcome) {
-		return
+	if res.Outcome == trimTrimmed {
+		m.k.Cost.Add(a, costmeter.FTranscriptsTrimmed, 1)
+		m.k.Cost.Add(a, costmeter.FTranscriptBytesArchived, res.BytesArchived)
+	} else {
+		// Everything that is not a rewrite is a trim that did not happen.
+		// Counting them together is deliberate: the question the counter
+		// answers is "how often did this path decline to act", and the log line
+		// beside it says why.
+		m.k.Cost.Add(a, costmeter.FTrimsRefused, 1)
 	}
 
+	if !m.trimLogDue(a, res.Outcome) {
+		return
+	}
 	errPart := ""
 	if res.Err != nil {
 		errPart = fmt.Sprintf(" err=%v", res.Err)
 	}
 	m.logf("bubbles: transcript trim outcome=%s addr=%s path=%s session=%s before=%d after=%d archived=%d%s\n",
 		res.Outcome, a, res.Path, res.Session, res.BytesBefore, res.BytesAfter, res.BytesArchived, errPart)
-
-	if res.Outcome == trimTrimmed {
-		m.k.Cost.Add(a, costmeter.FTranscriptsTrimmed, 1)
-		m.k.Cost.Add(a, costmeter.FTranscriptBytesArchived, res.BytesArchived)
-		return
-	}
-	// Everything that is not a rewrite is a trim that did not happen. Counting
-	// them together is deliberate: the question the counter answers is "how
-	// often did this path decline to act", and the log line beside it says why.
-	m.k.Cost.Add(a, costmeter.FTrimsRefused, 1)
 }
 
-// trimLogDue reports whether a steady-state outcome for a is due to be recorded
-// again, claiming the window if so. Never called for the outcomes that matter.
+// trimLogDue reports whether an outcome for a is due to be logged again,
+// claiming the window if so. It gates the LINE only — never the counter.
 func (m *HealthManager) trimLogDue(a addr.Address, o trimOutcome) bool {
 	k := trimLogKey{addr: a, outcome: o}
 	m.trimLogMu.Lock()
