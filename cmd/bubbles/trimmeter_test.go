@@ -159,10 +159,11 @@ func TestHotRefusalIsRecorded(t *testing.T) {
 }
 
 // TestTrimLogThrottleCoversEverySteadyState: refused-identity and
-// no-transcript are STICKY, not transient. This branch deliberately defers the
-// SetSessionID persistence fix, so a bubble naming a session that does not
-// exist hits the same outcome on every 2-minute sweep, forever. Unthrottled
-// that is ~720 lines a day burying the very lines this work exists to surface.
+// no-transcript are STICKY, not transient. A bubble naming a session that does
+// not exist hits the same outcome on every 2-minute sweep, for as long as it
+// holds that id (startup reconciliation clears stored phantoms, but the
+// condition can still arise while the daemon runs). Unthrottled that is ~720
+// lines a day burying the very lines this work exists to surface.
 func TestTrimLogThrottleCoversEverySteadyState(t *testing.T) {
 	f := newPumpFixture(t)
 	f.sessionID(t, "sess-that-never-existed")

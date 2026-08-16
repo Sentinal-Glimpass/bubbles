@@ -271,6 +271,20 @@ func runApp() {
 	// Quit/relaunch loop: the TUI quits when you dive in; we hand over the
 	// terminal, then relaunch the fleet view.
 	marks := restoreFleet(baseDir, k) // rehydrate a saved fleet (empty if none)
+	// Repair fleets saved before the launch path marked session ids dirty: any
+	// stored id whose transcript is gone would otherwise be resumed forever,
+	// yielding a phantom (or, worse, someone else's) conversation. See
+	// reconcileSessionIDs — it clears such ids and touches no transcript.
+	//
+	// Saved explicitly rather than left to the autosave: the TUI captures the
+	// registry version when it is constructed (below), so a bump made here would
+	// not by itself trigger the change-driven save.
+	if home, herr := os.UserHomeDir(); herr == nil {
+		if n := reconcileSessionIDs(k, home, func(f string, a ...any) { fmt.Fprintf(os.Stderr, f, a...) }); n > 0 {
+			fmt.Fprintf(os.Stderr, "bubbles: session reconcile: cleared %d stored session id(s) naming a missing transcript\n", n)
+			_ = saveFleet(baseDir, k, marks)
+		}
+	}
 	inboxExisted, inboxOK := loadInbox(baseDir, k)
 	loadSchedules(baseDir, k)
 	loadTasks(baseDir, k)
