@@ -238,6 +238,45 @@ func runApp() {
 	defer stopChecks()
 	go runChecks(checkCtx, checkReg, supervisorTick)
 
+	// THE FLEET IS LOADED AND REPAIRED BEFORE ANY LISTENER IS BOUND. Everything
+	// below this point — the webhook server, the IPC socket — can deliver a
+	// message, and delivery of an urgent message reaches EnsureAlive, which
+	// launches a bubble on whatever session id the registry holds at that moment.
+	// Both directions of that race lose work:
+	//
+	//   - a delivery arriving before the repair resumes a phantom id (or, if an
+	//     id was ever recycled, somebody else's conversation) — exactly what
+	//     reconcileSessionIDs exists to prevent;
+	//   - a bubble launched before the repair mints a fresh id whose .jsonl has
+	//     not been flushed yet, and the repair then clears a LIVE pointer — the
+	//     same silent loss this branch exists to eliminate, caused by the cure.
+	//
+	// Ordering is the fix rather than a "loaded yet?" gate: a gate is another
+	// piece of state that can be read from the wrong goroutine or forgotten on a
+	// new delivery path, while an unbound listener cannot deliver anything at
+	// all. Keep the two loads above the two binds. (Guarded by
+	// TestFleetIsLoadedAndRepairedBeforeListenersBind.)
+	marks := restoreFleet(baseDir, k) // rehydrate a saved fleet (empty if none)
+	// Repair fleets saved before the launch path marked session ids dirty: any
+	// stored id whose transcript is gone would otherwise be resumed forever,
+	// yielding a phantom (or, worse, someone else's) conversation. See
+	// reconcileSessionIDs — it clears such ids and touches no transcript.
+	//
+	// Saved explicitly rather than left to the autosave: the TUI captures the
+	// registry version when it is constructed (below), so a bump made here would
+	// not by itself trigger the change-driven save.
+	if home, herr := os.UserHomeDir(); herr != nil {
+		// A repair that never ran must not be mistaken for a clean fleet: without
+		// a home dir no transcript path can be built, so every stored id keeps
+		// whatever it points at, phantom or not.
+		fmt.Fprintf(os.Stderr, "bubbles: session reconcile SKIPPED: no home dir (%v); stored session ids were not checked against their transcripts\n", herr)
+	} else {
+		if n := reconcileSessionIDs(k, home, func(f string, a ...any) { fmt.Fprintf(os.Stderr, f, a...) }); n > 0 {
+			fmt.Fprintf(os.Stderr, "bubbles: session reconcile: cleared %d stored session id(s) naming a missing transcript\n", n)
+			_ = saveFleet(baseDir, k, marks)
+		}
+	}
+
 	// Incoming webhooks: per-bubble secret URLs so scripts/crons/external
 	// services can message (and wake) a bubble programmatically.
 	k.WebhookBase = startWebhookServer(k)
@@ -269,22 +308,8 @@ func runApp() {
 	}
 
 	// Quit/relaunch loop: the TUI quits when you dive in; we hand over the
-	// terminal, then relaunch the fleet view.
-	marks := restoreFleet(baseDir, k) // rehydrate a saved fleet (empty if none)
-	// Repair fleets saved before the launch path marked session ids dirty: any
-	// stored id whose transcript is gone would otherwise be resumed forever,
-	// yielding a phantom (or, worse, someone else's) conversation. See
-	// reconcileSessionIDs — it clears such ids and touches no transcript.
-	//
-	// Saved explicitly rather than left to the autosave: the TUI captures the
-	// registry version when it is constructed (below), so a bump made here would
-	// not by itself trigger the change-driven save.
-	if home, herr := os.UserHomeDir(); herr == nil {
-		if n := reconcileSessionIDs(k, home, func(f string, a ...any) { fmt.Fprintf(os.Stderr, f, a...) }); n > 0 {
-			fmt.Fprintf(os.Stderr, "bubbles: session reconcile: cleared %d stored session id(s) naming a missing transcript\n", n)
-			_ = saveFleet(baseDir, k, marks)
-		}
-	}
+	// terminal, then relaunch the fleet view. (The fleet itself was restored and
+	// repaired above, before any listener was bound — see there for why.)
 	inboxExisted, inboxOK := loadInbox(baseDir, k)
 	loadSchedules(baseDir, k)
 	loadTasks(baseDir, k)

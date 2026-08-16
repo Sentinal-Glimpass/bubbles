@@ -16,6 +16,7 @@ import (
 // resolves inside a temp dir and a transcript can be planted (or withheld).
 type repairFixture struct {
 	k    *kernel.Kernel
+	fr   *runner.FakeRunner
 	a    addr.Address
 	home string
 	dir  string
@@ -25,13 +26,14 @@ type repairFixture struct {
 func newRepairFixture(t *testing.T) *repairFixture {
 	t.Helper()
 	home, dir := t.TempDir(), t.TempDir()
-	k := kernel.New(runner.NewFake())
+	fr := runner.NewFake()
+	k := kernel.New(fr)
 	k.RelaunchProbe = 0
 	a, err := k.Spawn(addr.Root, "w", dir, runner.SpawnOpts{Persona: "w"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	return &repairFixture{k: k, a: a, home: home, dir: dir}
+	return &repairFixture{k: k, fr: fr, a: a, home: home, dir: dir}
 }
 
 func (f *repairFixture) logf(format string, a ...any) { fmt.Fprintf(&f.log, format, a...) }
@@ -158,5 +160,136 @@ func TestReconcileSkipsBubblesItCannotJudge(t *testing.T) {
 	f2 := newRepairFixture(t)
 	if n := f2.run(); n != 0 {
 		t.Fatalf("cleared = %d for a bubble that has never launched", n)
+	}
+}
+
+// TestUnreadableTranscriptKeepsTheID is the branch a bad day runs through: the
+// stat FAILS for a reason that is not "the file is gone" (a permission problem,
+// a mount not up yet, a path component that is not a directory). Absence must
+// be PROVEN, never inferred from an error, because clearing here destroys a
+// working pointer to a live conversation — the exact loss this whole branch
+// exists to eliminate, and it would be caused by the repair itself.
+//
+// ENOTDIR rather than chmod 000: it is deterministic, and it does not quietly
+// stop being an error when the suite happens to run as root.
+func TestUnreadableTranscriptKeepsTheID(t *testing.T) {
+	f := newRepairFixture(t)
+	f.k.Reg.RecordSessionID(f.a, "sess-live-but-unreadable")
+
+	// Plant a FILE where the project directory belongs, so any stat below it
+	// returns ENOTDIR — an error, and emphatically not IsNotExist.
+	projDir := filepath.Dir(convPath(f.home, f.dir, "sess-live-but-unreadable"))
+	if err := os.MkdirAll(filepath.Dir(projDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projDir, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(convPath(f.home, f.dir, "sess-live-but-unreadable")); err == nil || os.IsNotExist(err) {
+		t.Fatalf("fixture did not produce a non-IsNotExist stat error: %v", err)
+	}
+
+	v := f.k.Reg.Version()
+	if n := f.run(); n != 0 {
+		t.Fatalf("cleared = %d want 0 — a stat that FAILED is not evidence the conversation is gone", n)
+	}
+	if sid, _ := f.k.Reg.SessionID(f.a); sid != "sess-live-but-unreadable" {
+		t.Fatalf("session id = %q want sess-live-but-unreadable — an unreadable path must never destroy a working pointer", sid)
+	}
+	if got := f.k.Reg.Version(); got != v {
+		t.Fatalf("version moved %d -> %d with nothing repaired", v, got)
+	}
+	// ...and it is never silent: the operator has to be able to see that this
+	// bubble was not checked, and why.
+	line := f.log.String()
+	for _, want := range []string{string(f.a), "sess-live-but-unreadable", "KEPT"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("an unreadable-path condition must be logged with %q; got %q", want, line)
+		}
+	}
+}
+
+// TestDeliveryAfterRepairCannotResumeAClearedID: clearing the id is only half
+// the repair — the point is what the next LAUNCH does. An urgent message wakes
+// a cold bubble through EnsureAlive, which launches on whatever id the registry
+// holds; after the repair that must be a FRESH conversation, never the phantom.
+//
+// This is the delivery the startup ordering exists to protect: main binds no
+// listener until the repair has run (see TestFleetIsLoadedAndRepairedBefore-
+// ListenersBind), so the first delivery a daemon can ever receive sees the
+// registry in exactly this state.
+func TestDeliveryAfterRepairCannotResumeAClearedID(t *testing.T) {
+	f := newRepairFixture(t)
+	f.k.Reg.RecordSessionID(f.a, "phantom-conversation")
+
+	if n := f.run(); n != 1 { // startup repair
+		t.Fatalf("cleared = %d want 1", n)
+	}
+
+	// A delivery arrives (urgent => wake): the path is Send -> deliverMessage ->
+	// EnsureAlive.
+	if _, err := f.k.Send(addr.Root, f.a, "subj", "body", 0, true); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(f.fr.Launches) != 1 {
+		t.Fatalf("launches = %d want 1 — the urgent delivery should have woken the bubble", len(f.fr.Launches))
+	}
+	got := f.fr.Launches[0]
+	if got.Opts.Resume {
+		t.Fatalf("the wake RESUMED %q — a cleared id must produce a fresh conversation, not a phantom one", got.Opts.SessionID)
+	}
+	if got.Opts.SessionID == "" || got.Opts.SessionID == "phantom-conversation" {
+		t.Fatalf("launched session id = %q — want a newly minted id", got.Opts.SessionID)
+	}
+	if sid, _ := f.k.Reg.SessionID(f.a); sid != got.Opts.SessionID {
+		t.Fatalf("stored id %q != launched id %q", sid, got.Opts.SessionID)
+	}
+}
+
+// TestFleetIsLoadedAndRepairedBeforeListenersBind pins the startup ORDERING,
+// which is the only thing that makes the repair safe.
+//
+// startWebhookServer and ipc.Serve both accept traffic the moment they are
+// bound, and an urgent delivery reaches EnsureAlive. Bind either of them before
+// the fleet is loaded and repaired and there are two ways to lose work: a
+// delivery in that window resumes a phantom id, or a bubble launched in that
+// window mints a fresh id whose transcript has not been flushed yet and the
+// repair clears a LIVE pointer.
+//
+// Asserted against the source because the property IS the order of statements
+// in main, which no runtime seam can observe without becoming a second copy of
+// the thing under test. Ordering is used deliberately in preference to a
+// "loaded yet?" gate: an unbound listener cannot deliver at all, whereas a gate
+// is more state to get wrong on the next delivery path someone adds.
+func TestFleetIsLoadedAndRepairedBeforeListenersBind(t *testing.T) {
+	src, err := os.ReadFile("app.go")
+	if err != nil {
+		t.Fatalf("read app.go: %v", err)
+	}
+	at := func(needle string) int {
+		i := strings.Index(string(src), needle)
+		if i < 0 {
+			t.Fatalf("app.go no longer contains %q — this guard must be updated deliberately, not deleted", needle)
+		}
+		if j := strings.Index(string(src[i+len(needle):]), needle); j >= 0 {
+			t.Fatalf("%q appears more than once in app.go; the guard cannot tell which one binds first", needle)
+		}
+		return i
+	}
+	load := at("restoreFleet(baseDir, k)")
+	repair := at("reconcileSessionIDs(k, home,")
+	for _, bind := range []struct {
+		what, needle string
+	}{
+		{"the webhook server", "startWebhookServer(k)"},
+		{"the IPC socket", "ipc.Serve(sock,"},
+	} {
+		b := at(bind.needle)
+		if load > b {
+			t.Errorf("restoreFleet runs AFTER %s binds: a delivery in that window launches a bubble the registry has not restored yet", bind.what)
+		}
+		if repair > b {
+			t.Errorf("reconcileSessionIDs runs AFTER %s binds: a delivery in that window can resume a phantom session id, and a launch in that window can have a LIVE id cleared under it", bind.what)
+		}
 	}
 }
