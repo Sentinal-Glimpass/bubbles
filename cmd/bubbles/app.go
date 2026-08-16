@@ -207,19 +207,21 @@ func runApp() {
 	// named, panic-safe, and observable. See checks.go for the full inventory and
 	// for why the driver spawns a goroutine per tick. Intervals live there.
 	//
-	// NOTE: the inbox/tasks/schedules SAVERS (and the health sweep / keep-alive)
-	// are phaseAfterLoad — they are registered further down, AFTER the initial
-	// load — so a slow boot can't let a saver overwrite a persisted file with
-	// empty in-memory state before it's been loaded (that race wiped schedules and
-	// mail on large, slow-booting fleets).
+	// NOTE: NOTHING here starts a check. backgroundChecks is pure — it builds
+	// closures and does no I/O — and both registerPhase calls are below, after
+	// the loads, because EVERY LOAD ABOVE EVERY BIND covers the supervisor too:
+	// inbox-drain, recover-unread and schedules read exactly the stores the
+	// loads REPLACE, so a tick above them acts on an empty store and then has
+	// its view swapped out underneath it. See the block below.
 	//
-	// STILL ACCURATE, and strictly easier to satisfy since the loads moved above
-	// the listener binds (see the EVERY LOAD ABOVE EVERY BIND block): the initial
-	// load now finishes earlier in boot, while this registration stayed where it
-	// was, so the gap this NOTE protects only widened. It is a SEPARATE rule from
-	// that one and both are asserted together by
-	// TestPersistedStoresAreLoadedBeforeListenersBind — savers after the loads
-	// here, listeners after the loads there.
+	// The two phases are still distinct and still ordered. phaseAfterLoad is the
+	// STRONGER requirement: those checks must not run until the fleet, inbox,
+	// tasks and schedules are loaded AND the boot-time fixups below them have
+	// run, because a saver that ticked mid-boot would overwrite a persisted file
+	// with empty in-memory state (that race wiped schedules and mail on large,
+	// slow-booting fleets). phaseBoot only has to clear the loads. Both are
+	// asserted by TestPersistedStoresAreLoadedBeforeListenersBind and
+	// TestBackgroundChecksStartAfterEveryLoad.
 	//
 	// Resource sampler and the two dashboard pollers feed the TUI's top-right
 	// panel; they send to whichever program is currently running (nil while
@@ -241,10 +243,6 @@ func runApp() {
 		claudeUsage:   claudeUsageStep(&curProg),   // account /usage in the dashboard, polled directly (no claude session)
 		headroomStats: headroomStatsStep(&curProg), // token-compression savings in the dashboard (no-op unless --headroom)
 	})
-	registerPhase(checkReg, checks, phaseBoot)
-	checkCtx, stopChecks := context.WithCancel(context.Background())
-	defer stopChecks()
-	go runChecks(checkCtx, checkReg, supervisorTick)
 
 	// EVERY LOAD ABOVE EVERY BIND. This is the whole rule, and the next person to
 	// add either kind of thing has to keep it. Everything below this block — the
@@ -302,6 +300,30 @@ func runApp() {
 	inboxExisted, inboxOK := loadInbox(baseDir, k)
 	loadSchedules(baseDir, k)
 	loadTasks(baseDir, k)
+
+	// Every load above is done, so the boot checks can start: they are the OTHER
+	// thing in main that touches these stores on its own, and until this line
+	// nothing has been able to run one. inbox-drain would have found no mail to
+	// drain, recover-unread nobody to re-nudge and schedules nothing due — each
+	// then rescheduled from what it saw, against a store about to be replaced.
+	//
+	// Started here rather than lower down so the sweeps cover the rest of boot
+	// (webhook, ngrok tunnel, headroom probe), which can take seconds. Registering
+	// here also seeds every check's first due time from now, so the cadences
+	// start at the moment the checks first became meaningful. Ordering is the fix
+	// rather than a "loaded yet?" gate, for the reason given above: a driver that
+	// has not been started cannot run anything, whereas a gate is another piece of
+	// state for the next check somebody adds to get wrong.
+	//
+	// This moves the boot checks strictly LATER, never earlier, so it takes
+	// nothing above headroom.routeWhenReady: inbox-drain, which reaches
+	// EnsureAlive to page a cold bubble in over its mail, still starts above the
+	// routing gate exactly as far above it as the loads now are — a smaller
+	// window than before, never a larger one.
+	registerPhase(checkReg, checks, phaseBoot)
+	checkCtx, stopChecks := context.WithCancel(context.Background())
+	defer stopChecks()
+	go runChecks(checkCtx, checkReg, supervisorTick)
 
 	// Incoming webhooks: per-bubble secret URLs so scripts/crons/external
 	// services can message (and wake) a bubble programmatically.

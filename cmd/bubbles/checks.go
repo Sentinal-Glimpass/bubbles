@@ -163,9 +163,14 @@ func backgroundChecks(d checkDeps) []bgCheck {
 		// fleet-health manager: background upkeep (transcript trimming and the
 		// context pump today). Off the request path, on its own slow cadence.
 		{Check: supervisor.Check{Name: "health-sweep", Every: 2 * time.Minute, Fn: plain(d.health.Sweep)}, phase: phaseAfterLoad},
-		// keep always-on receivers alive: relaunch any that die. This is the ONE
-		// sanctioned background path that may call EnsureAlive (kernel.go:367) —
-		// always-on bubbles are defined as never allowed to be cold.
+		// keep always-on receivers alive: relaunch any that die. This is ONE OF TWO
+		// sanctioned background paths that may call EnsureAlive — always-on bubbles
+		// are defined as never allowed to be cold. The other is
+		// inbox-drain -> RecoverUnread(false), which wakes a cold bubble that has
+		// mail; kernel.go:367 names both ("crash-restarts (KeepAlive) and cold mail
+		// wakes (RecoverUnread)"). Said explicitly because this comment previously
+		// claimed to be the only one, and the next person auditing launch paths
+		// will grep exactly here before concluding a sweep cannot start a bubble.
 		{Check: supervisor.Check{Name: "keep-alive", Every: 30 * time.Second, Fn: plain(k.KeepAlive)}, phase: phaseAfterLoad},
 		// persistence savers, one per store, each gated on a version change.
 		{Check: supervisor.Check{Name: "save-inbox", Every: 2 * time.Second, Fn: plain(saverStep(d.baseDir, k, k.Store.Version, saveInbox))}, phase: phaseAfterLoad},
