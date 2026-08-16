@@ -474,6 +474,22 @@ func exportFleet(base, outPath, mode string, full bool, prog *exportProgress) (c
 			_ = tarCopy(tw, "conversations/"+b.SessionID+".jsonl", p)
 			track(fi.Size())
 		}
+		// The .archive sidecar holds everything trimming has ever cut out of
+		// that transcript, and since trimming archives instead of deleting it is
+		// the ONLY copy of it. Leaving it behind would make "export the fleet,
+		// restore elsewhere, delete the source" lose every trimmed conversation
+		// — the exact data loss the archive exists to prevent, on the one path
+		// where it matters most.
+		//
+		// Bundled unconditionally, not only alongside a live transcript: an
+		// archive whose transcript has since vanished is history that has
+		// nowhere else to be. It is NOT counted in convos — it is one
+		// conversation's past, not a second conversation.
+		ap := p + transcriptArchiveSuffix
+		if fi, e := os.Stat(ap); e == nil {
+			_ = tarCopy(tw, "conversations/"+b.SessionID+".jsonl"+transcriptArchiveSuffix, ap)
+			track(fi.Size())
+		}
 	}
 	if mode != "metadata" {
 		if err := walkWorkdirs(fm, absBase, absOut, mode, func(rel, fullPath string, fi os.FileInfo) error {
@@ -778,13 +794,25 @@ func importFleet(blob, target string, force bool) (string, error) {
 			dst := filepath.Join(target, ".bubbles", "schedules.json")
 			_ = streamToFile(dst, 0o644, tr)
 		case strings.HasPrefix(h.Name, "conversations/"):
-			sid := strings.TrimSuffix(strings.TrimPrefix(h.Name, "conversations/"), ".jsonl")
+			// A transcript arrives as <sid>.jsonl and its trimmed history as
+			// <sid>.jsonl.archive. The archive is restored BESIDE the
+			// transcript under its own name — never unpacked as a session of
+			// its own, which would hand claude a file full of compaction
+			// markers as if it were a conversation — and is not counted as a
+			// placed conversation, since it is one conversation's past rather
+			// than another conversation.
+			name := strings.TrimPrefix(h.Name, "conversations/")
+			isArchive := strings.HasSuffix(name, transcriptArchiveSuffix)
+			sid := strings.TrimSuffix(strings.TrimSuffix(name, transcriptArchiveSuffix), ".jsonl")
 			dir := sidToDir[sid]
 			if dir == "" {
 				continue
 			}
 			dst := filepath.Join(home, ".claude", "projects", claudeSlug(dir), sid+".jsonl")
-			if streamToFile(dst, 0o644, tr) == nil {
+			if isArchive {
+				dst += transcriptArchiveSuffix
+			}
+			if streamToFile(dst, 0o644, tr) == nil && !isArchive {
 				placed++
 			}
 		case strings.HasPrefix(h.Name, "workdir/"):
