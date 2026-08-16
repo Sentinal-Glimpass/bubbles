@@ -15,7 +15,7 @@ import (
 // callers don't need a separate method per counter.
 type Field int
 
-// The fifteen counters tracked per bubble. Written/Suppressed/Capped describe
+// The counters tracked per bubble. Written/Suppressed/Capped describe
 // notice production; Inline/ViaTool describe how a delivered notice reached the
 // model; TurnsTriggered counts turns a notice caused to run; Evictions/Rewarms
 // describe context-window churn; ContextTokens is a live gauge, not a running
@@ -51,6 +51,21 @@ type Field int
 // receipt of the keystrokes, not a completed summarization.
 // and so were re-issued; CompactsAbandoned counts the give-up after
 // maxCompactWrites of that.
+// TranscriptsTrimmed / TranscriptBytesArchived / TrimsRefused cover the one
+// code path in this repo that rewrites a user's conversation history (see
+// cmd/bubbles/health.go). Trimming used to be entirely silent, which is why a
+// lost day of work could only be reconstructed by forensic archaeology:
+// TranscriptsTrimmed counts rewrites, TranscriptBytesArchived counts the bytes
+// moved out of the live transcript and into its append-only .archive sidecar
+// (bytes, not files, because "how much history moved" is the question asked
+// after the fact), and TrimsRefused counts every attempt that declined to
+// rewrite — a stale identity, a file still being written to, a hot bubble, or
+// an I/O failure. A refusal is the system working, but a refusal nobody can see
+// is how this incident stayed invisible for two weeks.
+//
+// The F* constants are an iota block and Counters is persisted, so new fields
+// are APPENDED and existing ones are NEVER renumbered — a renumber silently
+// re-labels every counter recorded before it (see fields_test.go).
 const (
 	FNoticesWritten Field = iota
 	FNoticesSuppressed
@@ -68,6 +83,9 @@ const (
 	FCompactsRetried
 	FCompactsAbandoned
 	FCompactsAccepted
+	FTranscriptsTrimmed
+	FTranscriptBytesArchived
+	FTrimsRefused
 )
 
 // Counters holds one bubble's cost/efficiency tally. All fields are int64 so
@@ -89,6 +107,10 @@ type Counters struct {
 	CompactsRetried      int64
 	CompactsAbandoned    int64
 	CompactsAccepted     int64
+
+	TranscriptsTrimmed      int64
+	TranscriptBytesArchived int64
+	TrimsRefused            int64
 }
 
 // field maps f to the corresponding pointer inside c, so Add and Set can share
@@ -129,6 +151,12 @@ func field(c *Counters, f Field) *int64 {
 		return &c.CompactsAccepted
 	case FCompactsAbandoned:
 		return &c.CompactsAbandoned
+	case FTranscriptsTrimmed:
+		return &c.TranscriptsTrimmed
+	case FTranscriptBytesArchived:
+		return &c.TranscriptBytesArchived
+	case FTrimsRefused:
+		return &c.TrimsRefused
 	default:
 		return nil
 	}

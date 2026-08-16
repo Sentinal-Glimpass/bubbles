@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +37,18 @@ type HealthManager struct {
 	// the pump's escalation tiers.
 	reportMu            sync.Mutex
 	lastOversizedReport map[addr.Address]time.Time
+
+	// Throttle state for the STEADY-STATE trim outcomes only (see recordTrim).
+	// Keyed by bubble AND outcome so a condition changing is always announced
+	// immediately, and only an unchanged one is quieted.
+	trimLogMu   sync.Mutex
+	lastTrimLog map[trimLogKey]time.Time
+
+	// logf is where trim decisions are announced. It is a field rather than a
+	// direct os.Stderr write so a test can prove a decision was announced at
+	// all -- the absence of any such proof is why this incident needed forensic
+	// archaeology. The daemon's stderr lands in .bubbles/daemon.log.
+	logf func(format string, a ...any)
 
 	// Decoded-transcript memo, keyed by conversation path, live only for the
 	// duration of one Sweep. See transcriptStats: it is what stops a sweep from
@@ -119,7 +133,8 @@ func (m *HealthManager) endSweep() {
 }
 
 // prune drops per-bubble state for bubbles that no longer exist. Without it
-// lastPump and lastOversizedReport grow for the life of the process: a fleet
+// lastPump, lastOversizedReport and lastTrimLog grow for the life of the
+// process: a fleet
 // that spawns and deletes workers all day would keep one entry per address ever
 // seen, and the throttle state of a deleted bubble is meaningless anyway (a
 // re-spawn gets a fresh address). The stats memo needs no pruning — it is
@@ -145,6 +160,14 @@ func (m *HealthManager) prune() {
 		}
 	}
 	m.reportMu.Unlock()
+
+	m.trimLogMu.Lock()
+	for k := range m.lastTrimLog {
+		if !live[k.addr] {
+			delete(m.lastTrimLog, k)
+		}
+	}
+	m.trimLogMu.Unlock()
 }
 
 // NewHealthManager builds the manager over a kernel.
@@ -155,7 +178,9 @@ func NewHealthManager(k *kernel.Kernel) *HealthManager {
 		home:                home,
 		lastPump:            map[addr.Address]pumpWindows{},
 		lastOversizedReport: map[addr.Address]time.Time{},
+		lastTrimLog:         map[trimLogKey]time.Time{},
 		statCache:           map[string]cachedStats{},
+		logf:                func(format string, a ...any) { fmt.Fprintf(os.Stderr, format, a...) },
 	}
 }
 
@@ -207,10 +232,15 @@ func (m *HealthManager) trimTranscripts() {
 		if b.Addr.IsRoot() || b.SessionID == "" || b.Dir == "" {
 			continue
 		}
-		if m.k.IsHot(b.Addr) {
-			continue // never rewrite a transcript claude currently holds open
-		}
 		path := convPath(m.home, b.Dir, b.SessionID)
+		if m.k.IsHot(b.Addr) {
+			// Never rewrite a transcript claude currently holds open. Metered on
+			// every sweep and logged on the shared per-outcome window like every
+			// other outcome (see recordTrim). The session id here is the
+			// REGISTRY's, since nothing read the file.
+			m.recordTrim(b.Addr, trimResult{Outcome: trimRefusedHot, Path: path, Session: b.SessionID})
+			continue
+		}
 
 		// Read-only check BEFORE the trim attempt, reusing transcript.Read so
 		// there is one definition of "has a compaction boundary" (the same one
@@ -233,13 +263,14 @@ func (m *HealthManager) trimTranscripts() {
 			// prove it. HasCompaction answers the marker question from the same
 			// transcript.CompactMarker scan trimTranscript itself performs, so
 			// skipping here decides nothing differently; it just declines to
-			// re-read to learn what was already read.
+			// re-read to learn what was already read. Recorded like every other
+			// outcome: a never-compacted bubble is in this state on every sweep,
+			// unchanged, so the meter counts it and the line is windowed.
+			m.recordTrim(b.Addr, trimResult{Outcome: trimNoBoundary, Path: path, Session: b.SessionID, BytesBefore: st.Bytes, BytesAfter: st.Bytes})
 			continue
 		}
 
-		if err := trimTranscript(path, transcriptKeepBeforeCompact); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "bubbles: transcript trim %s: %v\n", b.Addr, err)
-		}
+		m.recordTrim(b.Addr, gatedTrim(path, b.SessionID, transcriptKeepBeforeCompact))
 	}
 }
 
@@ -294,21 +325,331 @@ func (m *HealthManager) reportOversizedTranscript(a addr.Address, size int64) {
 	}
 }
 
+// transcriptArchiveSuffix names the sidecar file that holds everything trimming
+// has ever cut from a transcript: <transcript>.jsonl.archive. It is APPEND
+// ONLY. Nothing in this repo removes bytes from it, prunes it, or ages it out —
+// disk grows where it used to shrink, and that is the deliberate trade. An
+// automatic pruner would reintroduce exactly the class of bug the archive
+// exists to remove.
+//
+// The suffix keeps the ".jsonl" in the middle rather than replacing it so the
+// archive sits next to its transcript in a directory listing, and cannot be
+// resolved by convPath: session ids never end in ".jsonl.archive", so no scan
+// in this package can mistake an archive for a session's conversation.
+const transcriptArchiveSuffix = ".archive"
+
 // Everything after transcript.CompactMarker is a self-contained conversation
 // tree rooted at a parentUuid:null entry, so cutting before it never breaks
 // the active thread. See internal/transcript for the single definition of
 // what a compaction boundary looks like.
 
-// trimTranscript rewrites path in place, discarding everything before
-// (latestCompaction - keepBefore) lines. No-op if there's no compaction yet or
-// nothing meaningful to remove. Byte-exact: kept lines are copied verbatim (we
-// never re-serialize claude's JSON). MUST only run on a file no process holds
-// open (the bubble must be cold).
+// trimLogKey throttles a trim record by bubble AND outcome, so a bubble whose
+// outcome CHANGES is always announced immediately and only an unchanged
+// steady-state condition is quieted.
+type trimLogKey struct {
+	addr    addr.Address
+	outcome trimOutcome
+}
+
+// recordTrim is the single place a trim attempt becomes visible: one log line
+// carrying the path, the bubble, the session id it resolved, the size before
+// and after, the bytes archived and the outcome — plus the matching counters.
+//
+// The line is deliberately reconstructible: given it alone, an operator can say
+// what was on disk, what is on disk now, and where the difference went. The
+// absence of exactly this line is why recovering the lost conversation took
+// file-history archaeology.
+//
+// THE METER IS UNCONDITIONAL; ONLY THE LINE IS RATE-LIMITED, AND ONLY FOR
+// STATES. Every attempt increments a counter, so "every suppression path is
+// metered" stays exactly true and the counters remain a faithful count of
+// attempts. Every outcome EXCEPT trimTrimmed describes a condition the bubble
+// is still in, and all of them are sticky, not just the obvious two: a hot
+// bubble stays hot, a never-compacted transcript stays never-compacted, and —
+// since this branch deliberately defers the SetSessionID persistence fix — a
+// bubble naming a session that does not exist keeps naming it on every 2-minute
+// sweep. Unthrottled, those ~720 lines a day per bubble would bury the
+// refused-identity and error lines this work exists to surface, which is the
+// "OversizedTranscripts: 214 meant one file" pathology one layer down. A trim
+// itself is an event and is never windowed (see below).
+//
+// What is worth seeing is a condition CHANGING, and the key carries the outcome
+// precisely so a change is announced immediately rather than waiting out the
+// previous condition's window.
+func (m *HealthManager) recordTrim(a addr.Address, res trimResult) {
+	if res.Outcome == trimTrimmed {
+		m.k.Cost.Add(a, costmeter.FTranscriptsTrimmed, 1)
+		m.k.Cost.Add(a, costmeter.FTranscriptBytesArchived, res.BytesArchived)
+	} else {
+		// Everything that is not a rewrite is a trim that did not happen.
+		// Counting them together is deliberate: the question the counter
+		// answers is "how often did this path decline to act", and the log line
+		// beside it says why.
+		m.k.Cost.Add(a, costmeter.FTrimsRefused, 1)
+	}
+
+	// A TRIM IS AN EVENT, NOT A STATE, AND IS NEVER WINDOWED. Every other
+	// outcome describes a condition the bubble is still in, where repetition
+	// carries no information; a trim describes bytes that were just moved out
+	// of a live transcript, and a second one is a second mutation. This branch
+	// exists because reconstructing one such mutation took archaeology across
+	// mtimes, file-history and an inbox store — throttling the one line that
+	// documents an actual write would defeat the point. It costs nothing in
+	// volume: a trim fires only when there is both a compaction boundary and
+	// content before it to cut.
+	if res.Outcome != trimTrimmed && !m.trimLogDue(a, res.Outcome) {
+		return
+	}
+	errPart := ""
+	if res.Err != nil {
+		errPart = fmt.Sprintf(" err=%v", res.Err)
+	}
+	m.logf("bubbles: transcript trim outcome=%s addr=%s path=%s session=%s before=%d after=%d archived=%d%s\n",
+		res.Outcome, a, res.Path, res.Session, res.BytesBefore, res.BytesAfter, res.BytesArchived, errPart)
+}
+
+// trimLogDue reports whether an outcome for a is due to be logged again,
+// claiming the window if so. It gates the LINE only — never the counter.
+func (m *HealthManager) trimLogDue(a addr.Address, o trimOutcome) bool {
+	k := trimLogKey{addr: a, outcome: o}
+	m.trimLogMu.Lock()
+	defer m.trimLogMu.Unlock()
+	last, seen := m.lastTrimLog[k]
+	if seen && time.Since(last) < oversizedReportThrottle {
+		return false
+	}
+	m.lastTrimLog[k] = time.Now()
+	return true
+}
+
+// trimQuietPeriod is how long a transcript must have been untouched before it
+// may be rewritten. A file being appended to must never be rewritten under its
+// writer, WHATEVER THE KERNEL BELIEVES about hotness: IsHot is registry state,
+// and registry state is exactly what proved unreliable (SetSessionID never
+// bumps the fleet version, so a bubble can point at a session that moved on).
+// The mtime is the file's own testimony and cannot go stale.
+//
+// 5 minutes is far longer than any gap between claude's appends within a turn,
+// and far shorter than the idle period of a genuinely parked bubble, so the
+// gate costs nothing real: a transcript refused for recency is simply trimmed
+// on a later sweep.
+const trimQuietPeriod = 5 * time.Minute
+
+// trimIdentityTailBytes bounds the identity read. The gate needs the LAST
+// sessionId in the file — the identity of whoever wrote most recently — so it
+// reads the tail rather than the whole (possibly multi-MiB) transcript, and
+// runs before any full read or any write. A transcript whose final 256 KiB
+// carries no sessionId at all is refused, like any other file that cannot say
+// whose it is.
+const trimIdentityTailBytes = 256 << 10
+
+// sessionIDKey is the field claude records the owning session under, on
+// essentially every transcript entry.
+var sessionIDKey = []byte(`"sessionId"`)
+
+// gatedTrim is the ONLY path from the sweep to the trimming mechanism. It
+// applies the gates that depend on the FILE rather than on registry state, and
+// only then rewrites anything:
+//
+//	Gate A (recency)  — refuse a transcript modified within trimQuietPeriod.
+//	Gate B (identity) — refuse unless the sessionId recorded INSIDE the
+//	                    transcript is the session this bubble claims. No
+//	                    sessionId found is also a refusal: unknown identity is
+//	                    not permission.
+//
+// These ADD to the caller's IsHot check, they do not replace it. Both are cheap
+// (a stat and a bounded tail read) and both run before trimTranscriptFile's
+// os.ReadFile of the whole file, so a refusal costs almost nothing.
+//
+// wantSession is the registry's SessionID — the value that is NOT trustworthy.
+// It is used only as the thing the file's own recorded identity must agree
+// with; on disagreement the file wins and nothing is written.
+func gatedTrim(path, wantSession string, keepBefore int) trimResult {
+	// Session starts as the registry's claim and is replaced by the file's own
+	// once one is found, so the log line always names a session and names the
+	// surprising one whenever the two disagree.
+	res := trimResult{Path: path, Session: wantSession}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		// A registry entry naming a file that does not exist is not an I/O
+		// failure, it is the staleness this whole plan is about — four bubbles
+		// are in that state today. It gets its own outcome so it can be seen
+		// rather than swallowed as "trim error".
+		res.Outcome = trimNoTranscript
+		if !os.IsNotExist(err) {
+			res.Outcome = trimFailed
+			res.Err = err
+		}
+		return res
+	}
+	res.BytesBefore = info.Size()
+	res.BytesAfter = info.Size()
+	if time.Since(info.ModTime()) < trimQuietPeriod {
+		res.Outcome = trimRefusedRecent
+		return res
+	}
+
+	sid, err := transcriptSessionID(path)
+	if err != nil {
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
+	}
+	if sid != "" {
+		res.Session = sid
+	}
+	if sid == "" || sid != wantSession {
+		res.Outcome = trimRefusedIdentity
+		return res
+	}
+
+	out := trimTranscriptFile(path, keepBefore)
+	out.Session = sid
+	return out
+}
+
+// transcriptSessionID returns the last sessionId recorded in path's final
+// trimIdentityTailBytes, or "" if the tail carries none. Byte scanning, not
+// JSON decoding: the answer must not depend on the rest of an entry's shape
+// staying parseable, and this runs on every trim attempt.
+//
+// The tail is read rather than the head because the question is "who is writing
+// to this file NOW" — a transcript carried across a resume keeps its older
+// entries, and it is the most recent writer whose file this is.
+func transcriptSessionID(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	size := info.Size()
+	if size == 0 {
+		return "", nil
+	}
+	off := int64(0)
+	if size > trimIdentityTailBytes {
+		off = size - trimIdentityTailBytes
+	}
+	buf := make([]byte, size-off)
+	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
+		return "", err
+	}
+	return lastSessionID(buf), nil
+}
+
+// lastSessionID returns the value of the last `"sessionId": "..."` in b, or ""
+// if there is none. A key whose value is not a plain string is skipped rather
+// than guessed at.
+func lastSessionID(b []byte) string {
+	for i := bytes.LastIndex(b, sessionIDKey); i >= 0; i = bytes.LastIndex(b[:i], sessionIDKey) {
+		rest := b[i+len(sessionIDKey):]
+		j := 0
+		for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+			j++
+		}
+		if j >= len(rest) || rest[j] != ':' {
+			continue
+		}
+		j++
+		for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+			j++
+		}
+		if j >= len(rest) || rest[j] != '"' {
+			continue
+		}
+		j++
+		end := bytes.IndexByte(rest[j:], '"')
+		if end <= 0 {
+			continue
+		}
+		return string(rest[j : j+end])
+	}
+	return ""
+}
+
+// trimOutcome names what one trim attempt actually did. Every attempt ends in
+// exactly one of these, and every one of them is recorded: this incident cost a
+// day of work precisely because trimming decided things silently.
+type trimOutcome string
+
+const (
+	trimTrimmed         trimOutcome = "trimmed"          // the cut portion was archived and the live file replaced
+	trimNoBoundary      trimOutcome = "no-boundary"      // no compaction marker, or nothing before the keep buffer
+	trimRefusedRecent   trimOutcome = "refused-recent"   // modified within trimQuietPeriod (Gate A)
+	trimRefusedIdentity trimOutcome = "refused-identity" // the file's own sessionId is not this bubble's (Gate B)
+	trimRefusedHot      trimOutcome = "refused-hot"      // claude holds the file open
+	trimNoTranscript    trimOutcome = "no-transcript"    // the registry names a file that does not exist
+	trimFailed          trimOutcome = "error"            // an I/O error; see trimResult.Err
+)
+
+// trimResult is one attempt's full record: enough to reconstruct, from a log
+// line alone, what was on disk before, what is on disk now, and where the
+// difference went.
+type trimResult struct {
+	Outcome       trimOutcome
+	Path          string
+	Session       string // session id as resolved for/from the file ("" = none found)
+	BytesBefore   int64
+	BytesAfter    int64
+	BytesArchived int64
+	Err           error
+}
+
+// trimTranscript is the compatibility spelling of the mechanism: it cuts and
+// archives, and reports only whether that failed. Callers that need to log or
+// meter the outcome use trimTranscriptFile directly.
 func trimTranscript(path string, keepBefore int) error {
+	return trimTranscriptFile(path, keepBefore).Err
+}
+
+// trimTranscriptFile rewrites path, moving everything before
+// (latestCompaction - keepBefore) lines into <path>.archive. No-op if there's
+// no compaction yet or nothing meaningful to remove. Byte-exact in both
+// directions: cut and kept lines are copied verbatim (we never re-serialize
+// claude's JSON), so archive+live always reconstructs the original.
+//
+// ARCHIVE FIRST, REPLACE SECOND, NEVER THE OTHER ORDER. The cut portion is
+// durably appended to the archive and only then is the live file replaced. If
+// the archive write fails the live transcript is left completely untouched: a
+// trim that half-succeeds is the bug this function was rewritten to remove.
+// The reverse failure is survivable by construction — an archive append that
+// lands while the replace fails leaves the same bytes in two places, which
+// costs disk and loses nothing, and a retry next sweep re-appends rather than
+// re-deletes.
+//
+// This function is the MECHANISM only. It assumes the caller has already
+// established that rewriting this file is safe — see trimTranscripts, which
+// holds the identity, recency and hotness gates. It MUST only run on a file no
+// process holds open.
+func trimTranscriptFile(path string, keepBefore int) trimResult {
+	res := trimResult{Outcome: trimNoBoundary, Path: path}
+
+	// An archive is append-only history that accumulates compaction markers by
+	// construction, so anything that mistook one for a transcript would cut it
+	// down — destroying exactly what it exists to hold. Nothing in this package
+	// can name an archive (convPath builds from session ids), so this is a
+	// backstop against a future caller, and it refuses loudly rather than
+	// silently no-opping.
+	if strings.HasSuffix(path, transcriptArchiveSuffix) {
+		res.Outcome = trimFailed
+		res.Err = fmt.Errorf("refusing to trim an archive: %s", path)
+		return res
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
 	}
+	res.BytesBefore = int64(len(data))
+	res.BytesAfter = res.BytesBefore
+
 	lines := bytes.SplitAfter(data, []byte{'\n'}) // keeps the trailing \n on each line
 	latest := -1
 	for i, l := range lines {
@@ -317,21 +658,81 @@ func trimTranscript(path string, keepBefore int) error {
 		}
 	}
 	if latest < 0 {
-		return nil // no compaction boundary yet — nothing summarized away to clear
+		return res // no compaction boundary yet — nothing summarized away to clear
 	}
 	cut := latest - keepBefore
 	if cut <= 0 {
-		return nil // the whole file is at/after the buffer — nothing to remove
+		return res // the whole file is at/after the buffer — nothing to remove
 	}
-	var buf bytes.Buffer
-	buf.Grow(len(data))
+
+	var drop, keep bytes.Buffer
+	drop.Grow(len(data))
+	keep.Grow(len(data))
+	for _, l := range lines[:cut] {
+		drop.Write(l)
+	}
 	for _, l := range lines[cut:] {
-		buf.Write(l)
+		keep.Write(l)
 	}
+
+	if err := appendArchive(path+transcriptArchiveSuffix, drop.Bytes()); err != nil {
+		// The live transcript has not been touched and must not be: the history
+		// about to be cut has nowhere durable to go.
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
+	}
+
 	tmp := path + ".htrim"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
-		return err
+	if err := os.WriteFile(tmp, keep.Bytes(), 0o644); err != nil {
+		_ = os.Remove(tmp)
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
 	}
 	// Same final path/name → same session id → the bubble keeps writing to it.
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		res.Outcome = trimFailed
+		res.Err = err
+		return res
+	}
+
+	res.Outcome = trimTrimmed
+	res.BytesArchived = int64(drop.Len())
+	res.BytesAfter = int64(keep.Len())
+	return res
+}
+
+// appendArchive durably appends b to the archive at path, creating it on first
+// use. It is the only writer of archives in this repo, and it only ever grows
+// them.
+//
+// The fsync is not decoration: the whole point of the archive is that it
+// survives the crash that interrupts the trim, and an append still sitting in
+// the page cache when the live file is replaced would not. A write that fails
+// part-way is truncated back to the length it had on entry, so an archive never
+// keeps a half line — a torn record would corrupt the very reconstruction the
+// archive exists to make possible.
+func appendArchive(path string, b []byte) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	start := info.Size()
+	_, werr := f.Write(b)
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if werr != nil {
+		_ = f.Truncate(start) // best effort: never leave a torn record behind
+		f.Close()
+		return werr
+	}
+	return f.Close()
 }

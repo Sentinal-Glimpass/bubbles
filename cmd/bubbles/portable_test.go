@@ -113,3 +113,75 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Fatalf("forced re-import should succeed: %v", err)
 	}
 }
+
+// TestExportImportCarriesTheTranscriptArchive: since trimming archives instead
+// of deleting, <session>.jsonl.archive is the ONLY copy of every conversation
+// trimming has cut away. An export that bundles the live transcript alone turns
+// "export the fleet, restore on the new machine, delete the source" into the
+// data-loss path the archive exists to close — on the one path where it matters
+// most.
+func TestExportImportCarriesTheTranscriptArchive(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	src := t.TempDir()
+	k := kernel.New(runner.NewFake())
+	k.RelaunchProbe = 0
+	scoutDir := filepath.Join(src, "scout")
+	a, _ := k.Spawn(addr.Root, "scout", scoutDir, runner.SpawnOpts{Name: "scout"})
+	k.EnsureAlive(a)
+	b, _ := k.Reg.Get(a)
+	sid := b.SessionID
+	if err := saveFleet(src, k, map[int]addr.Address{}); err != nil {
+		t.Fatal(err)
+	}
+
+	proj := filepath.Join(home, ".claude", "projects", claudeSlug(scoutDir))
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(proj, sid+".jsonl")
+	os.WriteFile(live, []byte(`{"type":"user","text":"still-live"}`+"\n"), 0o644)
+	os.WriteFile(live+transcriptArchiveSuffix, []byte(`{"type":"user","text":"trimmed-away-in-2026"}`+"\n"), 0o644)
+
+	blob := filepath.Join(t.TempDir(), "fleet.tgz")
+	n, _, _, err := exportFleet(src, blob, "metadata", false, nil)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("conversations bundled = %d, want 1 — an archive is history, not a second conversation", n)
+	}
+
+	dst := t.TempDir()
+	if _, err := importFleet(blob, dst, false); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	fm, ok := loadFleet(dst)
+	if !ok {
+		t.Fatal("no fleet after import")
+	}
+	var newDir string
+	for _, br := range fm.Bubbles {
+		if br.Addr == a.String() {
+			newDir = br.Dir
+		}
+	}
+	newProj := filepath.Join(home, ".claude", "projects", claudeSlug(newDir))
+
+	if data, err := os.ReadFile(filepath.Join(newProj, sid+".jsonl")); err != nil || !strings.Contains(string(data), "still-live") {
+		t.Fatalf("the live transcript did not survive the round trip: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(newProj, sid+".jsonl"+transcriptArchiveSuffix))
+	if err != nil {
+		t.Fatalf("the archive did not survive export/import (%v) — every trimmed conversation would be lost on restore", err)
+	}
+	if !strings.Contains(string(data), "trimmed-away-in-2026") {
+		t.Fatalf("the archive arrived with the wrong contents: %q", string(data))
+	}
+	// It must arrive AS an archive, not be unpacked as a session of its own.
+	if _, err := os.Stat(filepath.Join(newProj, sid+".jsonl"+transcriptArchiveSuffix+".jsonl")); err == nil {
+		t.Fatal("the archive was restored as if it were a transcript — it must never be mistaken for a session")
+	}
+}
