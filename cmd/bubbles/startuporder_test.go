@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
+	"github.com/Sentinal-Glimpass/bubbles/internal/supervisor"
 )
 
 // appSource returns main's source, once, for the ordering guards below.
@@ -51,6 +54,16 @@ var (
 	startupBinds = []struct{ what, needle string }{
 		{"the webhook server", "startWebhookServer(k)"},
 		{"the IPC socket", "ipc.Serve(sock,"},
+	}
+	// startupSupervisor is the same rule from the other side. A listener is not
+	// the only way state gets touched before it is loaded: the phaseBoot checks
+	// are started by main itself, and inbox-drain, recover-unread and schedules
+	// read exactly the stores the loads are about to REPLACE. Registration seeds
+	// each check's first due time, and the driver is what actually executes
+	// them, so both belong below the loads.
+	startupSupervisor = []struct{ what, needle string }{
+		{"the phaseBoot checks are registered", "registerPhase(checkReg, checks, phaseBoot)"},
+		{"the supervisor driver is started", "go runChecks(checkCtx, checkReg, supervisorTick)"},
 	}
 )
 
@@ -177,5 +190,141 @@ func TestMessageArrivingAtTheBindWindowIsNeverDropped(t *testing.T) {
 	}
 	if got := k.Store.UnreadCount(a); got != wantUnread || got == 0 {
 		t.Fatalf("UnreadCount(%s) = %d, want %d (the count must agree with the store it counts)", a, got, wantUnread)
+	}
+}
+
+// TestBackgroundChecksStartAfterEveryLoad is EVERY LOAD ABOVE EVERY BIND applied
+// to the supervisor, which is the other thing in main that starts touching the
+// stores on its own.
+//
+// The phaseBoot inventory is not passive: inbox-drain reaches EnsureAlive and
+// can page a cold bubble in over its mail, recover-unread re-nudges bubbles from
+// what UnreadCount says, and schedules fires durable wakes. All three read a
+// store whose Load REPLACES its contents wholesale, so a tick above the loads
+// acts on an EMPTY store and then has its whole view swapped out underneath it —
+// a wake that should have fired is skipped and rearmed from nothing, and mail
+// that was on disk the entire time goes un-drained until the next slow tick.
+//
+// Ordering again in preference to a "loaded yet?" gate, for the same reason the
+// block in app.go gives: a driver that has not been started cannot run anything,
+// whereas a gate is another piece of state to get wrong in the next check
+// somebody adds.
+func TestBackgroundChecksStartAfterEveryLoad(t *testing.T) {
+	src := appSource(t)
+	for _, load := range startupLoads {
+		li := sourceIndex(t, src, load.needle)
+		for _, sup := range startupSupervisor {
+			if li > sourceIndex(t, src, sup.needle) {
+				t.Errorf("%s is loaded AFTER %s: a phaseBoot check can run against the pre-load store and then have it replaced underneath it (every store's Load replaces its contents wholesale)",
+					load.what, sup.what)
+			}
+		}
+	}
+	// The savers stay below the boot checks: phaseAfterLoad exists to keep a
+	// saver tick from writing empty in-memory state over a persisted file, and
+	// moving the boot registration down must not have collapsed the two phases
+	// into one registration point.
+	boot := sourceIndex(t, src, "registerPhase(checkReg, checks, phaseBoot)")
+	if after := sourceIndex(t, src, "registerPhase(checkReg, checks, phaseAfterLoad)"); after < boot {
+		t.Error("the phaseAfterLoad savers are registered BEFORE the phaseBoot checks: the two phases exist precisely to be ordered")
+	}
+}
+
+// TestABackgroundCheckNeverSeesThePreLoadStore is that rule executed rather than
+// read, in the shape of TestMessageArrivingAtTheBindWindowIsNeverDropped.
+//
+// The order of the two steps comes FROM app.go, so this runs whatever sequence
+// main actually runs: start the supervisor above the loads and a check observes
+// the empty store, start it below and the same check observes the persisted
+// mail. The stand-in check only reads the store, which is the part of
+// inbox-drain / recover-unread / schedules that matters here — what they then DO
+// (nudge a bubble, wake one on a schedule) is decided entirely by what they saw.
+func TestABackgroundCheckNeverSeesThePreLoadStore(t *testing.T) {
+	base := t.TempDir()
+
+	// A daemon that has run before: one bubble with one unread message on disk.
+	k0 := kernel.New(runner.NewFake())
+	k0.RelaunchProbe = 0
+	a, err := k0.Spawn(addr.Root, "w", filepath.Join(base, "w"), runner.SpawnOpts{Persona: "w"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if _, err := k0.Send(addr.Root, a, "from-the-previous-run", "body", 0, true); err != nil {
+		t.Fatalf("seed send: %v", err)
+	}
+	if err := saveFleet(base, k0, map[int]addr.Address{}); err != nil {
+		t.Fatalf("save fleet: %v", err)
+	}
+	if err := saveInbox(base, k0); err != nil {
+		t.Fatalf("save inbox: %v", err)
+	}
+
+	// The process restarts.
+	k := kernel.New(runner.NewFake())
+	k.RelaunchProbe = 0
+	restoreFleet(base, k)
+
+	// What a phaseBoot check that reads the message store sees on its FIRST tick.
+	// Buffered and non-blocking so the check keeps its real cadence afterwards
+	// instead of becoming a one-shot that could never overlap the load.
+	firstSight := make(chan int, 1)
+	reg := supervisor.New(time.Now)
+	if err := reg.Register(supervisor.Check{Name: "reads-the-message-store", Every: time.Millisecond, Fn: func(context.Context) error {
+		msgs, _ := k.Store.Snapshot()
+		select {
+		case firstSight <- len(msgs):
+		default:
+		}
+		return nil
+	}}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// startChecks is what main's `go runChecks(...)` does, and it does not return
+	// until a check has actually run — so "the supervisor was started first"
+	// means a check really did observe the store, not merely that a goroutine
+	// existed. The real driver is used rather than a hand-rolled loop.
+	startChecks := func() int {
+		t.Helper()
+		go runChecks(ctx, reg, time.Millisecond)
+		select {
+		case n := <-firstSight:
+			return n
+		case <-time.After(10 * time.Second):
+			t.Fatal("the background check never ran")
+			return -1
+		}
+	}
+	load := func() { loadInbox(base, k) }
+
+	// Take the order from main itself.
+	src := appSource(t)
+	loadAt := sourceIndex(t, src, "loadInbox(baseDir, k)")
+	startAt := sourceIndex(t, src, "go runChecks(checkCtx, checkReg, supervisorTick)")
+	var observed int
+	if startAt < loadAt {
+		observed = startChecks() // the supervisor is up first: this is the window
+		load()
+	} else {
+		load()
+		observed = startChecks()
+	}
+
+	if observed == 0 {
+		t.Fatalf("a background check ran against an EMPTY message store while %d message(s) sat on disk unloaded: inbox-drain would find no mail to drain, recover-unread nobody to re-nudge, and schedules nothing due — and then the load replaces the store underneath them", 1)
+	}
+	if observed != 1 {
+		t.Fatalf("the check saw %d message(s), want the 1 that was persisted", observed)
+	}
+	// And the load still did its job: the guard must not be satisfiable by
+	// simply never loading.
+	msgs, _ := k.Store.Snapshot()
+	if len(msgs) != 1 || msgs[0].Subject != "from-the-previous-run" {
+		t.Fatalf("after the load the store holds %d message(s), want the 1 persisted one", len(msgs))
+	}
+	if got := k.Store.UnreadCount(a); got != 1 {
+		t.Fatalf("UnreadCount(%s) = %d, want 1 (the count must agree with the store it counts)", a, got)
 	}
 }
