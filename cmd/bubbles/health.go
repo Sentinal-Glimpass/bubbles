@@ -365,10 +365,11 @@ type trimLogKey struct {
 // metered" stays exactly true and the counters remain a faithful count of
 // attempts. Every outcome EXCEPT trimTrimmed describes a condition the bubble
 // is still in, and all of them are sticky, not just the obvious two: a hot
-// bubble stays hot, a never-compacted transcript stays never-compacted, and —
-// since this branch deliberately defers the SetSessionID persistence fix — a
+// bubble stays hot, a never-compacted transcript stays never-compacted, and a
 // bubble naming a session that does not exist keeps naming it on every 2-minute
-// sweep. Unthrottled, those ~720 lines a day per bubble would bury the
+// sweep (startup reconciliation clears such ids for fleets it can see — see
+// reconcileSessionIDs — but one minted after boot is sticky until the next
+// start). Unthrottled, those ~720 lines a day per bubble would bury the
 // refused-identity and error lines this work exists to surface, which is the
 // "OversizedTranscripts: 214 meant one file" pathology one layer down. A trim
 // itself is an event and is never windowed (see below).
@@ -425,9 +426,10 @@ func (m *HealthManager) trimLogDue(a addr.Address, o trimOutcome) bool {
 // trimQuietPeriod is how long a transcript must have been untouched before it
 // may be rewritten. A file being appended to must never be rewritten under its
 // writer, WHATEVER THE KERNEL BELIEVES about hotness: IsHot is registry state,
-// and registry state is exactly what proved unreliable (SetSessionID never
-// bumps the fleet version, so a bubble can point at a session that moved on).
-// The mtime is the file's own testimony and cannot go stale.
+// and registry state is exactly what proved unreliable (the launch path now
+// marks session-id changes dirty via RecordSessionID, but a bubble restored
+// from an older fleet.json can still point at a session that moved on). The
+// mtime is the file's own testimony and cannot go stale.
 //
 // 5 minutes is far longer than any gap between claude's appends within a turn,
 // and far shorter than the idle period of a genuinely parked bubble, so the
