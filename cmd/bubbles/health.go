@@ -360,17 +360,18 @@ type trimLogKey struct {
 // absence of exactly this line is why recovering the lost conversation took
 // file-history archaeology.
 //
-// THE METER IS UNCONDITIONAL; ONLY THE LINE IS RATE-LIMITED. Every attempt
-// increments a counter, so "every suppression path is metered" stays exactly
-// true and the counters remain a faithful count of attempts. The log line goes
-// through a per-(bubble, outcome) window because EVERY outcome here is sticky,
-// not just the obvious two: a hot bubble stays hot, a never-compacted
-// transcript stays never-compacted, and — since this branch deliberately defers
-// the SetSessionID persistence fix — a bubble naming a session that does not
-// exist keeps naming it on every 2-minute sweep. Unthrottled, those ~720 lines
-// a day per bubble would bury the refused-identity and error lines this work
-// exists to surface, which is the "OversizedTranscripts: 214 meant one file"
-// pathology one layer down.
+// THE METER IS UNCONDITIONAL; ONLY THE LINE IS RATE-LIMITED, AND ONLY FOR
+// STATES. Every attempt increments a counter, so "every suppression path is
+// metered" stays exactly true and the counters remain a faithful count of
+// attempts. Every outcome EXCEPT trimTrimmed describes a condition the bubble
+// is still in, and all of them are sticky, not just the obvious two: a hot
+// bubble stays hot, a never-compacted transcript stays never-compacted, and —
+// since this branch deliberately defers the SetSessionID persistence fix — a
+// bubble naming a session that does not exist keeps naming it on every 2-minute
+// sweep. Unthrottled, those ~720 lines a day per bubble would bury the
+// refused-identity and error lines this work exists to surface, which is the
+// "OversizedTranscripts: 214 meant one file" pathology one layer down. A trim
+// itself is an event and is never windowed (see below).
 //
 // What is worth seeing is a condition CHANGING, and the key carries the outcome
 // precisely so a change is announced immediately rather than waiting out the
@@ -387,7 +388,16 @@ func (m *HealthManager) recordTrim(a addr.Address, res trimResult) {
 		m.k.Cost.Add(a, costmeter.FTrimsRefused, 1)
 	}
 
-	if !m.trimLogDue(a, res.Outcome) {
+	// A TRIM IS AN EVENT, NOT A STATE, AND IS NEVER WINDOWED. Every other
+	// outcome describes a condition the bubble is still in, where repetition
+	// carries no information; a trim describes bytes that were just moved out
+	// of a live transcript, and a second one is a second mutation. This branch
+	// exists because reconstructing one such mutation took archaeology across
+	// mtimes, file-history and an inbox store — throttling the one line that
+	// documents an actual write would defeat the point. It costs nothing in
+	// volume: a trim fires only when there is both a compaction boundary and
+	// content before it to cut.
+	if res.Outcome != trimTrimmed && !m.trimLogDue(a, res.Outcome) {
 		return
 	}
 	errPart := ""

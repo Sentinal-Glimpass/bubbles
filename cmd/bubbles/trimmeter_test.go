@@ -180,6 +180,42 @@ func TestTrimLogThrottleCoversEverySteadyState(t *testing.T) {
 	}
 }
 
+// TestEveryTrimIsLoggedEvenInsideTheWindow: the throttle is for STATES, where
+// repetition carries no information ("this bubble is still in the
+// no-transcript condition"). A trim is an EVENT — bytes were moved out of a
+// live transcript — and every one of them must leave its own line with its own
+// before/after/archived numbers. That per-event record is exactly what this
+// incident lacked, and it is naturally rare: it fires only when there is both a
+// compaction boundary and content to cut.
+func TestEveryTrimIsLoggedEvenInsideTheWindow(t *testing.T) {
+	f := newPumpFixture(t)
+	f.sessionID(t, "sess-a")
+	log := f.captureTrimLog()
+
+	f.writeIdentifiedTranscript(t, "sess-a", time.Hour)
+	f.m.trimTranscripts()
+	// A second trimmable state on the same file, well inside the window.
+	f.writeIdentifiedTranscript(t, "sess-a", time.Hour)
+	f.m.trimTranscripts()
+
+	if n := strings.Count(log.text(), "outcome=trimmed"); n != 2 {
+		t.Errorf("trims logged = %d, want 2 — a mutation is an event, not a state; every one gets its own line", n)
+	}
+	if trimmed, _, _ := f.counters(); trimmed != 2 {
+		t.Errorf("TranscriptsTrimmed = %d, want 2", trimmed)
+	}
+
+	// The states around it stay throttled: exempting the event must not
+	// unthrottle everything else.
+	f.sessionID(t, "sess-that-never-existed")
+	f.m.trimTranscripts()
+	f.m.trimTranscripts()
+	f.m.trimTranscripts()
+	if n := strings.Count(log.text(), "outcome=no-transcript"); n != 1 {
+		t.Errorf("no-transcript logged %d times, want 1 — repeated STATES stay windowed", n)
+	}
+}
+
 // TestTrimLogAnnouncesAChangeOfStateImmediately is the other half of the
 // throttle, and the reason its key carries the outcome: what is worth seeing is
 // a condition CHANGING, and it must never wait out the previous condition's
