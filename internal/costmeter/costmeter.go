@@ -86,6 +86,11 @@ const (
 	FTranscriptsTrimmed
 	FTranscriptBytesArchived
 	FTrimsRefused
+	// FPumpsDeferred counts background context-pump actions withheld because the
+	// operator was dived into that bubble. It is a suppression, so it is metered
+	// like every other one — an unrecorded skip is indistinguishable from a pump
+	// that never had anything to do, which is exactly how the compact() bug hid.
+	FPumpsDeferred
 )
 
 // Counters holds one bubble's cost/efficiency tally. All fields are int64 so
@@ -108,6 +113,7 @@ type Counters struct {
 	CompactsAbandoned    int64
 	CompactsAccepted     int64
 
+	PumpsDeferred        int64
 	TranscriptsTrimmed      int64
 	TranscriptBytesArchived int64
 	TrimsRefused            int64
@@ -157,6 +163,8 @@ func field(c *Counters, f Field) *int64 {
 		return &c.TranscriptBytesArchived
 	case FTrimsRefused:
 		return &c.TrimsRefused
+	case FPumpsDeferred:
+		return &c.PumpsDeferred
 	default:
 		return nil
 	}

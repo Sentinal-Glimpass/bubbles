@@ -75,6 +75,13 @@ func markAction(marks map[int]addr.Address, slot int, current addr.Address) addr
 
 func runApp() {
 	baseDir := defaultWorkspace() // dir where `bubbles` was launched
+	// FIRST, before anything can print: move this process's stderr off the
+	// operator's screen and into .bubbles/daemon.log. Under the daemon this
+	// process's stderr IS the terminal the TUI draws on — see stderrlog.go.
+	// Non-fatal: diagnostics on screen are ugly, not broken.
+	if err := redirectStderrToLog(baseDir); err != nil {
+		fmt.Fprintf(os.Stderr, "bubbles: diagnostics stay on screen — could not open %s: %v\n", daemonLogPath(baseDir), err)
+	}
 	// STABLE per-workspace IPC socket (was bubbles-<pid>.sock). A pid-based path
 	// changed on every daemon restart, orphaning every live session's MCP bridge
 	// on the dead socket → loud send-failures until relaunch. A stable path lets a
@@ -1188,7 +1195,9 @@ func defaultWorkspace() string {
 }
 
 func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "bubbles:", err)
+	// fatalf, not Fprintln: stderr is the log file once runApp has redirected
+	// it, and an operator watching a failed boot must still see why.
+	fatalf("bubbles: %v\n", err)
 	os.Exit(1)
 }
 

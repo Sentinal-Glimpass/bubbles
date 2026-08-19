@@ -77,6 +77,23 @@ func (m *HealthManager) pumpContext() {
 		if st.ContextTokens < transcript.ContextNudgeTokens {
 			continue
 		}
+
+		// Never act on the bubble the operator is dived into. The pump's remedy
+		// is a WRITE INTO THAT SESSION, and the operator is watching that
+		// session — a nudge lands in the middle of their conversation and a
+		// forced /compact discards the context they are working through. The
+		// existing SystemNotice/SystemCompact guard is not enough here: it fires
+		// only while a keystroke is within TypingWindow (10s), and SetFocus
+		// zeroes that clock, so diving in to READ was never protected at all.
+		//
+		// Deferring costs nothing. The sweep runs every 2 minutes and the
+		// condition cannot resolve itself, so the pump acts on its next sweep
+		// after the operator leaves — and DiveAttended ages out on its own if a
+		// terminal drops mid-dive, so this can never strand a bubble.
+		if m.k.DiveAttended(b.Addr) {
+			m.k.Cost.Add(b.Addr, costmeter.FPumpsDeferred, 1)
+			continue
+		}
 		// Checked before acting, claimed only after an action actually lands:
 		// a nudge that was never written (cold bubble, ceiling denial) must not
 		// buy 30 minutes of silence it never paid for.

@@ -153,6 +153,7 @@ type Kernel struct {
 	focusMu     sync.Mutex
 	focused     addr.Address // the bubble the operator is dived into
 	heldFlushed bool         // whether the current idle backlog has already been flushed
+	focusedAt   time.Time    // when the operator dived in (a dive is attended before any key is pressed)
 	lastKey     atomic.Int64 // unixnano of the operator's last keystroke in the focused bubble
 
 	notifyMu  sync.Mutex
@@ -199,7 +200,7 @@ func (k *Kernel) clearNudge(a addr.Address) {
 func (k *Kernel) SetFocus(a addr.Address) {
 	k.lastKey.Store(0) // reset any carried-over typing state from another bubble
 	k.focusMu.Lock()
-	k.focused, k.heldFlushed = a, false
+	k.focused, k.heldFlushed, k.focusedAt = a, false, time.Now()
 	k.focusMu.Unlock()
 }
 
@@ -291,6 +292,41 @@ const presenceWindow = 2 * time.Minute
 func (k *Kernel) operatorPresent() bool {
 	last := k.lastKey.Load()
 	return last != 0 && time.Since(time.Unix(0, last)) < presenceWindow
+}
+
+// DiveAttended reports whether a human is, right now, looking at bubble a.
+//
+// It exists because the two existing signals both answer it wrongly:
+//
+//   - isFocused alone says yes forever. Focus is cleared by a deferred
+//     UnsetFocus, so a terminal that dropped mid-dive leaves it set — the stale
+//     focus 3cfb0d9 was written about. Gating a background pump on it would
+//     exempt a bubble from compaction for as long as the daemon lives.
+//   - isFocused && typingActive says no far too readily. TypingWindow is 10
+//     seconds and SetFocus deliberately ZEROES the keystroke clock, so an
+//     operator who dives in to read — and never types — is never protected at
+//     all. That is the ordinary case, and it is why background writes were
+//     landing on the screen mid-conversation.
+//
+// So: attended means focused, and either the dive itself or a keystroke is
+// recent. presenceWindow (2m) is the right clock — the same one that decides
+// whether a focus is a live human or a leftover — and it self-heals, since a
+// stale focus simply ages out of it.
+//
+// This gates BACKGROUND writes only. Interactive paths (the operator's own
+// command, a bubble's compact() tool call) must never consult it: making a
+// deliberate human request a silent no-op is the opposite of the fix.
+func (k *Kernel) DiveAttended(a addr.Address) bool {
+	k.focusMu.Lock()
+	focused, at := k.focused, k.focusedAt
+	k.focusMu.Unlock()
+	if a == "" || a != focused {
+		return false
+	}
+	if !at.IsZero() && time.Since(at) < presenceWindow {
+		return true // just dived in; no keystroke needed to count as present
+	}
+	return k.operatorPresent()
 }
 
 // isFocused reports whether a is the currently dived-into bubble.
