@@ -555,22 +555,75 @@ func appendRing(ring, p []byte) []byte {
 	return ring
 }
 
-// Write types a message into the session, then submits it with Enter. The Enter
-// is sent as a SEPARATE keypress after a short pause — otherwise claude treats
-// the text+CR as one paste and the CR becomes a newline in the box instead of a
-// submit (the message would just sit there unsent).
+// typeChunk / typeGap make a write look like typing rather than a paste.
+//
+// claude classifies input by how it ARRIVES, not by what it says: a large burst
+// delivered in one read is treated as a paste, and claude deliberately never
+// executes a slash command that arrived by paste — it submits it as literal
+// text. That is invisible for an ordinary message (paste or typed, the text is
+// delivered either way) but it silently breaks every command the kernel types,
+// `/compact` above all: the line lands in the transcript as a user message and
+// nothing runs.
+//
+// Measured against claude 2.1.235 driven through a real PTY, sending
+// `/compact <focus>` and checking whether the transcript records a
+// <command-name> entry:
+//
+//	one write,   209 bytes → executed
+//	one write, 1009 bytes → NOT executed (submitted as text)
+//	one write, 2009 bytes → NOT executed
+//	one write, 3009 bytes → NOT executed
+//	40-byte chunks, 3009 bytes → executed
+//
+// So the threshold sits between 209 and 1009 bytes. typeChunk is far below the
+// low end of that bracket rather than just under the high end, because the
+// threshold is claude's, not ours, and it can move. The cost is bounded by
+// typeCap below.
+const (
+	typeChunk = 40
+	typeGap   = 12 * time.Millisecond
+	// typeCap bounds how long one Write may spend pacing itself. Past it the
+	// remainder goes out in one burst: an over-long body is prose, not a
+	// command, so paste-classification is harmless — and holding wmu (and the
+	// caller) for minutes to type a huge message would not be.
+	typeCap = 3 * time.Second
+)
+
+// Write types a message into the session, then submits it with Enter.
+//
+// Two separate pacing rules, for two different claude behaviours:
+//
+//   - the body is typed in small chunks, so claude sees typing rather than a
+//     paste and slash commands actually run (see typeChunk above);
+//   - the Enter is a SEPARATE keypress after a pause — otherwise claude treats
+//     the text+CR as one paste and the CR becomes a newline in the box instead
+//     of a submit (the message would just sit there unsent).
+//
+// The returned count is the body length, excluding the submitting Enter.
 func (s *ptySession) Write(p []byte) (int, error) {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	if s.interrupt != 0 {
 		_, _ = s.ptmx.Write([]byte{s.interrupt})
 	}
-	n, err := s.ptmx.Write(p)
-	if err != nil {
-		return n, err
+	deadline := time.Now().Add(typeCap)
+	n := 0
+	for n < len(p) {
+		end := n + typeChunk
+		if end > len(p) || time.Now().After(deadline) {
+			end = len(p) // last chunk, or pacing budget spent: send the rest
+		}
+		w, err := s.ptmx.Write(p[n:end])
+		n += w
+		if err != nil {
+			return n, err
+		}
+		if n < len(p) {
+			time.Sleep(typeGap)
+		}
 	}
 	time.Sleep(150 * time.Millisecond) // let claude register the typed text first
-	_, err = s.ptmx.Write([]byte{'\r'})
+	_, err := s.ptmx.Write([]byte{'\r'})
 	return n, err
 }
 
