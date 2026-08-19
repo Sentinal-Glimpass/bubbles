@@ -368,12 +368,18 @@ func (f *pumpFixture) forceWindowClaimed() bool {
 	return !f.m.lastPump[f.a].force.IsZero()
 }
 
-// TestContextPumpDoesNotForceCompactIntoTheOperatorsTyping is the input-safety
+// TestContextPumpDoesNotForceCompactIntoAnAttendedDive is the input-safety
 // property for the FORCED tier. The pump is a background ticker; typing
-// /compact plus Enter into the bubble the operator is currently dived into
-// would submit their half-written prompt. The nudge tier has always honoured
-// this (SystemNotice); the force tier used to call Compact and walk past it.
-func TestContextPumpDoesNotForceCompactIntoTheOperatorsTyping(t *testing.T) {
+// /compact plus Enter into the bubble the operator is dived into interrupts
+// their conversation, and at the force tier it also discards the context they
+// are working through.
+//
+// The hold used to last only while a keystroke was inside TypingWindow, so the
+// pump fired the moment the operator paused to read -- which is when they are
+// most obviously still there. The hold now lasts for the DIVE, and lifts when
+// the operator leaves (or when a dropped terminal's focus ages out; see
+// TestDiveAttendedAgesOut). It remains a delay, never a cancellation.
+func TestContextPumpDoesNotForceCompactIntoAnAttendedDive(t *testing.T) {
 	f := newPumpFixture(t)
 	s := f.hot(t)
 	f.k.TypingWindow = time.Hour // the operator is continuously typing
@@ -390,13 +396,25 @@ func TestContextPumpDoesNotForceCompactIntoTheOperatorsTyping(t *testing.T) {
 		t.Fatal("a compaction that never happened must not claim the 30-minute window")
 	}
 
-	// Retried on a later sweep once the operator pauses -- the hold is a delay,
-	// not a cancellation, and the bubble is still 800k+.
+	// Merely pausing is NOT permission: the operator is reading, still dived in.
+	// This is the case the old typing-only guard got wrong.
 	f.k.TypingWindow = time.Nanosecond
 	f.m.pumpContext()
 
+	if strings.Contains(s.Written(), "/compact") {
+		t.Fatalf("forced compaction fired while the operator was still dived in, merely not typing: %q", s.Written())
+	}
+	if f.forceWindowClaimed() {
+		t.Fatal("a compaction that never happened must not claim the 30-minute window")
+	}
+
+	// Leaving lifts the hold, and the bubble is still 800k+, so the deferred
+	// action happens on the next sweep.
+	f.k.UnsetFocus(f.a)
+	f.m.pumpContext()
+
 	if n := strings.Count(s.Written(), "/compact"); n != 1 {
-		t.Fatalf("/compact written %d times after the operator paused, want 1", n)
+		t.Fatalf("/compact written %d times after the operator left, want 1", n)
 	}
 	if !f.forceWindowClaimed() {
 		t.Fatal("a compaction that DID land must claim the window")
@@ -431,5 +449,46 @@ func TestContextPumpDoesNotBurnTheWindowOnANotReadySession(t *testing.T) {
 	}
 	if !f.forceWindowClaimed() {
 		t.Fatal("the delivered compaction must claim the window")
+	}
+}
+
+// TestContextPumpDefersNudgeDuringAnAttendedDive covers the NUDGE tier, and the
+// case the old guard missed entirely: an operator who dives in to read and never
+// presses a key. SetFocus zeroes the keystroke clock, so typingActive was false
+// from the first instant and the nudge landed in the middle of their session.
+func TestContextPumpDefersNudgeDuringAnAttendedDive(t *testing.T) {
+	f := newPumpFixture(t)
+	s := f.hot(t)
+	f.k.SetFocus(f.a) // dived in, reading; no keystroke at all
+	f.writeContext(t, transcript.ContextNudgeTokens+10_000)
+
+	f.m.pumpContext()
+
+	if strings.Contains(s.Written(), "context is") {
+		t.Fatalf("a context nudge was written into the session the operator is reading: %q", s.Written())
+	}
+	if got := f.m.k.Cost.Snapshot()[f.a].PumpsDeferred; got != 1 {
+		t.Fatalf("PumpsDeferred = %d, want 1 — a silent skip is indistinguishable from a pump with nothing to do", got)
+	}
+
+	f.k.UnsetFocus(f.a)
+	f.m.pumpContext()
+	if !strings.Contains(s.Written(), "context is") {
+		t.Fatalf("the nudge must arrive once the operator leaves; got %q", s.Written())
+	}
+}
+
+// TestContextPumpStillActsOnOtherBubblesDuringADive: the hold is per-bubble.
+// Diving into one bubble must not pause context management for the fleet.
+func TestContextPumpStillActsOnOtherBubblesDuringADive(t *testing.T) {
+	f := newPumpFixture(t)
+	s := f.hot(t)
+	f.k.SetFocus("0.99") // dived into some OTHER bubble
+	f.writeContext(t, transcript.ContextNudgeTokens+10_000)
+
+	f.m.pumpContext()
+
+	if !strings.Contains(s.Written(), "context is") {
+		t.Fatalf("a bubble the operator is not in must still be pumped; got %q", s.Written())
 	}
 }
