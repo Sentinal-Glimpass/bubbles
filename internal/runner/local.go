@@ -199,7 +199,7 @@ func NewLocal() *LocalRunner {
 // opusOneM is the 1M-context opus alias used for EVERY bubble on the
 // non-Bedrock (subscription) path — a bare "opus" would NOT carry the [1m]
 // context. Change here if the model id revs.
-const opusOneM = "claude-opus-5[1m]"
+const opusOneM = "claude-opus-4-8[1m]"
 
 // Launch starts claude in a PTY in dir, seeded with the persona/goal.
 func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session, error) {
