@@ -111,7 +111,7 @@ install_bubbles() {
 		go build -o "$BIN_DIR/bubbles" ./cmd/bubbles || die "build failed"
 	else
 		log "installing bubbles from $REPO"
-		GOBIN="$BIN_DIR" go install "$REPO/cmd/bubbles@latest" || die "go install failed"
+		GOBIN="$BIN_DIR" go install "$REPO/cmd/bubbles@main" || die "go install failed"
 	fi
 	log "installed -> $BIN_DIR/bubbles"
 }

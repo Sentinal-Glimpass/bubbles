@@ -83,6 +83,9 @@ func main() {
 		case "stop":
 			runStop()
 			return
+		case "update", "--update":
+			runUpdate()
+			return
 		case "session-hook":
 			if len(os.Args) > 2 {
 				runSessionHook(os.Args[2])

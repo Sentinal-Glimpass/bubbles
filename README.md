@@ -50,7 +50,7 @@ Then authenticate Claude Code once (`claude`, sign in) and run `bubbles`.
 
 ```bash
 # Go module install (needs Go 1.25+ on your PATH):
-go install github.com/Sentinal-Glimpass/bubbles/cmd/bubbles@latest   # -> $(go env GOPATH)/bin
+go install github.com/Sentinal-Glimpass/bubbles/cmd/bubbles@main   # -> $(go env GOPATH)/bin
 
 # Or from source:
 git clone https://github.com/Sentinal-Glimpass/bubbles.git && cd bubbles
