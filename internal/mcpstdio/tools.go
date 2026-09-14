@@ -17,15 +17,15 @@ type Backend interface {
 	Mute(by, source, subjectRe, bodyRe, window, ttl string) (string, error) // self-scoped: by may only mute its own inbox
 	Unmute(by, id string) error
 	Mutes(by string) []string
-	Webhook(by, target string) (string, error)       // incoming-webhook URL for target (self or a bubble in by's subtree)
-	WebhookRotate(by, target string) (string, error) // revoke + reissue target's URL (same authority)
+	Webhook(by, target string) (string, error)             // incoming-webhook URL for target (self or a bubble in by's subtree)
+	WebhookRotate(by, target string) (string, error)       // revoke + reissue target's URL (same authority)
 	ControlWebhook(by string, rotate bool) (string, error) // control-webhook URL that spawns/deletes bubbles as the caller
 	Port() (string, error)                                 // the daemon's HTTP/webhook base URL (embeds the current port)
 	Spawn(by, name, description, dir, model string) (string, error)
 	Edit(by, addr, name, description, model string) error
-	Delete(by, addr string) (int, error) // returns how many bubbles were removed (target + subtree)
-	Forget(by, addr string) error        // drop a contact from the caller's own list
-	Introduce(by, a, b string) error     // make two of the caller's sub-bubbles mutual contacts
+	Delete(by, addr string) (int, error)                          // returns how many bubbles were removed (target + subtree)
+	Forget(by, addr string) error                                 // drop a contact from the caller's own list
+	Introduce(by, a, b string) error                              // make two of the caller's sub-bubbles mutual contacts
 	Broadcast(by, subject, body string, urgent bool) (int, error) // message the caller's whole subtree
 
 	// Harnessed tasks: assigned work travels worker → checks → (verifier) →
@@ -53,8 +53,36 @@ func strProp(props ...string) map[string]any {
 	return p
 }
 
-// tools returns the tool list for this Server; spawn appears only when granted.
+// tools is the full advertised list: the built-in bubble tools, the always-on
+// add_mcp tool, and every tool from MCP servers this bubble added at runtime
+// (namespaced "<server>.<tool>"). tools/list calls this.
 func (s *Server) tools() []Tool {
+	ts := s.baseTools()
+	ts = append(ts, addMCPTool())
+	return append(ts, s.proxyTools()...)
+}
+
+// addMCPTool is the tool a bubble calls to gain a new MCP live, no relaunch.
+func addMCPTool() Tool {
+	props := map[string]any{
+		"name":    map[string]any{"type": "string", "description": "Short identifier for the MCP (no dots/slashes/spaces). Its tools appear as <name>.<tool>."},
+		"command": map[string]any{"type": "string", "description": "Executable that speaks MCP over stdio (e.g. \"npx\", \"uvx\", or a binary path)."},
+		"args":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Arguments for the command."},
+		"env":     map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Extra environment variables for the server process."},
+	}
+	return Tool{
+		Name:        "add_mcp",
+		Description: "Attach an MCP server to YOUR OWN session, live — its tools become callable immediately with no restart, and persist across relaunches. Provide a stdio command server (command + optional args/env). Tools are namespaced <name>.<tool>.",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": props,
+			"required":   []string{"name", "command"},
+		},
+	}
+}
+
+// baseTools returns the built-in bubble tools; spawn appears only when granted.
+func (s *Server) baseTools() []Tool {
 	sendProps := strProp("to", "subject", "body")
 	sendProps["reply_to"] = map[string]any{
 		"type":        "integer",
@@ -113,7 +141,7 @@ func (s *Server) tools() []Tool {
 			},
 		},
 		{
-			Name: "schedule",
+			Name:        "schedule",
 			Description: "Set a DURABLE recurring wake: the daemon delivers a message to a bubble on a timer, waking it even if it (and you) are asleep — so it can be an event-driven worker without a permanently-running session. Target yourself or a bubble you own. Give EITHER every (\"15m\", \"2h\") OR daily (\"08:00\"). Returns a schedule id.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -232,7 +260,7 @@ func (s *Server) tools() []Tool {
 			Name:        "cancel_task",
 			Description: "Withdraw a task you assigned (assigners only). Stops it marking the worker's messages unverified and REAPS its independent verifier bubble — use this for a mis-assigned or superseded task so its verifier doesn't linger and burn tokens.",
 			InputSchema: map[string]any{
-				"type": "object",
+				"type":       "object",
 				"properties": map[string]any{"task_id": map[string]any{"type": "string", "description": "The task id to cancel, e.g. \"t3\"."}},
 				"required":   []string{"task_id"},
 			},
