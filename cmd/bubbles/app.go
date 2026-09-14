@@ -199,7 +199,7 @@ func runApp() {
 	k.TypingWindow = 10 * time.Second                 // hold a focused bubble's messages while you're typing; deliver once you pause this long
 	inheritedMCP := resolveMCPServers(mcpAllowList()) // curated operator servers bubbles inherit (e.g. playwright)
 	lr.MCPConfig = func(a addr.Address) string {
-		return mcpConfigJSON(self, sock, a, k.Caps.CanSpawn(a), inheritedMCP)
+		return mcpConfigJSON(self, sock, baseDir, a, k.Caps.CanSpawn(a), inheritedMCP)
 	}
 	// Same Caps.CanSpawn value that gates the spawn-family MCP tool schemas above
 	// also gates the spawn/edit/delete/introduce/broadcast/assign_task prose in the
@@ -907,7 +907,13 @@ func resolveMCPServers(allow []string) map[string]json.RawMessage {
 // mcpConfigJSON builds the inline --mcp-config JSON: our own mcp-stdio server
 // (tagged with this bubble's address) plus the curated set of the operator's
 // servers. With --strict-mcp-config this is EXACTLY what a bubble sees.
-func mcpConfigJSON(exe, sock string, a addr.Address, spawnable bool, extra map[string]json.RawMessage) string {
+// mcpOverlayPath is where a bubble's runtime-added MCP servers are persisted —
+// one file per address under .bubbles/mcp/, so each bubble's set is its own.
+func mcpOverlayPath(baseDir string, a addr.Address) string {
+	return filepath.Join(baseDir, ".bubbles", "mcp", a.String()+".json")
+}
+
+func mcpConfigJSON(exe, sock, baseDir string, a addr.Address, spawnable bool, extra map[string]json.RawMessage) string {
 	spawn := "0"
 	if spawnable {
 		spawn = "1"
@@ -921,6 +927,9 @@ func mcpConfigJSON(exe, sock string, a addr.Address, spawnable bool, extra map[s
 				"BUBBLE_ADDR":      a.String(),
 				"BUBBLE_SOCK":      sock,
 				"BUBBLE_SPAWNABLE": spawn,
+				// Per-bubble file where add_mcp persists servers this bubble
+				// attached at runtime, so a relaunch restores them.
+				"BUBBLE_MCP_OVERLAY": mcpOverlayPath(baseDir, a),
 			},
 		},
 	}

@@ -57,7 +57,7 @@ func TestResolveMCPServersAndConfig(t *testing.T) {
 	}
 
 	// the generated config includes bubbles + the curated servers, and playwright's command survives
-	js := mcpConfigJSON("/bin/bubbles", "/tmp/sock", "0.1", true, got)
+	js := mcpConfigJSON("/bin/bubbles", "/tmp/sock", "/tmp/ws", "0.1", true, got)
 	for _, want := range []string{`"bubbles"`, `"playwright"`, `"firecrawl"`, `playwright-mcp`, `"BUBBLE_ADDR":"0.1"`} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("mcp config missing %q:\n%s", want, js)

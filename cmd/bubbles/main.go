@@ -59,13 +59,13 @@ func ensureToolPath() {
 }
 
 func main() {
-	ensureToolPath()          // find claude/ngrok even if ~/.local/bin isn't on the shell's PATH
-	applyMessagePollingFlag() // --message_polling <minutes> -> env, inherited by the daemon + hosted child
+	ensureToolPath()                                   // find claude/ngrok even if ~/.local/bin isn't on the shell's PATH
+	applyMessagePollingFlag()                          // --message_polling <minutes> -> env, inherited by the daemon + hosted child
 	applyFlagToEnv("--mcp", "BUBBLES_MCP")             // --mcp playwright,github,none -> which operator MCP servers bubbles inherit
 	applyFlagToEnv("--default-model", "BUBBLES_MODEL") // fleet default model (or "auto" to inherit ANTHROPIC_MODEL, e.g. Bedrock)
 	applyFlagToEnv("--webhook-port", "BUBBLES_WEBHOOK_PORT")
-	applyFlagToEnv("--port", "BUBBLES_WEBHOOK_PORT") // short alias for the bubbles HTTP/webhook port
-	applyFlagToEnv("--webhook-base", "BUBBLES_WEBHOOK_BASE") // advertised base URL (e.g. behind a reverse proxy/tunnel)
+	applyFlagToEnv("--port", "BUBBLES_WEBHOOK_PORT")                 // short alias for the bubbles HTTP/webhook port
+	applyFlagToEnv("--webhook-base", "BUBBLES_WEBHOOK_BASE")         // advertised base URL (e.g. behind a reverse proxy/tunnel)
 	applyBoolFlagToEnv("--webhook-public", "BUBBLES_WEBHOOK_PUBLIC") // bind 0.0.0.0 instead of 127.0.0.1
 	applyBoolFlagToEnv("--ngrok", "BUBBLES_NGROK")                   // auto-start an ngrok tunnel -> public webhook URLs
 	applyFlagToEnv("--ngrok-domain", "BUBBLES_NGROK_DOMAIN")         // reserved ngrok domain for a STABLE public URL
@@ -184,9 +184,10 @@ func runMCPStdio() {
 	defer client.Close()
 
 	srv := &mcpstdio.Server{
-		Self:      self,
-		Spawnable: os.Getenv("BUBBLE_SPAWNABLE") == "1",
-		B:         &ipcBackend{c: client},
+		Self:        self,
+		Spawnable:   os.Getenv("BUBBLE_SPAWNABLE") == "1",
+		OverlayPath: os.Getenv("BUBBLE_MCP_OVERLAY"),
+		B:           &ipcBackend{c: client},
 	}
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "bubbles mcp-stdio: serve:", err)

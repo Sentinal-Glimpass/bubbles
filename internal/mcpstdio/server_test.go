@@ -14,12 +14,12 @@ type fakeBackend struct {
 	deletes [][2]string // by, addr
 	forgets [][2]string // by, addr
 
-	assigns   [][4]string // by, to, brief, checkCmd, checklist
-	submits   [][3]string // by, taskID, summary
-	verdicts  []verdictCall
-	decisions [][2]string // by, text
-	cancels   [][2]string // by, taskID
-	controls  []string    // callers who asked for a control webhook
+	assigns     [][4]string // by, to, brief, checkCmd, checklist
+	submits     [][3]string // by, taskID, summary
+	verdicts    []verdictCall
+	decisions   [][2]string // by, text
+	cancels     [][2]string // by, taskID
+	controls    []string    // callers who asked for a control webhook
 	intros      [][3]string // by, a, b
 	bcasts      [][3]string // by, subject, body
 	compacts    [][2]string // owner, focus
@@ -186,7 +186,7 @@ func TestServeFlow(t *testing.T) {
 	for _, tdef := range listR.Tools {
 		names = append(names, tdef.Name)
 	}
-	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact,schedule,unschedule,schedules,mute,unmute,mutes,webhook,webhook_rotate,bubbles_port,submit_task,verdict,tasks,cancel_task,log_decision" {
+	if strings.Join(names, ",") != "send,contacts,inbox,status,forget,compact,schedule,unschedule,schedules,mute,unmute,mutes,webhook,webhook_rotate,bubbles_port,submit_task,verdict,tasks,cancel_task,log_decision,add_mcp" {
 		t.Fatalf("tools = %v", names)
 	}
 
@@ -210,12 +210,12 @@ func TestServeFlow(t *testing.T) {
 
 func TestSpawnGated(t *testing.T) {
 	base := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: false}
-	if len(base.tools()) != 20 { // send..webhook_rotate + submit_task, verdict, tasks, cancel_task, log_decision + mute, unmute, mutes
-		t.Fatalf("base server should advertise 20 tools, got %d", len(base.tools()))
+	if len(base.tools()) != 21 { // the 20 built-ins + the always-on add_mcp tool
+		t.Fatalf("base server should advertise 21 tools, got %d", len(base.tools()))
 	}
 	s := &Server{Self: "0.1", B: &fakeBackend{}, Spawnable: true}
-	if len(s.tools()) != 27 { // + spawn, edit, delete, introduce, broadcast, control_webhook, assign_task
-		t.Fatalf("spawnable server should advertise 27 tools, got %d", len(s.tools()))
+	if len(s.tools()) != 28 { // 21 (incl. add_mcp) + spawn, edit, delete, introduce, broadcast, control_webhook, assign_task
+		t.Fatalf("spawnable server should advertise 28 tools, got %d", len(s.tools()))
 	}
 }
 

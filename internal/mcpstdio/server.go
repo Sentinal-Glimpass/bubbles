@@ -6,6 +6,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // ProtocolVersion is advertised in initialize. Confirm/bump against the
@@ -17,6 +18,16 @@ type Server struct {
 	Self      string  // this bubble's address; forced as from/by
 	B         Backend // relays to the kernel
 	Spawnable bool    // whether the spawn tool is offered
+
+	// OverlayPath persists the MCP servers this bubble added via add_mcp, so a
+	// relaunch restores them. Empty disables persistence (tests, --local).
+	OverlayPath string
+
+	wmu sync.Mutex // serializes writes to out: responses AND async notifications
+	w   io.Writer  // set in Serve; nil until then
+
+	pmu     sync.Mutex          // guards proxied
+	proxied map[string]*proxied // child MCPs added at runtime, by name
 }
 
 type rpcMessage struct {
@@ -41,7 +52,11 @@ type rpcResponse struct {
 // Serve reads JSON-RPC messages from in and writes responses to out until EOF.
 func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	dec := json.NewDecoder(in)
-	enc := json.NewEncoder(out)
+	s.w = out
+	// Reconnect any MCPs this bubble added in a previous session BEFORE serving,
+	// so they're in the very first tools/list a resumed session fetches.
+	s.loadOverlay()
+	defer s.shutdownProxies() // don't orphan child MCP processes when we exit
 	for {
 		var msg rpcMessage
 		if err := dec.Decode(&msg); err != nil {
@@ -53,10 +68,24 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 		if msg.ID == nil {
 			continue // notification: no response
 		}
-		if err := enc.Encode(s.handle(msg)); err != nil {
+		if err := s.send(s.handle(msg)); err != nil {
 			return err
 		}
 	}
+}
+
+// send writes one JSON-RPC message to out under the write lock, so a response
+// and an async notification (notifyToolsChanged) can never interleave on stdout.
+func (s *Server) send(v any) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	return json.NewEncoder(s.w).Encode(v)
+}
+
+// notifyToolsChanged tells claude the tool list changed so it re-fetches
+// tools/list — the mechanism that makes an added MCP usable with no relaunch.
+func (s *Server) notifyToolsChanged() {
+	_ = s.send(map[string]any{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
 }
 
 func (s *Server) handle(msg rpcMessage) rpcResponse {
@@ -64,7 +93,7 @@ func (s *Server) handle(msg rpcMessage) rpcResponse {
 	case "initialize":
 		return ok(msg.ID, map[string]any{
 			"protocolVersion": ProtocolVersion,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": true}},
 			"serverInfo":      map[string]any{"name": "bubbles", "version": "0.1.0"},
 		})
 	case "tools/list":
@@ -108,6 +137,15 @@ func (s *Server) call(msg rpcMessage) rpcResponse {
 			return v == "true" || v == "1"
 		}
 		return false
+	}
+	// add_mcp and the aggregated child tools are handled before the built-in
+	// switch: add_mcp is always available, and a proxied "<server>.<tool>" call
+	// is forwarded to its child MCP.
+	if p.Name == "add_mcp" {
+		return s.addMCP(msg.ID, p.Arguments)
+	}
+	if resp, ok := s.tryProxyCall(msg.ID, p.Name, p.Arguments); ok {
+		return resp
 	}
 	switch p.Name {
 	case "send":
