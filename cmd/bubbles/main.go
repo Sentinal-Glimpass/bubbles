@@ -14,11 +14,17 @@ import (
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/ipc"
 	"github.com/Sentinal-Glimpass/bubbles/internal/mcpstdio"
+	"github.com/Sentinal-Glimpass/bubbles/internal/selfupdate"
 )
 
 // hostedMode is true when the app runs as the daemon's child: then `q` detaches
 // the client (fleet keeps running) instead of quitting the process.
 var hostedMode bool
+
+// version is stamped at build time via -ldflags "-X main.version=<tag>" (see the
+// Makefile and install.sh). An unstamped build reports "dev", and auto-update
+// refuses to replace a "dev" binary — a developer's own build is never clobbered.
+var version = "dev"
 
 // detachSentinel is emitted by the hosted app on `q`; the client sees it and
 // detaches. It's an OSC string terminals ignore, so it never shows on screen.
@@ -59,10 +65,11 @@ func ensureToolPath() {
 }
 
 func main() {
-	ensureToolPath()                                   // find claude/ngrok even if ~/.local/bin isn't on the shell's PATH
-	applyMessagePollingFlag()                          // --message_polling <minutes> -> env, inherited by the daemon + hosted child
-	applyFlagToEnv("--mcp", "BUBBLES_MCP")             // --mcp playwright,github,none -> which operator MCP servers bubbles inherit
-	applyFlagToEnv("--default-model", "BUBBLES_MODEL") // fleet default model (or "auto" to inherit ANTHROPIC_MODEL, e.g. Bedrock)
+	ensureToolPath()                                       // find claude/ngrok even if ~/.local/bin isn't on the shell's PATH
+	applyMessagePollingFlag()                              // --message_polling <minutes> -> env, inherited by the daemon + hosted child
+	applyFlagToEnv("--mcp", "BUBBLES_MCP")                 // --mcp playwright,github,none -> which operator MCP servers bubbles inherit
+	applyFlagToEnv("--auto-update", "BUBBLES_AUTO_UPDATE") // --auto-update off (or BUBBLES_AUTO_UPDATE=0) disables background self-update
+	applyFlagToEnv("--default-model", "BUBBLES_MODEL")     // fleet default model (or "auto" to inherit ANTHROPIC_MODEL, e.g. Bedrock)
 	applyFlagToEnv("--webhook-port", "BUBBLES_WEBHOOK_PORT")
 	applyFlagToEnv("--port", "BUBBLES_WEBHOOK_PORT")                 // short alias for the bubbles HTTP/webhook port
 	applyFlagToEnv("--webhook-base", "BUBBLES_WEBHOOK_BASE")         // advertised base URL (e.g. behind a reverse proxy/tunnel)
@@ -86,6 +93,9 @@ func main() {
 		case "update", "--update":
 			runUpdate()
 			return
+		case "version", "--version", "-v":
+			fmt.Println(versionString())
+			return
 		case "session-hook":
 			if len(os.Args) > 2 {
 				runSessionHook(os.Args[2])
@@ -107,6 +117,27 @@ func main() {
 		}
 	}
 	runClient() // default: attach to (or start) the persistent workspace daemon
+}
+
+// versionString is what `bubbles version` prints. It always includes the commit
+// sha when it can be determined, because auto-update reads the sha back from
+// this output to identify the installed binary (selfupdate.RevisionOf).
+func versionString() string {
+	rev := selfupdate.CurrentRevision()
+	short := rev
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	switch {
+	case version != "dev" && short != "":
+		return version + " (" + short + ")"
+	case version != "dev":
+		return version
+	case short != "":
+		return "main-" + short
+	default:
+		return "dev"
+	}
 }
 
 // applyMessagePollingFlag reads `--message_polling <minutes>` and stashes it in

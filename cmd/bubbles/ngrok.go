@@ -32,7 +32,7 @@ func startNgrok(port int, domain string) (publicURL string, stop func(), err err
 		args = append(args, "--url="+domain)
 	}
 	cmd := exec.Command(bin, args...)
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr                    // ngrok's logs/errors land in the daemon log
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr                      // ngrok's logs/errors land in the daemon log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL} // ngrok dies with the app — no strays
 	if err := cmd.Start(); err != nil {
 		return "", nil, err

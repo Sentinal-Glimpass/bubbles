@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/exp/teatest"
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
 	"github.com/Sentinal-Glimpass/bubbles/internal/kernel"
 	"github.com/Sentinal-Glimpass/bubbles/internal/runner"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/exp/teatest"
 )
 
 func newKernelWith(t *testing.T, personas ...string) *kernel.Kernel {
@@ -192,7 +192,7 @@ func TestBuildRowsCollapse(t *testing.T) {
 }
 
 func TestDescendantCount(t *testing.T) {
-	k := newKernelWith(t, "a", "b") // 0.1, 0.2
+	k := newKernelWith(t, "a", "b")                                                                // 0.1, 0.2
 	k.SpawnUnder(addr.Root, addr.Address("0.1"), "c", t.TempDir(), runner.SpawnOpts{Persona: "c"}) // 0.1.1
 	if got := descendantCount(k.Reg, addr.Root); got != 3 {
 		t.Fatalf("root descendants = %d want 3", got)
@@ -541,9 +541,9 @@ func TestEditGroupMembership(t *testing.T) {
 	// group header is the top row; open its membership editor
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}}) // edit group "team"
 	// navigate to 0.2 (rows: [team, root, 0.1, 0.2]) and add it
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // -> root
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // -> 0.1
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // -> 0.2
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> root
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> 0.1
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> 0.2
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // add 0.2
 	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})   // done
 
@@ -567,10 +567,10 @@ func TestEditGroupMembership(t *testing.T) {
 
 func TestHumanBytes(t *testing.T) {
 	cases := map[uint64]string{
-		512:              "512B",
-		2048:             "2K",
-		5 * 1024 * 1024:  "5M",
-		3 << 30:          "3.0G",
+		512:             "512B",
+		2048:            "2K",
+		5 * 1024 * 1024: "5M",
+		3 << 30:         "3.0G",
 	}
 	for in, want := range cases {
 		if got := humanBytes(in); got != want {
@@ -674,7 +674,7 @@ func TestDeactivatedSection(t *testing.T) {
 func TestTaskVerifierSection(t *testing.T) {
 	k := kernel.New(runner.NewFake())
 	k.RelaunchProbe = 0
-	
+
 	k.VerifierReap = func(a addr.Address) { k.DeleteBubble(a) }
 	boss, _ := k.Spawn(addr.Root, "boss", t.TempDir(), runner.SpawnOpts{Name: "boss", GrantSpawn: true})
 	k.Caps.GrantSpawnDepth(boss, 2)

@@ -31,10 +31,10 @@ func TestChooseUpdateStrategy(t *testing.T) {
 		hasGo, hasCurl bool
 		want           updateStrategy
 	}{
-		{true, true, updateViaGo},     // go preferred: rebuilds just bubbles, in place
-		{true, false, updateViaGo},    // go alone is enough
+		{true, true, updateViaGo},         // go preferred: rebuilds just bubbles, in place
+		{true, false, updateViaGo},        // go alone is enough
 		{false, true, updateViaInstaller}, // no go: installer bootstraps it
-		{false, false, updateNoTool},  // neither: cannot self-update
+		{false, false, updateNoTool},      // neither: cannot self-update
 	}
 	for _, c := range cases {
 		if got := chooseUpdateStrategy(c.hasGo, c.hasCurl); got != c.want {

@@ -54,6 +54,7 @@ func TestBackgroundChecksInventory(t *testing.T) {
 		{"headroom-stats", 3 * time.Second, phaseBoot},
 		{"stuck-scan", stuckEvery, phaseBoot},
 		{"log-rotate", 5 * time.Minute, phaseBoot},
+		{"auto-update", autoUpdateTick, phaseBoot},
 		{"temp-config-sweep", 10 * time.Minute, phaseBoot},
 		{"verifier-reap", 5 * time.Minute, phaseAfterLoad},
 		{"mute-reap", 10 * time.Minute, phaseAfterLoad},
