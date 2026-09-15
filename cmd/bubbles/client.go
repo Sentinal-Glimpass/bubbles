@@ -50,6 +50,22 @@ func chordStep(armedWith, b byte) (forward []byte, stop bool, nowArmedWith byte)
 	return []byte{b}, false, 0
 }
 
+// chordChunk runs a whole read through chordStep, coalescing the bytes to
+// forward into one slice so a multi-byte keypress (an arrow's ESC [ A) crosses
+// the relay contiguously instead of one write per byte. It stops at the first
+// stop chord; carry is the arm state to thread into the next read.
+func chordChunk(armedWith byte, chunk []byte) (forward []byte, stop bool, nowArmedWith byte) {
+	for i := 0; i < len(chunk); i++ {
+		var fwd []byte
+		fwd, stop, armedWith = chordStep(armedWith, chunk[i])
+		forward = append(forward, fwd...)
+		if stop {
+			break
+		}
+	}
+	return forward, stop, armedWith
+}
+
 // runClient attaches the terminal to the workspace daemon (starting it detached
 // if it isn't running) and relays bytes both ways. Quitting from inside (q)
 // detaches (fleet keeps running); a leader (Ctrl-\ or Ctrl-/) then Ctrl-] stops
@@ -106,7 +122,15 @@ func runClient() {
 	}()
 	go func() { // our keys -> app; <leader> Ctrl-] stops the fleet (a bare Ctrl-] does not)
 		var armedWith byte
-		buf := make([]byte, 1)
+		// Read a CHUNK, not a byte. A single keypress like an arrow is a
+		// multi-byte escape sequence (ESC [ A); forwarding it one byte per
+		// socket write let the hosted TUI's escape parser see a lone ESC —
+		// which reads as the Escape key and cancelled forms like the new-bubble
+		// folder picker. Chunking keeps each keypress's bytes contiguous
+		// through the relay (the daemon io.Copy's them to the PTY whole), so an
+		// arrow arrives as an arrow. chordStep is per-byte and pure, so we run
+		// each byte through it and coalesce the forwarded bytes into one write.
+		buf := make([]byte, 4096)
 		for {
 			n, rerr := os.Stdin.Read(buf)
 			if rerr != nil || n == 0 {
@@ -115,16 +139,16 @@ func runClient() {
 			}
 			var forward []byte
 			var stop bool
-			forward, stop, armedWith = chordStep(armedWith, buf[0])
-			if stop {
-				done <- "stop"
-				return
-			}
+			forward, stop, armedWith = chordChunk(armedWith, buf[:n])
 			if len(forward) > 0 {
 				if _, werr := conn.Write(forward); werr != nil {
 					done <- "stopped"
 					return
 				}
+			}
+			if stop {
+				done <- "stop"
+				return
 			}
 		}
 	}()
