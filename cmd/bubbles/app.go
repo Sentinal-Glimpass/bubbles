@@ -88,6 +88,7 @@ func runApp() {
 	// session's bridge reconnect (ipc.Client.Do) to the restarted daemon.
 	sock := ipcSockPath(baseDir)
 	self, _ := os.Executable()
+	noteDaemonRevision() // remember the commit we're running, for the auto-update staleness nudge
 
 	// Token-compression proxy (opt-in, off by default). Started here so it warms
 	// up in parallel with the rest of boot; env is injected later (routeWhenReady)
@@ -568,12 +569,13 @@ func fleetHealthSnapshot(k *kernel.Kernel, hot int, stuck *stuckTracker, reg *su
 		backlog += k.Store.UnreadCount(b.Addr)
 	}
 	msg := tui.FleetHealthMsg{
-		Hot:        hot,
-		Total:      len(all),
-		Suppressed: int(suppressed),
-		Capped:     int(capped),
-		Inlined:    int(inlined),
-		Backlog:    backlog,
+		Hot:         hot,
+		UpdateReady: updateReady.Load(),
+		Total:       len(all),
+		Suppressed:  int(suppressed),
+		Capped:      int(capped),
+		Inlined:     int(inlined),
+		Backlog:     backlog,
 		// The kernel always tracks relaunch failures, so this count is always
 		// measured; it is 0 precisely when nothing is crash-looping.
 		CrashLooping: tui.Measured(len(k.RelaunchTroubles())),

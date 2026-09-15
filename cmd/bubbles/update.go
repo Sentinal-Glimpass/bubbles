@@ -39,9 +39,9 @@ func goInstallArgs() []string {
 type updateStrategy int
 
 const (
-	updateNoTool updateStrategy = iota // neither go nor curl: cannot self-update
-	updateViaGo                        // `go install …@main`
-	updateViaInstaller                 // `curl … | bash`
+	updateNoTool       updateStrategy = iota // neither go nor curl: cannot self-update
+	updateViaGo                              // `go install …@main`
+	updateViaInstaller                       // `curl … | bash`
 )
 
 func chooseUpdateStrategy(hasGo, hasCurl bool) updateStrategy {

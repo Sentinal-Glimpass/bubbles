@@ -28,8 +28,6 @@ func TestMarkActionJumpVsBind(t *testing.T) {
 	}
 }
 
-
-
 func TestDiveFooterWriteDoesNotPaintInline(t *testing.T) {
 	var buf bytes.Buffer
 	d := &diveFooter{out: &buf, label: "0.6 · cmo", cols: 80, rows: 24}

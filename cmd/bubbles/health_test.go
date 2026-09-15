@@ -20,7 +20,7 @@ func TestTrimTranscript(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		b.WriteString(`{"type":"user","uuid":"old` + strconv.Itoa(i) + `","parentUuid":"old` + strconv.Itoa(i-1) + `"}` + "\n")
 	}
-	b.WriteString(`{"type":"system","uuid":"root","parentUuid":null}` + "\n")           // line 50: the null-parent root
+	b.WriteString(`{"type":"system","uuid":"root","parentUuid":null}` + "\n")                        // line 50: the null-parent root
 	b.WriteString(`{"type":"user","uuid":"sum","parentUuid":"root","isCompactSummary":true}` + "\n") // line 51: the marker
 	for i := 0; i < 5; i++ {
 		b.WriteString(`{"type":"assistant","uuid":"new` + strconv.Itoa(i) + `","parentUuid":"sum"}` + "\n")

@@ -130,6 +130,13 @@ func backgroundChecks(d checkDeps) []bgCheck {
 		// stderr and was never rotated. 5 minutes is far more often than an 8 MiB
 		// budget can realistically fill, so the file is effectively always inside
 		// its cap; a stat on an in-cap file is all a tick costs.
+		// auto-update: keep the on-disk binary current with main in the
+		// background. It NEVER restarts the fleet — applying is left to the
+		// operator's next restart (the TUI nudges). Runs on this cadence but does
+		// real network+build work at most every autoUpdateEvery (rate-limited by
+		// a stamp file), and is a pure disk/network op — no kernel state, no
+		// EnsureAlive. Opt out with --auto-update=off / BUBBLES_AUTO_UPDATE=0.
+		{Check: supervisor.Check{Name: "auto-update", Every: autoUpdateTick, Fn: plain(func() { runAutoUpdate(d.baseDir, false) })}, phase: phaseBoot},
 		{Check: supervisor.Check{Name: "log-rotate", Every: 5 * time.Minute, Fn: plain(rotateDaemonLog(d.baseDir))}, phase: phaseBoot},
 		// temp-config-sweep is the BACKSTOP for the per-launch --mcp-config and
 		// --settings files. Kill already removes a session's pair; this catches

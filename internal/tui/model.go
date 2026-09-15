@@ -96,6 +96,8 @@ type FleetHealth struct {
 	OverContext   *int // bubbles past the context-compaction threshold
 	FailingChecks *int // registered checks whose last run failed or panicked
 	WedgedChecks  *int // registered checks running far past their own interval
+
+	UpdateReady bool // a newer binary has been installed than the daemon is running (restart to apply)
 }
 
 // Measured wraps a count that really was measured, for FleetHealth's optional
@@ -115,14 +117,14 @@ type Model struct {
 	Marks    map[int]addr.Address // shared number-slots: digit binds (if free) or jumps (if bound)
 	AllowAll *bool                // shared permission toggle (Ctrl+P): true => --dangerously-skip-permissions
 
-	rows          []fleetRow
-	cursor        int
-	pings         map[addr.Address]string
-	blinkOn       bool
-	expanded        map[addr.Address]bool // which tree nodes show their children (root open by default)
-	groupExpanded   map[string]bool       // which group nodes show their members
-	sectionCollapsed map[string]bool      // bottom sections (task/off) that are collapsed (default expanded)
-	markSet       bool                  // armed by `m`: next digit (re)assigns the cursor bubble to that slot
+	rows             []fleetRow
+	cursor           int
+	pings            map[addr.Address]string
+	blinkOn          bool
+	expanded         map[addr.Address]bool // which tree nodes show their children (root open by default)
+	groupExpanded    map[string]bool       // which group nodes show their members
+	sectionCollapsed map[string]bool       // bottom sections (task/off) that are collapsed (default expanded)
+	markSet          bool                  // armed by `m`: next digit (re)assigns the cursor bubble to that slot
 
 	spawnStage     int          // 0 = none, 1 = persona, 2 = folder, 3 = options (model + grant)
 	pendingParent  addr.Address // bubble the new one is created under
@@ -201,12 +203,12 @@ type fleetRow struct {
 // at the bottom, below the groups; expand it with → to reveal the fleet.
 func New(k *kernel.Kernel) Model {
 	m := Model{
-		k:             k,
-		pings:         map[addr.Address]string{},
+		k:                k,
+		pings:            map[addr.Address]string{},
 		expanded:         map[addr.Address]bool{}, // root collapsed by default
 		groupExpanded:    map[string]bool{},
 		sectionCollapsed: map[string]bool{},
-		lastVer:       k.Reg.Version(), // don't trigger a spurious save on the first tick
+		lastVer:          k.Reg.Version(), // don't trigger a spurious save on the first tick
 	}
 	m.rows = m.fleetRows()
 	return m

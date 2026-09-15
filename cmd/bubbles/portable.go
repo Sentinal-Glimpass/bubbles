@@ -347,10 +347,10 @@ func printScanSummary(s scanResult, out, mode string, full bool) {
 
 // exportProgress tracks bytes/files written for the progress bar.
 type exportProgress struct {
-	totalBytes  int64
-	totalFiles  int
-	doneBytes   int64 // atomic
-	doneFiles   int64 // atomic
+	totalBytes int64
+	totalFiles int
+	doneBytes  int64 // atomic
+	doneFiles  int64 // atomic
 }
 
 func progressTicker(p *exportProgress, done <-chan struct{}) {

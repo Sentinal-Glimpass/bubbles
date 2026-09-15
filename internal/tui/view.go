@@ -191,6 +191,9 @@ func healthSegments(h FleetHealth) (segs []string, sev string) {
 	add(h.OverContext, "ctx")
 	add(h.FailingChecks, "chk")
 	add(h.WedgedChecks, "hung")
+	if h.UpdateReady {
+		segs = append(segs, "⟳ update ready — restart to apply")
+	}
 
 	hot := func(n *int) bool { return n != nil && *n > 0 }
 	switch {
