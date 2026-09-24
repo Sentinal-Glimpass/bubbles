@@ -75,3 +75,34 @@ func TestDueForCheck(t *testing.T) {
 		t.Fatal("2h ago with a 1h interval must be due")
 	}
 }
+
+// TestTaggedTipRevision: when main's tip is itself tagged, `go install …@main`
+// stamps the clean tag and no sha. The build must still identify itself (it
+// printed "dev" before), and a tag must never be mistaken for a sha.
+func TestTaggedTipRevision(t *testing.T) {
+	for in, want := range map[string]bool{
+		"v0.5.0": true, "v1.2.3-rc1": true,
+		"v0.3.2-0.20260915120000-abcdef123456": false, // pseudo-version
+		"abcdef123456":                         false, "dev": false, "": false, "(devel)": false,
+	} {
+		if got := IsTag(in); got != want {
+			t.Errorf("IsTag(%q) = %v, want %v", in, got, want)
+		}
+	}
+	for in, want := range map[string]string{
+		"v0.5.0":                "v0.5.0",
+		"v0.5.0 (a0b0c8783e8e)": "a0b0c8783e8e", // a sha wins over the tag
+		"main-abcdef123456":     "abcdef123456",
+		"dev":                   "",
+	} {
+		if got := ExtractRevision(in); got != want {
+			t.Errorf("ExtractRevision(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if !SameCommit("v0.5.0", "v0.5.0") || SameCommit("v0.5.0", "v0.5.1") {
+		t.Fatal("tags match only when identical")
+	}
+	if SameCommit("v0.5.0", "a0b0c8783e8e") {
+		t.Fatal("a tag vs a sha is unresolved, never 'same'")
+	}
+}

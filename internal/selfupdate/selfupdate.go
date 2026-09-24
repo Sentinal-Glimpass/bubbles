@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -29,9 +30,12 @@ const (
 	CommitsAPI = "https://api.github.com/repos/Sentinal-Glimpass/bubbles/commits/main"
 )
 
-// CurrentRevision is the commit this binary was built from, or "" if unknown.
+// CurrentRevision identifies the build this binary came from, or "" if unknown.
 // vcs.revision is set for local `go build`/`make`; a `go install …@main` build
-// has no vcs setting but encodes the sha in its pseudo-version's last segment.
+// has no vcs setting but encodes the sha in its pseudo-version's last segment —
+// UNLESS main's tip is itself tagged, in which case Go stamps the clean tag
+// ("v0.5.0") and there is no sha anywhere in the binary. The tag is returned
+// then; callers that need a commit resolve it with FetchCommit.
 func CurrentRevision() string {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -42,7 +46,21 @@ func CurrentRevision() string {
 			return s.Value
 		}
 	}
-	return pseudoSHA(bi.Main.Version)
+	if sha := pseudoSHA(bi.Main.Version); sha != "" {
+		return sha
+	}
+	if IsTag(bi.Main.Version) {
+		return bi.Main.Version
+	}
+	return ""
+}
+
+var tagRE = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`)
+
+// IsTag reports whether rev is a release tag (v1.2.3, v1.2.3-rc1) rather than a
+// commit sha — i.e. a revision that must be resolved before comparing to a sha.
+func IsTag(rev string) bool {
+	return tagRE.MatchString(rev) && pseudoSHA(rev) == ""
 }
 
 // pseudoSHA pulls the 12-char commit sha out of a Go pseudo-version like
@@ -72,8 +90,12 @@ func isHex(s string) bool {
 
 // SameCommit reports whether two revisions denote the same commit, tolerating a
 // short sha vs a full one (prefix match, case-insensitive). Under 7 hex chars is
-// treated as unknown → never "same".
+// treated as unknown → never "same". Two tags match only if identical; a tag vs
+// a sha never matches here (resolve the tag first).
 func SameCommit(a, b string) bool {
+	if IsTag(a) || IsTag(b) {
+		return IsTag(a) && a == b
+	}
 	a, b = strings.ToLower(strings.TrimSpace(a)), strings.ToLower(strings.TrimSpace(b))
 	if len(a) < 7 || len(b) < 7 {
 		return false
@@ -112,9 +134,30 @@ func DueForCheck(last, now time.Time, interval time.Duration) bool {
 	return last.IsZero() || now.Sub(last) >= interval
 }
 
+// ExtractRevision reads a build's revision back from `bubbles version` output:
+// its sha if it prints one, else its release tag ("v0.5.0"), else "".
+func ExtractRevision(s string) string {
+	if sha := ExtractSHA(s); sha != "" {
+		return sha
+	}
+	for _, f := range strings.Fields(s) {
+		if IsTag(f) {
+			return f
+		}
+	}
+	return ""
+}
+
 // FetchLatestCommit returns main's HEAD sha on GitHub. Fail-open.
 func FetchLatestCommit(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, CommitsAPI, nil)
+	return FetchCommit(ctx, "main")
+}
+
+// FetchCommit returns the commit sha a ref (branch, tag, or sha) points to on
+// GitHub. Fail-open.
+func FetchCommit(ctx context.Context, ref string) (string, error) {
+	url := strings.TrimSuffix(CommitsAPI, "main") + ref
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -139,22 +182,23 @@ func FetchLatestCommit(ctx context.Context) (string, error) {
 	return c.SHA, nil
 }
 
-// RevisionOf runs a bubbles binary's `version` and reads back the commit it was
-// built from — used to check the ON-DISK binary, which may be newer than the
+// RevisionOf runs a bubbles binary's `version` and reads back the revision (sha
+// or release tag) it was built from — used to check the ON-DISK binary, which may be newer than the
 // running daemon after a prior auto-update.
 func RevisionOf(binary string) string {
 	out, err := exec.Command(binary, "version").CombinedOutput()
 	if err != nil {
 		return ""
 	}
-	return ExtractSHA(string(out))
+	return ExtractRevision(string(out))
 }
 
 // Apply builds main's tip and atomically installs it over installDir/bubbles,
 // but only after VERIFYING the freshly built binary runs and reports wantSHA —
 // a broken or wrong build never replaces a working install. The temp dir is
-// inside installDir so the final rename is atomic (one filesystem).
-func Apply(installDir, wantSHA string) error {
+// inside installDir so the final rename is atomic (one filesystem). resolve maps
+// a release tag to its commit sha, for a build of a tagged tip that carries no sha.
+func Apply(installDir, wantSHA string, resolve func(tag string) string) error {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		return fmt.Errorf("go toolchain not found: %w", err)
@@ -174,6 +218,11 @@ func Apply(installDir, wantSHA string) error {
 	got := RevisionOf(built)
 	if got == "" {
 		return fmt.Errorf("built binary did not run / report a version")
+	}
+	if IsTag(got) && resolve != nil {
+		if sha := resolve(got); sha != "" {
+			got = sha
+		}
 	}
 	if !SameCommit(got, wantSHA) {
 		return fmt.Errorf("built binary is %s, expected %s", got, wantSHA)

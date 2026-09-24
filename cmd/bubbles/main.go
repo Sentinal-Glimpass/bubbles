@@ -130,6 +130,8 @@ func versionString() string {
 		short = short[:12]
 	}
 	switch {
+	case selfupdate.IsTag(rev): // a `go install` of a tagged tip: the tag is all Go stamps
+		return rev
 	case version != "dev" && short != "":
 		return version + " (" + short + ")"
 	case version != "dev":

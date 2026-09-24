@@ -111,11 +111,25 @@ func runAutoUpdate(baseDir string, force bool) {
 	}
 	markUpdateCheck(baseDir, now) // only after a successful fetch
 
+	resolve := func(tag string) string {
+		sha, err := selfupdate.FetchCommit(ctx, tag)
+		if err != nil {
+			return ""
+		}
+		return sha
+	}
 	installed := selfupdate.RevisionOf(selfPath)
+	if selfupdate.IsTag(installed) {
+		// A build of a tagged tip carries only the tag. Resolve it; if that
+		// fails, skip this cycle rather than rebuild blind.
+		if installed = resolve(installed); installed == "" {
+			return
+		}
+	}
 	if installed != "" && selfupdate.SameCommit(installed, remote) {
 		return // on-disk binary already current (staleness vs the daemon was refreshed above)
 	}
-	if err := selfupdate.Apply(installDir, remote); err != nil {
+	if err := selfupdate.Apply(installDir, remote, resolve); err != nil {
 		fmt.Fprintf(os.Stderr, "bubbles: auto-update skipped: %v\n", err)
 		return
 	}
