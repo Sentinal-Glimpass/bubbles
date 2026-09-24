@@ -70,6 +70,12 @@ type LocalRunner struct {
 	// backends where "sonnet"/"fable" aliases may not resolve.
 	DefaultModel string
 
+	// ModelOverride, when it returns a non-empty id, is used for EVERY bubble
+	// in place of its own model — the operator's `bubbles --model <x>`. It is
+	// read at each launch (not once at boot), so setting or clearing it takes
+	// effect on the next launch without restarting the daemon.
+	ModelOverride func() string
+
 	mu       sync.Mutex
 	sessions map[addr.Address]*ptySession
 	// launching counts the in-flight Launch calls per address. A launch writes
@@ -196,11 +202,6 @@ func NewLocal() *LocalRunner {
 	}
 }
 
-// opusOneM is the 1M-context opus alias used for EVERY bubble on the
-// non-Bedrock (subscription) path — a bare "opus" would NOT carry the [1m]
-// context. Change here if the model id revs.
-const opusOneM = "claude-opus-4-8[1m]"
-
 // Launch starts claude in a PTY in dir, seeded with the persona/goal.
 func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Session, error) {
 	// Claim the address for the whole window in which this launch's temp configs
@@ -244,11 +245,11 @@ func (r *LocalRunner) Launch(a addr.Address, dir string, opts SpawnOpts) (Sessio
 	//     like us.anthropic.claude-opus-4-6-v1[1m]). A --model flag does NOT
 	//     accept raw Bedrock IDs — it expects subscription aliases — so passing
 	//     it breaks ("model not available on your bedrock deployment").
-	//   Bedrock OFF -> EVERY bubble gets opusOneM (the 1M-context subscription
-	//     alias), whatever opts.Model says — including "fable". No bubble runs a
-	//     non-1M tier.
+	//   Bedrock OFF -> r.launchModel: the operator's override if one is set,
+	//     otherwise this bubble's own model, otherwise the fleet default — always
+	//     resolved to a 1M-context id (see ResolveModel).
 	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") != "1" {
-		args = append(args, "--model", opusOneM)
+		args = append(args, "--model", r.launchModel(opts.Model))
 	}
 	if r.AllowAll != nil && *r.AllowAll {
 		args = append(args, "--dangerously-skip-permissions")
@@ -787,3 +788,22 @@ func procRSS(pid int) uint64 {
 
 // PTY returns the master file for dive-in terminal handoff.
 func (s *ptySession) PTY() *os.File { return s.ptmx }
+
+// launchModel picks the --model for one launch. Precedence: the operator's
+// override, then the bubble's own model, then r.DefaultModel (--default-model),
+// then the fleet default. A stored name that doesn't resolve falls back to the
+// fleet default rather than failing the launch — it was accepted once, and a
+// bubble that can't start is worse than one on the default model.
+func (r *LocalRunner) launchModel(own string) string {
+	if r.ModelOverride != nil {
+		if ov := r.ModelOverride(); ov != "" {
+			return ov
+		}
+	}
+	name := own
+	if name == "" {
+		name = r.DefaultModel
+	}
+	id, _ := ResolveModel(name)
+	return id
+}

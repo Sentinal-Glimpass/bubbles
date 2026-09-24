@@ -97,7 +97,8 @@ type FleetHealth struct {
 	FailingChecks *int // registered checks whose last run failed or panicked
 	WedgedChecks  *int // registered checks running far past their own interval
 
-	UpdateReady bool // a newer binary has been installed than the daemon is running (restart to apply)
+	UpdateReady   bool   // a newer binary has been installed than the daemon is running (restart to apply)
+	ModelOverride string // the operator's fleet-wide `bubbles --model` override ("" = each bubble's own)
 }
 
 // Measured wraps a count that really was measured, for FleetHealth's optional
@@ -937,7 +938,9 @@ func (m Model) clearSpawn() Model {
 
 // spawnModels is the model picker's cycle order (aliases track the latest of
 // each family).
-var spawnModels = []string{"opus", "fable"}
+// Every entry resolves through runner.ResolveModel to a 1M-context id; "opus"
+// is the fleet default (claude-opus-4-8[1m]).
+var spawnModels = []string{"opus", "opus-5", "opus-5-5", "fable"}
 
 func cycleModel(cur string, delta int) string {
 	i := 0

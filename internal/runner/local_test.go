@@ -250,9 +250,11 @@ func aliveCmd(t *testing.T) *exec.Cmd {
 	return c
 }
 
-// TestModelResolution:
-//   Bedrock ON  -> NO --model passed (env ANTHROPIC_MODEL drives via inheritance).
-//   Bedrock OFF -> every model (incl. "fable") collapses to opusOneM (1M alias).
+// TestModelResolution is the launch-side model contract:
+//
+//	Bedrock ON  -> NO --model passed (env ANTHROPIC_MODEL drives via inheritance).
+//	Bedrock OFF -> each bubble's OWN model, resolved to a 1M id; the operator's
+//	               override, when set, wins for every bubble.
 func TestModelResolution(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "stub.sh")
@@ -260,49 +262,87 @@ func TestModelResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	launch := func(a string, opts SpawnOpts) string {
+	n := 0
+	launch := func(override string, opts SpawnOpts) string {
+		n++
+		a := addr.Address(fmt.Sprintf("0.%d", n))
 		r := NewLocal()
 		r.Bin = stub
-		s, err := r.Launch(addr.Address(a), dir, opts)
+		r.ModelOverride = func() string { return override }
+		s, err := r.Launch(a, dir, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { r.Kill(addr.Address(a)) })
+		t.Cleanup(func() { r.Kill(a) })
 		return attachUntil(s.(PTYSession), "ARGS:")
 	}
 
-	// Bedrock OFF: ANTHROPIC_MODEL ignored; every model collapses to opusOneM.
 	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "0")
 	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]") // must be ignored when Bedrock off
-	for i, tc := range []struct{ in, want string }{
-		{"", opusOneM},
-		{"sonnet", opusOneM},
-		{"opus", opusOneM},
-		{"fable", opusOneM},
+
+	// Per-bubble choice is honoured — and always lands on a 1M id. "sonnet" and
+	// "" (legacy / unset) resolve to the fleet default, never a 200k window.
+	for _, tc := range []struct{ in, want string }{
+		{"", FleetDefaultModel},
+		{"sonnet", FleetDefaultModel},
+		{"opus", "claude-opus-4-8[1m]"},
+		{"opus-5", "claude-opus-5[1m]"},
+		{"fable", "claude-fable-5[1m]"},
 	} {
-		out := launch(fmt.Sprintf("0.%d", i+1), SpawnOpts{Persona: "x", Model: tc.in})
+		out := launch("", SpawnOpts{Persona: "x", Model: tc.in})
 		if !strings.Contains(out, "--model "+tc.want) {
 			t.Fatalf("bedrock off, model=%q: want --model %s, got:\n%s", tc.in, tc.want, out)
 		}
 	}
 
-	// Bedrock ON: NO --model at all (env ANTHROPIC_MODEL drives via inheritance;
-	// passing a raw Bedrock ID as --model breaks claude).
+	// The operator override beats every bubble's own model.
+	for _, own := range []string{"", "fable", "opus-5"} {
+		out := launch("claude-opus-5-5[1m]", SpawnOpts{Persona: "y", Model: own})
+		if !strings.Contains(out, "--model claude-opus-5-5[1m]") {
+			t.Fatalf("override set, own=%q: override must win, got:\n%s", own, out)
+		}
+	}
+
+	// Bedrock ON: NO --model at all, override or not (a raw Bedrock id as
+	// --model breaks claude).
 	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
-	t.Setenv("ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-6-v1[1m]")
-	out := launch("0.9", SpawnOpts{Persona: "z", Model: "sonnet"})
+	out := launch("claude-opus-5-5[1m]", SpawnOpts{Persona: "z", Model: "fable"})
 	if strings.Contains(out, "--model") {
 		t.Fatalf("bedrock on: expected NO --model (env drives), got:\n%s", out)
+	}
+}
+
+func TestResolveModel(t *testing.T) {
+	for _, tc := range []struct {
+		in, want string
+		known    bool
+	}{
+		{"", FleetDefaultModel, true},
+		{"opus", "claude-opus-4-8[1m]", true},
+		{"OPUS", "claude-opus-4-8[1m]", true},
+		{"opus-4_8_1m", "claude-opus-4-8[1m]", true}, // the informal CLI form
+		{"opus-5", "claude-opus-5[1m]", true},
+		{"opus-5.5", "claude-opus-5-5[1m]", true},
+		{"fable", "claude-fable-5[1m]", true},
+		{"sonnet", FleetDefaultModel, true},              // legacy stored value: never downgrade
+		{"claude-opus-5", "claude-opus-5[1m]", true},     // [1m] added
+		{"claude-opus-5[1m]", "claude-opus-5[1m]", true}, // kept verbatim
+		{"gpt-9", FleetDefaultModel, false},              // unknown: caller must reject operator input
+	} {
+		got, known := ResolveModel(tc.in)
+		if got != tc.want || known != tc.known {
+			t.Errorf("ResolveModel(%q) = (%q,%v), want (%q,%v)", tc.in, got, known, tc.want, tc.known)
+		}
 	}
 }
 
 func TestParseTokenCount(t *testing.T) {
 	cases := map[string]int{
 		"This session is 512,340 tokens long": 512340,
-		"1.2M tokens":                          1_200_000,
-		"620k tokens":                          620_000,
-		"no number here":                       0,
-		"version 2.1.199 released":             0, // not near "tokens" -> ignored
+		"1.2M tokens":                         1_200_000,
+		"620k tokens":                         620_000,
+		"no number here":                      0,
+		"version 2.1.199 released":            0, // not near "tokens" -> ignored
 	}
 	for in, want := range cases {
 		if got := parseTokenCount(in); got != want {

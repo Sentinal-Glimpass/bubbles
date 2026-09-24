@@ -50,11 +50,11 @@ func TestSameCommit(t *testing.T) {
 // mechanism by which the daemon learns the on-disk binary's revision.
 func TestExtractSHA(t *testing.T) {
 	cases := map[string]string{
-		"main-abcdef123456":         "abcdef123456",
-		"v0.3.1 (abcdef123456)":     "abcdef123456",
-		"dev":                       "",
-		"v0.3.1":                    "", // no sha, and the tag digits are too short/dotted
-		"abcdef1234567890abcdef12":  "abcdef1234567890abcdef12",
+		"main-abcdef123456":        "abcdef123456",
+		"v0.3.1 (abcdef123456)":    "abcdef123456",
+		"dev":                      "",
+		"v0.3.1":                   "", // no sha, and the tag digits are too short/dotted
+		"abcdef1234567890abcdef12": "abcdef1234567890abcdef12",
 	}
 	for in, want := range cases {
 		if got := ExtractSHA(in); got != want {

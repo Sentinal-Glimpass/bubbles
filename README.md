@@ -118,6 +118,18 @@ bubbles
   to Bedrock automatically. (Optional: pin a specific model or inference-profile
   ARN with `bubbles --default-model <id>`, or `--default-model auto` to pass no
   `--model` at all and let `ANTHROPIC_MODEL` decide.)
+- **Models:** every bubble runs a 1M-context model. Each keeps the model it was
+  given at spawn/edit (`opus` = Opus 4.8, `opus-5`, `opus-5-5`, `fable`). To put
+  the **whole fleet** on one model, run `bubbles --model opus-5` (also
+  `--model=opus-4_8_1m`, or a full `claude-…` id); `bubbles --model default`
+  clears it. The override needs no restart — each bubble picks it up on its next
+  launch — and shows in the dashboard's top-right while active.
+- **Messages:** a non-urgent message to a *sleeping* bubble is delivered on the
+  next inbox sweep, every `--message_polling` minutes (default **1**).
+- **Updates:** the daemon checks GitHub hourly and installs newer builds in the
+  background (never restarting your fleet); the dashboard shows **⟳ UPDATE
+  READY** — run `bubbles stop && bubbles` when convenient. `bubbles version`
+  prints what you're on; `--auto-update off` disables it.
 - **Restart matters:** a running daemon keeps the env it started with, so set the
   vars *before* `bubbles` (run `bubbles stop` first if one is already up).
 - **API key** instead of subscription: `export ANTHROPIC_API_KEY=...`. **Vertex

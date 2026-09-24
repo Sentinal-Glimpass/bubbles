@@ -7,8 +7,8 @@ import (
 
 func TestAutoUpdateEnabledOptOut(t *testing.T) {
 	cases := map[string]bool{
-		"":     true,  // default on
-		"1":    true,  // only 0/off disable
+		"":     true, // default on
+		"1":    true, // only 0/off disable
 		"on":   true,
 		"0":    false,
 		"off":  false,
