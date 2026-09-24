@@ -20,12 +20,11 @@ type SpawnOpts struct {
 	Resume     bool   // restored bubble: resume its conversation, no initial prompt
 }
 
-// DefaultModel is the --model passed when a bubble doesn't specify one. A plain
-// alias (not empty, not a raw Bedrock id) so an unmodelled bubble on
-// subscription gets a clean alias instead of falling through to a Bedrock-shaped
-// ANTHROPIC_MODEL lingering in the shell. On Bedrock the env drives instead
-// (--model is suppressed entirely — see local.go).
-const DefaultModel = "sonnet"
+// DefaultModel is the picker's name for "the fleet default" — what a bubble
+// with no model of its own shows as. It resolves through ResolveModel to
+// FleetDefaultModel (a 1M-context id). On Bedrock --model is suppressed
+// entirely and the env drives instead (see local.go).
+const DefaultModel = "opus" // resolves to FleetDefaultModel (claude-opus-4-8[1m])
 
 // Session is a running agent we can inject input into (message delivery).
 type Session interface {

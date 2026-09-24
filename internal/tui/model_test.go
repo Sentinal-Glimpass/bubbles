@@ -510,8 +510,9 @@ func TestEditBubbleSettings(t *testing.T) {
 	}
 	tm.Type("boss")
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> model field (default opus)
-	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // opus -> fable
-	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // fable -> opus
+	for range spawnModels { // a full lap through every model wraps back to opus
+		tm.Send(tea.KeyMsg{Type: tea.KeyRight})
+	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // -> grant field
 	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // grant ON
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save

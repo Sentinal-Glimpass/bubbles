@@ -290,7 +290,7 @@ func (s *Server) baseTools() []Tool {
 		}
 		spawnProps["model"] = map[string]any{
 			"type":        "string",
-			"description": "Optional model for the child: \"sonnet\" (default), \"opus\", or \"fable\".",
+			"description": "Optional model for the child: \"opus\" (default, Opus 4.8 1M), \"opus-5\", \"opus-5-5\", or \"fable\". Always a 1M-context model. The operator's `bubbles --model` override, when set, takes precedence.",
 		}
 		ts = append(ts, Tool{
 			Name:        "spawn",

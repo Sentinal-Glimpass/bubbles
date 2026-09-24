@@ -35,8 +35,8 @@ func noteDaemonRevision() { daemonRevision = selfupdate.CurrentRevision() }
 // — any of these just skips, leaving the working binary in place.
 
 const (
-	autoUpdateTick  = 30 * time.Minute // supervisor cadence for the check
-	autoUpdateEvery = 6 * time.Hour    // but real network+build work at most this often
+	autoUpdateTick  = 10 * time.Minute // supervisor cadence: staleness is re-checked every tick
+	autoUpdateEvery = 1 * time.Hour    // network+build work at most this often (well inside GitHub's anon rate limit)
 )
 
 // autoUpdateEnabled reports whether background auto-update should run.
@@ -84,15 +84,22 @@ func installedBinaryDir() (string, string, bool) {
 // ON-DISK binary (not the running daemon, which may already be behind a prior
 // auto-update) and rebuilds if they differ. Logging goes to stderr → daemon.log.
 func runAutoUpdate(baseDir string, force bool) {
+	installDir, selfPath, ok := installedBinaryDir()
+	if !ok {
+		return
+	}
+	// Staleness is checked EVERY tick, independent of the network gate and of
+	// the opt-out: a binary installed by hand (`bubbles --update`, the
+	// installer, `make install`) makes the running daemon stale just as surely
+	// as an auto-update does, and the operator should see the restart nudge
+	// within one tick, not whenever the next network check happens to run.
+	refreshUpdateReady(selfPath)
+
 	if !autoUpdateEnabled() {
 		return
 	}
 	now := time.Now()
 	if !force && !selfupdate.DueForCheck(lastUpdateCheck(baseDir), now, autoUpdateEvery) {
-		return
-	}
-	installDir, selfPath, ok := installedBinaryDir()
-	if !ok {
 		return
 	}
 
@@ -106,12 +113,7 @@ func runAutoUpdate(baseDir string, force bool) {
 
 	installed := selfupdate.RevisionOf(selfPath)
 	if installed != "" && selfupdate.SameCommit(installed, remote) {
-		// On-disk binary already current. It may still be newer than the running
-		// daemon (an update installed on a previous cycle, not yet applied).
-		if daemonRevision != "" && !selfupdate.SameCommit(daemonRevision, installed) {
-			updateReady.Store(true)
-		}
-		return
+		return // on-disk binary already current (staleness vs the daemon was refreshed above)
 	}
 	if err := selfupdate.Apply(installDir, remote); err != nil {
 		fmt.Fprintf(os.Stderr, "bubbles: auto-update skipped: %v\n", err)
@@ -126,4 +128,16 @@ func short(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+// refreshUpdateReady sets the dashboard nudge from one comparison: is the
+// binary on disk a different build from the one this daemon is running? It
+// runs the on-disk binary's `version`, so it lives on the 10-minute tick, never
+// on the 2-second sampler.
+func refreshUpdateReady(selfPath string) {
+	if daemonRevision == "" {
+		return
+	}
+	installed := selfupdate.RevisionOf(selfPath)
+	updateReady.Store(installed != "" && !selfupdate.SameCommit(daemonRevision, installed))
 }

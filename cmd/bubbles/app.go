@@ -88,7 +88,8 @@ func runApp() {
 	// session's bridge reconnect (ipc.Client.Do) to the restarted daemon.
 	sock := ipcSockPath(baseDir)
 	self, _ := os.Executable()
-	noteDaemonRevision() // remember the commit we're running, for the auto-update staleness nudge
+	noteDaemonRevision()                           // remember the commit we're running, for the auto-update staleness nudge
+	modelOverridePath = modelOverrideFile(baseDir) // `bubbles --model <x>`, read at each launch
 
 	// Token-compression proxy (opt-in, off by default). Started here so it warms
 	// up in parallel with the rest of boot; env is injected later (routeWhenReady)
@@ -97,6 +98,7 @@ func runApp() {
 	defer headroom.stop()
 
 	lr := runner.NewLocal()
+	lr.ModelOverride = func() string { return readModelOverride(modelOverridePath) }
 	lr.CitizenPrompt = citizenPromptBase
 	lr.CitizenPromptSpawn = citizenPromptSpawn
 	// Fleet default model. Unset => "sonnet" (subscription). Set BUBBLES_MODEL to a
@@ -520,7 +522,9 @@ func samplerStep(k *kernel.Kernel, curProg *atomic.Pointer[tea.Program], stuck *
 			rows = rows[:5]
 		}
 		prog.Send(tui.UsageMsg{TotalMem: totalMem, TotalCPU: totalCPU, Hot: len(samples), Top: rows})
-		prog.Send(fleetHealthSnapshot(k, len(samples), stuck, reg, time.Now()))
+		h := fleetHealthSnapshot(k, len(samples), stuck, reg, time.Now())
+		h.ModelOverride = readModelOverride(modelOverridePath)
+		prog.Send(h)
 	}
 }
 

@@ -66,6 +66,7 @@ func ensureToolPath() {
 
 func main() {
 	ensureToolPath()                                       // find claude/ngrok even if ~/.local/bin isn't on the shell's PATH
+	applyModelFlag()                                       // --model <x>: override EVERY bubble's model (file-backed; "default" clears)
 	applyMessagePollingFlag()                              // --message_polling <minutes> -> env, inherited by the daemon + hosted child
 	applyFlagToEnv("--mcp", "BUBBLES_MCP")                 // --mcp playwright,github,none -> which operator MCP servers bubbles inherit
 	applyFlagToEnv("--auto-update", "BUBBLES_AUTO_UPDATE") // --auto-update off (or BUBBLES_AUTO_UPDATE=0) disables background self-update
@@ -176,14 +177,17 @@ func applyBoolFlagToEnv(flag, env string) {
 }
 
 // messagePollMinutes is the drain interval (minutes) from BUBBLES_MSG_POLL,
-// defaulting to 10.
+// defaulting to 1. It bounds how long a non-urgent message to a SLEEPING bubble
+// waits before the bubble is woken and told — at 10 this read as "sent but
+// never seen". A woken bubble reads its whole backlog, so the total number of
+// wakes barely changes; they just happen sooner.
 func messagePollMinutes() int {
 	if v := os.Getenv("BUBBLES_MSG_POLL"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
 	}
-	return 10
+	return 1
 }
 
 // runSessionHook is a Claude Code hook helper: it reads the hook JSON on stdin

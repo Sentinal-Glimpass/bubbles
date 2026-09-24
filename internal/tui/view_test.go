@@ -188,3 +188,26 @@ func TestUsagePanelIncludesFleetHealth(t *testing.T) {
 		t.Fatal("usagePanel must include the fleet health block")
 	}
 }
+
+// TestUpdateNoticeSurvivesNarrowPanel is the regression for the notice being a
+// droppable health segment: on a narrow terminal the health row drops segments
+// from the tail, which hid "update ready" first. It is now its own rows.
+func TestUpdateNoticeSurvivesNarrowPanel(t *testing.T) {
+	h := FleetHealth{UpdateReady: true, ModelOverride: "claude-opus-5[1m]", Stuck: Measured(2), CrashLooping: Measured(1)}
+	rows := strings.Join(noticeRows(h), "\n")
+	if !strings.Contains(rows, "UPDATE READY") || !strings.Contains(rows, "bubbles stop && bubbles") {
+		t.Fatalf("update notice missing: %q", rows)
+	}
+	if !strings.Contains(rows, "model override: claude-opus-5[1m]") {
+		t.Fatalf("override notice missing: %q", rows)
+	}
+	segs, _ := healthSegments(h)
+	for _, s := range segs {
+		if strings.Contains(s, "update") {
+			t.Fatalf("update notice must not be a droppable health segment: %v", segs)
+		}
+	}
+	if got := noticeRows(FleetHealth{}); len(got) != 0 {
+		t.Fatalf("no notices expected when nothing is pending, got %v", got)
+	}
+}

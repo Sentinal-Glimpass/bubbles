@@ -191,9 +191,6 @@ func healthSegments(h FleetHealth) (segs []string, sev string) {
 	add(h.OverContext, "ctx")
 	add(h.FailingChecks, "chk")
 	add(h.WedgedChecks, "hung")
-	if h.UpdateReady {
-		segs = append(segs, "⟳ update ready — restart to apply")
-	}
 
 	hot := func(n *int) bool { return n != nil && *n > 0 }
 	switch {
@@ -280,7 +277,25 @@ func usagePanel(u Model) []string {
 		}
 		lines = append(lines, panelStyle.Render(fmt.Sprintf("%-12s %6s %4.0f%%", name, humanBytes(r.Mem), r.CPU)))
 	}
-	return lines
+	return append(lines, noticeRows(u.health)...)
+}
+
+// noticeRows are the operator notices shown directly under the metrics. They
+// are their OWN rows, deliberately not health segments: the health row drops
+// segments from the tail to fit a narrow terminal, and a notice appended there
+// was the first thing to disappear — exactly the thing that must stay visible.
+func noticeRows(h FleetHealth) []string {
+	var rows []string
+	if h.UpdateReady {
+		rows = append(rows,
+			sevStyle("warning").Render("⟳ UPDATE READY"),
+			panelStyle.Render("restart: bubbles stop && bubbles"),
+		)
+	}
+	if h.ModelOverride != "" {
+		rows = append(rows, sevStyle("warning").Render("model override: "+h.ModelOverride))
+	}
+	return rows
 }
 
 // overlayTopRight keeps the usage panel pinned to the TOP-RIGHT corner over the
