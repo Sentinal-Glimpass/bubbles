@@ -199,10 +199,11 @@ func runApp() {
 			k.Grace = d
 		}
 	}
-	k.TypingWindow = 10 * time.Second                 // hold a focused bubble's messages while you're typing; deliver once you pause this long
-	inheritedMCP := resolveMCPServers(mcpAllowList()) // curated operator servers bubbles inherit (e.g. playwright)
+	k.TypingWindow = 10 * time.Second // hold a focused bubble's messages while you're typing; deliver once you pause this long
 	lr.MCPConfig = func(a addr.Address) string {
-		return mcpConfigJSON(self, sock, baseDir, a, k.Caps.CanSpawn(a), inheritedMCP)
+		// Resolved per launch (a few small file reads), so a plugin installed or
+		// enabled while the daemon runs reaches the next bubble launched.
+		return mcpConfigJSON(self, sock, baseDir, a, k.Caps.CanSpawn(a), inheritedMCPServers())
 	}
 	// Same Caps.CanSpawn value that gates the spawn-family MCP tool schemas above
 	// also gates the spawn/edit/delete/introduce/broadcast/assign_task prose in the
@@ -834,7 +835,7 @@ var defaultMCPAllow = []string{
 
 // mcpAllowList returns which of the operator's MCP servers bubbles inherit:
 // BUBBLES_MCP (comma-separated names, or "none") if set, else the curated
-// default.
+// default. The additive form "+slack,+linear" means the default plus those.
 func mcpAllowList() []string {
 	v := os.Getenv("BUBBLES_MCP")
 	if v == "" {
@@ -849,7 +850,30 @@ func mcpAllowList() []string {
 			out = append(out, s)
 		}
 	}
+	if mcpAllPlugins() {
+		extra := make([]string, 0, len(out))
+		for _, s := range out {
+			extra = append(extra, strings.TrimPrefix(s, "+"))
+		}
+		return append(append([]string{}, defaultMCPAllow...), extra...)
+	}
 	return out
+}
+
+// mcpAllPlugins reports whether bubbles get every enabled plugin's MCP servers:
+// true for the default and for the additive "+name" form, false for an
+// explicit list (only named plugin servers) or "none".
+func mcpAllPlugins() bool {
+	v := strings.TrimSpace(os.Getenv("BUBBLES_MCP"))
+	if v == "" {
+		return true
+	}
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" && !strings.HasPrefix(s, "+") {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveMCPServers pulls the named servers' definitions out of the operator's

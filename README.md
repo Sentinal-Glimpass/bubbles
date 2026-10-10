@@ -138,6 +138,21 @@ bubbles
   subscription's `/usage`); on Bedrock/Vertex it simply hides itself — billing is
   on your cloud account.
 
+## MCP servers bubbles get
+
+Every bubble sees the `bubbles` server, a curated set of your own MCP servers
+(playwright, github, firecrawl, …, from `~/.mcp.json` / `~/.claude.json`), and
+the MCP servers of every **enabled Claude Code plugin** (Slack, Linear, …).
+Plugins are read at each bubble launch, so a newly installed plugin reaches the
+next bubble launched with no restart. A plugin server that logs in with OAuth
+needs one login in a normal `claude` session (`/mcp` → the server →
+authenticate); every bubble then shares that login.
+
+Choose the set with `--mcp`: `bubbles --mcp +slack` adds to the default,
+`bubbles --mcp playwright,slack` gives exactly those, `bubbles --mcp none`
+gives none. A bubble can also attach a stdio server to itself live with the
+`add_mcp` tool.
+
 ## Token compression (optional)
 
 A busy fleet burns tokens fast. Bubbles can route every session through
