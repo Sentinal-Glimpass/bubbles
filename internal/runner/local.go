@@ -26,10 +26,14 @@ import (
 // single persistent drainer owns the read side, so the session never blocks on a
 // full PTY buffer even when nobody is viewing it. Attach subscribes to that
 // stream (replaying recent scrollback first, so dive-in isn't a black screen).
+//
+// Watch is the dive-in view: it streams live output with no replay, first
+// restoring the terminal modes the program switched on (see termModes).
 type PTYSession interface {
 	Session
 	PTY() *os.File
 	Attach(w io.Writer) (detach func())
+	Watch(w io.Writer) (detach func())
 }
 
 // scrollbackCap bounds the per-session output ring kept for dive-in replay. Big
@@ -375,6 +379,7 @@ type ptySession struct {
 	rmu     sync.Mutex // guards ring + sub + lastOut
 	ring    []byte     // recent output, capped at scrollbackCap (for dive-in replay)
 	sub     io.Writer  // live viewer (dive-in), or nil when nobody is attached
+	modes   termModes  // terminal modes the program has switched on (replayed by Watch)
 	lastOut time.Time  // when the session last produced output (idle detection)
 	created time.Time  // launch time (fallback activity stamp before any output)
 
@@ -513,6 +518,7 @@ func (s *ptySession) drain() {
 		if n > 0 {
 			s.rmu.Lock()
 			s.ring = appendRing(s.ring, buf[:n])
+			s.modes.feed(buf[:n])
 			s.lastOut = time.Now() // output = the session is doing work (not idle)
 			if s.sub != nil {
 				_, _ = s.sub.Write(buf[:n])
@@ -534,6 +540,26 @@ func (s *ptySession) Attach(w io.Writer) (detach func()) {
 	if len(s.ring) > 0 {
 		_, _ = w.Write(s.ring) // scrollback replay -> instant paint
 	}
+	s.sub = w
+	s.rmu.Unlock()
+	return func() {
+		s.rmu.Lock()
+		if s.sub == w {
+			s.sub = nil
+		}
+		s.rmu.Unlock()
+	}
+}
+
+// Watch subscribes w to the live output stream WITHOUT replaying past output —
+// a raw byte replay can begin mid-escape-sequence and paint garbage. It first
+// writes the terminal modes the program has on (mouse, bracketed paste, focus
+// events, kitty keyboard), so a viewer attaching late gets the same terminal
+// the program set up at launch. The caller then forces a fresh frame (claude
+// clears and redraws its whole screen on a resize). One viewer at a time.
+func (s *ptySession) Watch(w io.Writer) (detach func()) {
+	s.rmu.Lock()
+	_, _ = w.Write(s.modes.replay())
 	s.sub = w
 	s.rmu.Unlock()
 	return func() {

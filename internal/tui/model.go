@@ -403,7 +403,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, blinkTick()
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-		return m, nil
+		// Repaint from blank: the renderer only rewrites changed lines, so
+		// text from the old width would otherwise linger after a resize.
+		return m, tea.ClearScreen
 	case UsageMsg:
 		m.usage = msg
 		return m, nil

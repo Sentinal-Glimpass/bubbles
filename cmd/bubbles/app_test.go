@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"strings"
 	"testing"
 
 	"github.com/Sentinal-Glimpass/bubbles/internal/addr"
@@ -28,53 +27,37 @@ func TestMarkActionJumpVsBind(t *testing.T) {
 	}
 }
 
-func TestDiveFooterWriteDoesNotPaintInline(t *testing.T) {
-	var buf bytes.Buffer
-	d := &diveFooter{out: &buf, label: "0.6 · cmo", cols: 80, rows: 24}
-	// Write passes claude bytes through and marks dirty — but must NOT paint the
-	// footer inline (that per-byte repaint was the rapid-blink bug).
-	n, err := d.Write([]byte("claude frame"))
-	if err != nil || n != len("claude frame") {
-		t.Fatalf("write n=%d err=%v", n, err)
+// TestDiveScan: dive input reaches claude whole — escape sequences and pastes
+// are not split or eaten — and only the leader chords are intercepted.
+func TestDiveScan(t *testing.T) {
+	const L = clientLeaderByte
+	arrowsAndPaste := []byte("\x1b[A\x1b[200~pasted text\x1b[201~\x1b[1;5C")
+	fwd, cmd, _, armed := diveScan(false, arrowsAndPaste)
+	if !bytes.Equal(fwd, arrowsAndPaste) || cmd != diveNone || armed {
+		t.Fatalf("plain input must pass through untouched: fwd=%q cmd=%v armed=%v", fwd, cmd, armed)
 	}
-	if buf.String() != "claude frame" {
-		t.Fatalf("inline paint leaked into output: %q", buf.String())
-	}
-	if !d.dirty {
-		t.Fatal("write should mark the footer dirty")
-	}
-}
 
-func TestDiveFooterRefreshPaintsReservedRow(t *testing.T) {
-	var buf bytes.Buffer
-	d := &diveFooter{out: &buf, label: "0.6 · cmo", cols: 80, rows: 24}
-	d.refresh(80, 24)
-	out := buf.String()
-	if !strings.Contains(out, "\x1b[1;23r") { // reserve rows 1..23
-		t.Fatalf("no scroll-region reservation: %q", out)
+	fwd, cmd, rest, _ := diveScan(false, []byte{'h', 'i', L, L, 'x'})
+	if string(fwd) != "hi" || cmd != diveFleet || string(rest) != "x" {
+		t.Fatalf("leader,leader must return to the fleet after forwarding prior keys: fwd=%q cmd=%q rest=%q", fwd, cmd, rest)
 	}
-	if !strings.Contains(out, "\x1b[24;1H") { // footer on row 24
-		t.Fatalf("footer not on reserved row: %q", out)
-	}
-	if !strings.Contains(out, "0.6 · cmo") {
-		t.Fatalf("label missing: %q", out)
-	}
-	if d.dirty {
-		t.Fatal("refresh should clear dirty")
-	}
-}
 
-func TestDiveFooterTruncatesAndSkipsTiny(t *testing.T) {
-	var buf bytes.Buffer
-	d := &diveFooter{out: &buf, label: strings.Repeat("x", 200), cols: 10, rows: 24}
-	d.refresh(10, 24)
-	if strings.Count(buf.String(), "x") != 9 { // 1 leading space + 9 x = 10 cols
-		t.Fatalf("not truncated to cols: %q", buf.String())
+	fwd, cmd, rest, _ = diveScan(false, []byte{L, '3', 'z'})
+	if len(fwd) != 0 || cmd != '3' || string(rest) != "z" {
+		t.Fatalf("leader,digit is a mark command: fwd=%q cmd=%q rest=%q", fwd, cmd, rest)
 	}
-	buf.Reset()
-	tiny := &diveFooter{out: &buf, label: "hi", cols: 80, rows: 2}
-	tiny.refresh(80, 2)
-	if buf.Len() != 0 {
-		t.Fatalf("2-row terminal should not paint: %q", buf.String())
+
+	fwd, cmd, _, _ = diveScan(false, []byte{L, 'a', 'b'})
+	if string(fwd) != "ab" || cmd != diveNone {
+		t.Fatalf("leader + other key forwards just the key: fwd=%q cmd=%q", fwd, cmd)
+	}
+
+	// A chord split across two reads.
+	fwd, cmd, _, armed = diveScan(false, []byte{'q', L})
+	if string(fwd) != "q" || cmd != diveNone || !armed {
+		t.Fatalf("a trailing leader must stay pending: fwd=%q armed=%v", fwd, armed)
+	}
+	if _, cmd, _, _ = diveScan(armed, []byte{L}); cmd != diveFleet {
+		t.Fatalf("the pending leader must complete the chord on the next read, got %q", cmd)
 	}
 }

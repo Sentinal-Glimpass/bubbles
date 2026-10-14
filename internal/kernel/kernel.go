@@ -150,6 +150,14 @@ type Kernel struct {
 	// half-typed line). 0 => 10s default.
 	TypingWindow time.Duration
 
+	// OperatorAttached, when set, reports whether the operator's terminal is
+	// attached right now. While it is, the bubble they're dived into is never
+	// typed into — its messages wait in the inbox and are delivered when they
+	// leave (UnsetFocus), so claude's screen stays exactly theirs. A detached
+	// terminal leaves focus stale; that falls back to the typing-window hold so
+	// the bubble's mail isn't held forever. nil = typing-window hold only.
+	OperatorAttached func() bool
+
 	focusMu     sync.Mutex
 	focused     addr.Address // the bubble the operator is dived into
 	heldFlushed bool         // whether the current idle backlog has already been flushed
@@ -241,7 +249,7 @@ func (k *Kernel) UnsetFocus(a addr.Address) {
 // not only when you leave. Called on a short ticker. It nudges at most once per
 // typing pause (heldFlushed), and does nothing while typing is active.
 func (k *Kernel) FlushHeldIfIdle() {
-	if k.typingActive() {
+	if k.typingActive() || k.attendedDive() { // attended dive: held until they leave
 		k.focusMu.Lock()
 		k.heldFlushed = false // typing resumed; a later pause may flush again
 		k.focusMu.Unlock()
@@ -327,6 +335,20 @@ func (k *Kernel) DiveAttended(a addr.Address) bool {
 		return true // just dived in; no keystroke needed to count as present
 	}
 	return k.operatorPresent()
+}
+
+// holdForOperator reports whether writes into a must wait for the operator:
+// a is the bubble they're dived into, and either their terminal is attached
+// (hold until they leave) or they're mid-keystroke (don't submit a half-typed
+// line).
+func (k *Kernel) holdForOperator(a addr.Address) bool {
+	return k.isFocused(a) && (k.attendedDive() || k.typingActive())
+}
+
+// attendedDive reports whether the operator's terminal is attached, so a dive
+// is being watched rather than left behind by a detached client.
+func (k *Kernel) attendedDive() bool {
+	return k.OperatorAttached != nil && k.OperatorAttached()
 }
 
 // isFocused reports whether a is the currently dived-into bubble.
@@ -617,7 +639,7 @@ func (k *Kernel) deliverMessage(from addr.Address, fromName string, to addr.Addr
 	// stays in the inbox and is delivered as soon as they pause
 	// (FlushHeldIfIdle) or leave (UnsetFocus). If they're just idle-viewing
 	// the bubble, deliver normally so they see it.
-	if k.isFocused(to) && k.typingActive() {
+	if k.holdForOperator(to) {
 		// Held, not dropped: FlushHeldIfIdle/UnsetFocus deliver it. It is still
 		// a notice this kernel chose not to write, and every suppression must
 		// be observable or it is indistinguishable from a message we lost.
@@ -757,7 +779,7 @@ func (k *Kernel) RecoverUnread(hotOnly bool) {
 		// detaches mid-dive, so skipping unconditionally exempted exactly the
 		// bubble the operator lives in from recovery — unread mail sat there for
 		// hours until a manual reopen (3cfb0d9).
-		if k.isFocused(b.Addr) && !operatorAway {
+		if k.isFocused(b.Addr) && (!operatorAway || k.attendedDive()) {
 			continue
 		}
 		hot := k.IsHot(b.Addr)

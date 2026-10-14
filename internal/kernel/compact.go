@@ -221,7 +221,7 @@ func (k *Kernel) FlushPendingCompacts() {
 			k.verifyCompact(a, p, s.LastActivity(), now)
 			continue
 		}
-		if k.isFocused(a) && k.typingActive() {
+		if k.holdForOperator(a) {
 			k.expireCompact(a, p, now)
 			continue
 		}

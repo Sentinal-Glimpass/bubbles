@@ -71,7 +71,11 @@ bubbles
 ```
 
 - Press **`n`** to spawn a bubble: type a persona (e.g. `api`), pick a folder, done.
-- Press **`Enter`** on a bubble to **dive in** — it's a live `claude` session.
+- Press **`Enter`** on a bubble to **dive in** — it's the bubble's live `claude`,
+  raw and exact: nothing is drawn over it, it follows your window size, and
+  mouse, paste and keyboard features work as in a plain `claude`. While you're
+  in, nothing is typed into it — its messages wait and are delivered when you
+  leave.
 - Press **`Ctrl+\` `Ctrl+\`** to pop back to the fleet.
 
 Each bubble runs `claude` in its own folder (so it inherits that folder's

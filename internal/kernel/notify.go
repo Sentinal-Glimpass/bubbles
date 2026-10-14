@@ -106,7 +106,7 @@ func (k *Kernel) SystemNotice(a addr.Address, text string) bool {
 	if a == "" || a.IsRoot() || text == "" {
 		return false
 	}
-	if k.isFocused(a) && k.typingActive() {
+	if k.holdForOperator(a) {
 		return false // don't submit the operator's half-typed line
 	}
 	s := k.session(a)
@@ -155,7 +155,7 @@ func (k *Kernel) SystemCompact(a addr.Address, focus string) bool {
 	if a == "" || a.IsRoot() {
 		return false
 	}
-	if k.isFocused(a) && k.typingActive() {
+	if k.holdForOperator(a) {
 		return false // don't submit the operator's half-typed line
 	}
 	s := k.session(a)
@@ -363,7 +363,7 @@ func (k *Kernel) DrainCoalesced() {
 	now := time.Now()
 	for _, b := range k.Reg.All() {
 		a := b.Addr
-		if k.isFocused(a) && k.typingActive() {
+		if k.holdForOperator(a) {
 			continue // don't submit the operator's half-typed line
 		}
 		// Liveness is checked BEFORE Pending, never after. Pending CONSUMES

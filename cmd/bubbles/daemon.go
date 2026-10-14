@@ -58,10 +58,43 @@ func controlSock(baseDir string) string {
 	return filepath.Join(baseDir, ".bubbles", "control.sock")
 }
 
-// hello is the client's attach handshake (its terminal size).
+// hello is the client's attach handshake (its terminal size). A Control hello
+// opens a side channel instead of attaching: the client streams its terminal
+// size over it as further hello values whenever its window is resized. Only a
+// daemon built from the same binary is sent one (daemonCurrent) — an older
+// daemon would take it for a new terminal and drop the real one.
 type hello struct {
-	Rows uint16 `json:"rows"`
-	Cols uint16 `json:"cols"`
+	Rows    uint16 `json:"rows"`
+	Cols    uint16 `json:"cols"`
+	Control bool   `json:"control,omitempty"`
+}
+
+// attachedFile exists while an operator's terminal is attached to the daemon.
+// The hosted app reads it (kernel.OperatorAttached) to tell a watched dive from
+// one a detached client left behind.
+func attachedFile(baseDir string) string {
+	return filepath.Join(baseDir, ".bubbles", "client.attached")
+}
+
+// operatorAttached reports whether a terminal is attached right now.
+func operatorAttached(baseDir string) bool {
+	_, err := os.Stat(attachedFile(baseDir))
+	return err == nil
+}
+
+// daemonCurrent reports whether the running daemon was started from the
+// binary installed now — so it understands everything this client speaks.
+func daemonCurrent(baseDir string) bool {
+	rec, err := os.ReadFile(buildFile(baseDir))
+	if err != nil {
+		return false
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	cur := buildStamp(self)
+	return cur != "" && strings.TrimSpace(string(rec)) == cur
 }
 
 // runDaemon hosts the real bubbles app (`--hosted`) as a child on a PTY and
@@ -102,6 +135,8 @@ func runDaemon() {
 
 	var mu sync.Mutex
 	var client net.Conn
+	_ = os.Remove(attachedFile(baseDir)) // a crashed daemon may have left it
+	defer os.Remove(attachedFile(baseDir))
 
 	// PTY output -> the attached client (discarded when none, so the app never blocks).
 	go func() {
@@ -132,12 +167,31 @@ func runDaemon() {
 		dec := json.NewDecoder(conn)
 		var h hello
 		_ = dec.Decode(&h)
+		if h.Control {
+			// Resize side channel: apply each size the client reports. A
+			// SIGWINCH reaches the hosted app, which passes it on to the
+			// bubble being viewed.
+			go func(c net.Conn, dec *json.Decoder) {
+				defer c.Close()
+				for {
+					var r hello
+					if dec.Decode(&r) != nil {
+						return
+					}
+					if r.Rows > 1 && r.Cols > 1 {
+						_ = pty.Setsize(ptmx, &pty.Winsize{Rows: r.Rows, Cols: r.Cols})
+					}
+				}
+			}(conn, dec)
+			continue
+		}
 
 		mu.Lock()
 		if client != nil {
 			client.Close() // a newer client takes over
 		}
 		client = conn
+		_ = os.WriteFile(attachedFile(baseDir), nil, 0o644)
 		mu.Unlock()
 
 		if h.Rows > 1 && h.Cols > 1 { // apply size + nudge a repaint
@@ -154,6 +208,7 @@ func runDaemon() {
 			mu.Lock()
 			if client == c {
 				client = nil
+				_ = os.Remove(attachedFile(baseDir))
 			}
 			mu.Unlock()
 		}(conn, dec.Buffered())

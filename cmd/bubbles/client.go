@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -93,6 +94,30 @@ func runClient() {
 
 	cols, rows, _ := term.GetSize(int(os.Stdout.Fd()))
 	_ = json.NewEncoder(conn).Encode(hello{Rows: uint16(rows), Cols: uint16(cols)})
+
+	// Relay window resizes so the fleet view and a dived-into claude are always
+	// laid out for the real terminal. Without this, the size was fixed at attach
+	// and every later resize garbled the screen.
+	if daemonCurrent(baseDir) {
+		if ctl, cerr := net.Dial("unix", sock); cerr == nil {
+			defer ctl.Close()
+			enc := json.NewEncoder(ctl)
+			if enc.Encode(hello{Control: true}) == nil {
+				winch := make(chan os.Signal, 1)
+				signal.Notify(winch, syscall.SIGWINCH)
+				defer signal.Stop(winch)
+				go func() {
+					for range winch {
+						if c, r, gerr := term.GetSize(int(os.Stdout.Fd())); gerr == nil {
+							if enc.Encode(hello{Rows: uint16(r), Cols: uint16(c)}) != nil {
+								return
+							}
+						}
+					}
+				}()
+			}
+		}
+	}
 
 	var old *term.State
 	if st, merr := term.MakeRaw(int(os.Stdin.Fd())); merr == nil {

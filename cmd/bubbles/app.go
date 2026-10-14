@@ -6,14 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -199,6 +197,8 @@ func runApp() {
 			k.Grace = d
 		}
 	}
+	// A bubble you're dived into is never typed into: its messages wait until you leave.
+	k.OperatorAttached = func() bool { return operatorAttached(baseDir) }
 	k.TypingWindow = 10 * time.Second // hold a focused bubble's messages while you're typing; deliver once you pause this long
 	lr.MCPConfig = func(a addr.Address) string {
 		// Resolved per launch (a few small file reads), so a plugin installed or
@@ -988,217 +988,38 @@ func mcpConfigJSON(exe, sock, baseDir string, a addr.Address, spawnable bool, ex
 	return string(b)
 }
 
-// diveFooter draws a persistent one-line footer naming the bubble you're diving
-// in, on a bottom row reserved by shrinking the bubble's PTY. The two failure
-// modes of a naive overlay are avoided deliberately:
-//   - RAPID BLINKING: it does NOT repaint on every byte. Write only marks the
-//     footer dirty; a loop repaints once claude has been QUIET for `quiet`, so
-//     at the idle prompt (where you read it) it's painted once and stays put.
-//   - LEAK INTO THE INPUT BAR: the caller shrinks the PTY to rows-1 BEFORE claude
-//     lays out, so claude's input sits at rows-1 and row `rows` is exclusively
-//     ours. The scroll region is re-asserted on each paint so claude can't
-//     scroll into the reserved row.
-//
-// All terminal writes (claude output + footer) share one mutex, so they never
-// interleave mid-escape-sequence. Disabled with BUBBLES_DIVE_FOOTER=0.
-type diveFooter struct {
-	mu        sync.Mutex
-	out       io.Writer
-	label     string
-	cols      int
-	rows      int // physical rows; footer is on row `rows`
-	dirty     bool
-	lastWrite time.Time
-}
+// diveExitReset switches off every input mode claude may have turned on, so the
+// fleet view gets a plain terminal back: mouse reporting, bracketed paste, focus
+// events, colour-scheme reports, the kitty keyboard protocol (pop) and
+// modifyOtherKeys. The next dive restores them (PTYSession.Watch).
+const diveExitReset = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l" +
+	"\x1b[?2004l\x1b[?1004l\x1b[?2031l\x1b[<u\x1b[>4m\x1b[?25h\r\n"
 
-func (d *diveFooter) Write(p []byte) (int, error) {
-	d.mu.Lock()
-	n, err := d.out.Write(p)
-	d.dirty = true
-	d.lastWrite = time.Now()
-	d.mu.Unlock()
-	return n, err
-}
+// Dive leader commands, as returned by diveScan.
+const (
+	diveNone  byte = 0
+	diveFleet byte = 'f' // leader, leader: back to the fleet view
+)
 
-func (d *diveFooter) paintLocked() {
-	if d.rows < 3 || d.cols < 1 {
-		return
-	}
-	text := " " + d.label
-	if len([]rune(text)) > d.cols {
-		text = string([]rune(text)[:d.cols])
-	}
-	// save cursor · reserve rows 1..rows-1 · go to reserved row · black bg + green
-	// fg · clear the row (paint the bg across it) · text · reset · restore cursor.
-	// Re-asserting the region each paint recovers from a claude `ESC[r`.
-	fmt.Fprintf(d.out, "\x1b7\x1b[1;%dr\x1b[%d;1H\x1b[40;32m\x1b[2K%s\x1b[0m\x1b8", d.rows-1, d.rows, text)
-}
-
-// repaint redraws once claude output has been quiet long enough, so a burst of
-// output doesn't cause the footer to flicker — it settles, then we paint.
-func (d *diveFooter) repaint(stop <-chan struct{}) {
-	t := time.NewTicker(90 * time.Millisecond)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			d.mu.Lock()
-			if d.dirty && time.Since(d.lastWrite) >= 180*time.Millisecond {
-				d.paintLocked()
-				d.dirty = false
-			}
-			d.mu.Unlock()
-		}
-	}
-}
-
-func (d *diveFooter) refresh(cols, rows int) {
-	d.mu.Lock()
-	d.cols, d.rows = cols, rows
-	d.paintLocked()
-	d.dirty = false
-	d.mu.Unlock()
-}
-
-// diveInto hands the terminal to a bubble's PTY. It returns "" to go back to the
-// fleet, or the address of another bubble to switch directly into (Ctrl-Q num).
-// EnsureAlive heals a dead session first, so diving into a crashed bubble (or
-// one whose resume id vanished) transparently relaunches it.
-func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (next addr.Address, launched bool) {
-	sess := k.EnsureAlive(a)
-	ps, ok := sess.(runner.PTYSession)
-	if !ok || ps == nil {
-		return "", false // launch failed (bad dir/args, crashed on boot) — caller surfaces it
-	}
-	// Mark this bubble focused so incoming messages don't type into (and submit)
-	// what the operator is writing; they're flushed when we leave.
-	k.SetFocus(a)
-	defer k.UnsetFocus(a)
-	f := ps.PTY()
-
-	// Which bubble you're in: a bottom-row footer (below), plus the terminal
-	// title (OSC 2) as a safe, always-available fallback.
-	label := a.String()
-	if b, ok := k.Reg.Get(a); ok && b.Label() != "" {
-		label += " · " + b.Label()
-	}
-	fmt.Printf("\x1b]2;bubble %s\x07", label)
-	defer fmt.Print("\x1b]2;\x07")
-
-	// The bottom-row footer, unless disabled or the terminal is too short.
-	footerOn := os.Getenv("BUBBLES_DIVE_FOOTER") != "0" && os.Getenv("BUBBLES_DIVE_FOOTER") != "false"
-	var footer *diveFooter
-	if ws, err := pty.GetsizeFull(os.Stdin); err == nil && footerOn && ws.Rows >= 3 {
-		footer = &diveFooter{out: os.Stdout, label: label, cols: int(ws.Cols), rows: int(ws.Rows)}
-	}
-
-	// sizeChild fills the bubble's PTY with the real terminal, minus the reserved
-	// footer row when the footer is on, so claude never lays out over it.
-	sizeChild := func() {
-		ws, err := pty.GetsizeFull(os.Stdin)
-		if err != nil {
-			return
-		}
-		child := *ws
-		if footer != nil && child.Rows > 1 {
-			child.Rows--
-		}
-		_ = pty.Setsize(f, &child)
-	}
-
-	// Keep the child sized (and the footer repainted) across window resizes.
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	go func() {
-		for range winch {
-			sizeChild()
-			if footer != nil {
-				if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
-					footer.refresh(int(ws.Cols), int(ws.Rows))
-				}
-			}
-		}
-	}()
-	defer signal.Stop(winch)
-
-	if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
-		defer term.Restore(int(os.Stdin.Fd()), old)
-	}
-	fmt.Print("\x1b[?25h\x1b[2J\x1b[H") // show cursor (Bubbletea's alt-screen hides it) + clear for claude's redraw
-	// On the way out, disable any mouse reporting / bracketed paste claude turned on.
-	defer fmt.Print("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\r\n")
-	if footer != nil {
-		defer fmt.Print("\x1b[r") // release the scroll region so the fleet view uses the full screen
-	}
-
-	// Shrink the PTY to the reserved size FIRST, so claude lays out its input at
-	// row rows-1 (not the reserved row) from its very first frame — this is what
-	// keeps the footer from leaking into claude's input bar.
-	sizeChild()
-
-	// Subscribe to the session's persistent output stream (replays recent
-	// scrollback first, so we see claude's current frame, not a black screen).
-	// We do NOT read f directly — the drainer owns the read side so claude is
-	// always drained and never stalls, viewed or not. Output routes through the
-	// footer (when on) so it and the footer never interleave mid-sequence.
-	var out io.Writer = os.Stdout
-	if footer != nil {
-		out = footer
-	}
-	detach := ps.Attach(out)
-	defer detach()
-
-	// Force claude (an Ink TUI) to repaint — it only redraws on a size change, so
-	// re-entering an idle bubble would otherwise show a stale frame. Nudge a row,
-	// pause so Ink renders, then settle back to the reserved size.
-	if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
-		reserve := 0
-		if footer != nil {
-			reserve = 1
-		}
-		jitter := *ws
-		if int(jitter.Rows) > reserve+1 {
-			jitter.Rows = uint16(int(jitter.Rows) - reserve - 1)
-		}
-		_ = pty.Setsize(f, &jitter)
-		time.Sleep(60 * time.Millisecond)
-		sizeChild()
-	}
-
-	// Start the debounced footer painter (paints once claude output goes quiet).
-	if footer != nil {
-		stop := make(chan struct{})
-		defer close(stop)
-		if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
-			footer.refresh(int(ws.Cols), int(ws.Rows))
-		}
-		go footer.repaint(stop)
-	}
-
-	// Input loop. Esc and everything else go straight to claude; the leader keys
-	// (Ctrl-\ or Ctrl-/) are intercepted by the state machine.
-	armed := false // true after a leader press
-	buf := make([]byte, 1)
-	for {
-		n, err := os.Stdin.Read(buf)
-		if err != nil || n == 0 {
-			return "", true
-		}
-		b := buf[0]
-		k.NoteKeystroke() // mark active typing so messages hold until you pause
+// diveScan splits operator input for the dived-into bubble. It returns the
+// bytes to forward to claude, up to the first leader command; that command
+// (diveNone, diveFleet, or a digit '0'-'9' for a mark); the bytes after the
+// command; and whether a leader is left pending at the end of p (a chord split
+// across reads). A leader followed by any other key forwards just that key, as
+// before. Everything else passes through untouched, so escape sequences,
+// pastes and multi-byte keys reach claude whole.
+func diveScan(armed bool, p []byte) (forward []byte, cmd byte, rest []byte, armedAfter bool) {
+	forward = make([]byte, 0, len(p))
+	for i, b := range p {
 		if armed {
 			armed = false
 			switch {
-			case isLeader(b): // leader leader -> fleet
-				return "", true
+			case isLeader(b):
+				return forward, diveFleet, p[i+1:], false
 			case b >= '0' && b <= '9':
-				if dest := markAction(marks, int(b-'0'), a); dest != "" {
-					return dest, true // switch into the bound bubble
-				}
+				return forward, b, p[i+1:], false
 			default:
-				f.Write([]byte{b}) // leader + other key: just send the key
+				forward = append(forward, b)
 			}
 			continue
 		}
@@ -1206,7 +1027,94 @@ func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (nex
 			armed = true
 			continue
 		}
-		f.Write([]byte{b})
+		forward = append(forward, b)
+	}
+	return forward, diveNone, nil, armed
+}
+
+// diveInto hands the terminal to a bubble's PTY: claude's own screen, raw and
+// exact. Nothing is drawn over it, nothing is replayed, and nothing is typed
+// into it while you're there — its incoming messages wait in its inbox and are
+// delivered when you leave (k.SetFocus / UnsetFocus). It returns "" to go back
+// to the fleet, or the address of another bubble to switch directly into
+// (leader + digit). EnsureAlive heals a dead session first, so diving into a
+// crashed bubble (or one whose resume id vanished) transparently relaunches it.
+func diveInto(k *kernel.Kernel, a addr.Address, marks map[int]addr.Address) (next addr.Address, launched bool) {
+	sess := k.EnsureAlive(a)
+	ps, ok := sess.(runner.PTYSession)
+	if !ok || ps == nil {
+		return "", false // launch failed (bad dir/args, crashed on boot) — caller surfaces it
+	}
+	k.SetFocus(a)
+	defer k.UnsetFocus(a)
+	f := ps.PTY()
+
+	// claude's PTY is exactly the operator's terminal. Resizes reach us as
+	// SIGWINCH on the hosted terminal (the client relays them through the
+	// daemon), and are passed straight on.
+	sizeChild := func() {
+		if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
+			_ = pty.Setsize(f, ws)
+		}
+	}
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	go func() {
+		for range winch {
+			sizeChild()
+		}
+	}()
+	defer signal.Stop(winch)
+
+	if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
+		defer term.Restore(int(os.Stdin.Fd()), old)
+	}
+	defer fmt.Print(diveExitReset)
+
+	// Blank screen, claude's terminal modes, then a fresh frame: claude clears
+	// and redraws its whole screen on a size change, so a one-row nudge and back
+	// paints the exact current state — no byte replay, which could begin
+	// mid-escape-sequence. The drainer owns the PTY's read side, so claude is
+	// always drained, viewed or not.
+	fmt.Print("\x1b[r\x1b[0m\x1b[2J\x1b[3J\x1b[H")
+	detach := ps.Watch(os.Stdout)
+	defer detach()
+	if ws, err := pty.GetsizeFull(os.Stdin); err == nil && ws.Rows > 2 {
+		nudge := *ws
+		nudge.Rows--
+		_ = pty.Setsize(f, &nudge)
+		time.Sleep(60 * time.Millisecond)
+	}
+	sizeChild()
+
+	// Input: read in chunks so each key, escape sequence and paste reaches
+	// claude whole. Only the leader (Ctrl-\ or Ctrl-/) is intercepted.
+	armed := false
+	buf := make([]byte, 4096)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil || n == 0 {
+			return "", true
+		}
+		k.NoteKeystroke() // presence: this dive is attended (context pump, recovery)
+		p := buf[:n]
+		for {
+			var fwd []byte
+			var cmd byte
+			fwd, cmd, p, armed = diveScan(armed, p)
+			if len(fwd) > 0 {
+				_, _ = f.Write(fwd)
+			}
+			if cmd == diveNone {
+				break
+			}
+			if cmd == diveFleet {
+				return "", true
+			}
+			if dest := markAction(marks, int(cmd-'0'), a); dest != "" {
+				return dest, true // switch into the bound bubble
+			}
+		}
 	}
 }
 

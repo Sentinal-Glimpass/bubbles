@@ -437,6 +437,52 @@ func TestSendHealsWithFreshFallback(t *testing.T) {
 	}
 }
 
+// TestAttendedDiveHoldsUntilLeave: while the operator's terminal is attached
+// and dived into a bubble, NOTHING is typed into it — not on a typing pause,
+// not by recovery, not even for urgent mail. The backlog lands when they leave.
+// A detached terminal (stale focus) falls back to normal delivery.
+func TestAttendedDiveHoldsUntilLeave(t *testing.T) {
+	fr := runner.NewFake()
+	k := New(fr)
+	k.RelaunchProbe = 0
+	k.TypingWindow = time.Nanosecond // the operator is NOT typing: only the dive holds
+	attached := true
+	k.OperatorAttached = func() bool { return attached }
+
+	a, _ := k.Spawn(addr.Root, "", "/tmp/a", runner.SpawnOpts{Name: "a"})
+	k.EnsureAlive(a)
+	k.SetFocus(a)
+
+	if _, err := k.Send(addr.Root, a, "urgent!", "body", 0, true); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	k.FlushHeldIfIdle()
+	k.RecoverUnread(false)
+	if w := fr.Session(a).Written(); w != "" {
+		t.Fatalf("nothing may be typed into an attended dive, got %q", w)
+	}
+	if k.Store.UnreadCount(a) != 1 {
+		t.Fatal("the message must wait in the inbox")
+	}
+
+	k.UnsetFocus(a) // operator leaves
+	if !strings.Contains(fr.Session(a).Written(), "unread") {
+		t.Fatalf("leaving must deliver the held backlog, got %q", fr.Session(a).Written())
+	}
+
+	// Stale focus from a detached terminal must not hold mail forever.
+	b, _ := k.Spawn(addr.Root, "", "/tmp/b", runner.SpawnOpts{Name: "b"})
+	k.EnsureAlive(b)
+	k.SetFocus(b)
+	attached = false
+	if _, err := k.Send(addr.Root, b, "urgent!", "body", 0, true); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !strings.Contains(fr.Session(b).Written(), "New message") {
+		t.Fatalf("a detached dive must not hold mail, got %q", fr.Session(b).Written())
+	}
+}
+
 // TestFocusHoldsWhileTyping: while the operator is ACTIVELY TYPING in a bubble,
 // incoming messages are NOT injected (that would submit their half-typed line);
 // they stay in the inbox and are flushed once typing pauses (FlushHeldIfIdle).
